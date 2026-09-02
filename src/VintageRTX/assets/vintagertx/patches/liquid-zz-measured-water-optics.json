@@ -1,0 +1,42 @@
+[
+  {
+    "file": "game:blocktypes/liquid/water.json",
+    "op": "addMerge",
+    "path": "/attributes/vintageRtxOptics",
+    "value": {
+      "ior": 1.333,
+      "absorptionRgb": [0.3594, 0.0654, 0.00922],
+      "scatteringRgb": [0.0007, 0.0015, 0.0035]
+    }
+  },
+  {
+    "file": "game:blocktypes/liquid/rapidwater.json",
+    "op": "addMerge",
+    "path": "/attributes/vintageRtxOptics",
+    "value": {
+      "ior": 1.333,
+      "absorptionRgb": [0.3594, 0.0654, 0.00922],
+      "scatteringRgb": [0.0007, 0.0015, 0.0035]
+    }
+  },
+  {
+    "file": "game:blocktypes/liquid/rivulet.json",
+    "op": "addMerge",
+    "path": "/attributes/vintageRtxOptics",
+    "value": {
+      "ior": 1.333,
+      "absorptionRgb": [0.3594, 0.0654, 0.00922],
+      "scatteringRgb": [0.0007, 0.0015, 0.0035]
+    }
+  },
+  {
+    "file": "game:itemtypes/liquid/waterportion.json",
+    "op": "addMerge",
+    "path": "/attributes/vintageRtxOptics",
+    "value": {
+      "ior": 1.333,
+      "absorptionRgb": [0.3594, 0.0654, 0.00922],
+      "scatteringRgb": [0.0007, 0.0015, 0.0035]
+    }
+  }
+]

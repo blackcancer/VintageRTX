@@ -1,0 +1,12 @@
+<Project>
+  <PropertyGroup>
+    <VintageStoryPath Condition="'$(VINTAGE_STORY)' != '' and Exists('$(VINTAGE_STORY)\VintagestoryAPI.dll')">$([System.IO.Path]::GetFullPath('$(VINTAGE_STORY)'))</VintageStoryPath>
+    <VintageStoryPath Condition="'$(VintageStoryPath)' == '' and '$(VINTAGE_STORY)' != '' and Exists('$(VINTAGE_STORY)\..\VintagestoryAPI.dll')">$([System.IO.Path]::GetFullPath('$(VINTAGE_STORY)\..'))</VintageStoryPath>
+  </PropertyGroup>
+
+  <Target Name="ValidateVintageStoryPath" BeforeTargets="ResolveAssemblyReferences" Condition="'$(MSBuildProjectName)' == 'VintageRTX'">
+    <Error Condition="'$(VintageStoryPath)' == '' or !Exists('$(VintageStoryPath)\VintagestoryAPI.dll')"
+           Text="Vintage Story was not found. Set VINTAGE_STORY to the game installation directory." />
+  </Target>
+</Project>
+

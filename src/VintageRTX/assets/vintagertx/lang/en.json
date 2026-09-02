@@ -1,0 +1,8 @@
+{
+  "loaded": "VintageRTX display pipeline loaded.",
+  "effects-enabled": "VintageRTX effects enabled.",
+  "effects-disabled": "VintageRTX effects disabled.",
+  "config-reloaded": "VintageRTX configuration reloaded.",
+  "lighting-enabled": "VintageRTX screen-space lighting enabled.",
+  "lighting-disabled": "VintageRTX screen-space lighting disabled."
+}

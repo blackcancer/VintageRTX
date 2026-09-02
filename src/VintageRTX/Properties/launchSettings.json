@@ -1,0 +1,36 @@
+{
+  "profiles": {
+    "Vintage Story Client": {
+      "commandName": "Executable",
+      "executablePath": "$(VintageStoryPath)\\Vintagestory.exe",
+      "commandLineArgs": "--openWorld \"foggy village world\" --tracelog --addModPath \"$(ProjectDir)bin\\$(Configuration)\\Mods\" --addOrigin \"$(ProjectDir)assets\"",
+      "workingDirectory": "$(VintageStoryPath)",
+      "environmentVariables": {
+        "VINTAGERTX_AUTO_CAPTURE": "1",
+        "VINTAGERTX_AUTO_GAMEMODE": "2",
+        "VINTAGERTX_AUTO_BENCHMARK": "1",
+        "VINTAGERTX_TEST_TIME_HOUR": "12",
+        "VINTAGERTX_TEST_CLEAR_WEATHER": "1"
+      }
+    },
+    "Vintage Story Client (quick creative)": {
+      "commandName": "Executable",
+      "executablePath": "$(VintageStoryPath)\\Vintagestory.exe",
+      "commandLineArgs": "--openWorld \"creative\" --tracelog --addModPath \"$(ProjectDir)bin\\$(Configuration)\\Mods\" --addOrigin \"$(ProjectDir)assets\"",
+      "workingDirectory": "$(VintageStoryPath)",
+      "environmentVariables": {
+        "VINTAGERTX_AUTO_CAPTURE": "1",
+        "VINTAGERTX_AUTO_GAMEMODE": "2",
+        "VINTAGERTX_AUTO_BENCHMARK": "1",
+        "VINTAGERTX_TEST_TIME_HOUR": "12",
+        "VINTAGERTX_TEST_CLEAR_WEATHER": "1"
+      }
+    },
+    "Vintage Story Client (menu)": {
+      "commandName": "Executable",
+      "executablePath": "$(VintageStoryPath)\\Vintagestory.exe",
+      "commandLineArgs": "--tracelog --addModPath \"$(ProjectDir)bin\\$(Configuration)\\Mods\" --addOrigin \"$(ProjectDir)assets\"",
+      "workingDirectory": "$(VintageStoryPath)"
+    }
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "vintagertx:title": "VintageRTX",
+  "vintagertx:description": "Advanced graphics enhancements for Vintage Story",
+
+  "vintagertx:commands.description": "VintageRTX commands",
+  "vintagertx:commands.reload": "Reload shaders",
+  "vintagertx:commands.reload.success": "Shaders reloaded successfully",
+  "vintagertx:commands.reload.error": "Error reloading shaders: {0}",
+
+  "vintagertx:commands.toggle": "Toggle RTX effects",
+  "vintagertx:commands.toggle.enabled": "RTX effects enabled",
+  "vintagertx:commands.toggle.disabled": "RTX effects disabled",
+
+  "vintagertx:commands.status": "Show effect status",
+  "vintagertx:commands.status.format": "VintageRTX Status:\n- Effects: {0}\n- Modified shaders: {1}\n- Normal Mapping: {2} (Strength: {3})\n- SSR: {4} (Quality: {5})\n- Ray Tracing: {6}\n- Preset: {7}",
+
+  "vintagertx:commands.preset": "Change quality preset (low/medium/high/ultra)",
+  "vintagertx:commands.preset.invalid": "Invalid preset. Use: low, medium, high, or ultra",
+  "vintagertx:commands.preset.changed": "Quality preset changed to: {0}",
+
+  "vintagertx:commands.config": "Reload configuration",
+  "vintagertx:commands.config.reloaded": "Configuration reloaded",
+
+  "vintagertx:status.enabled": "Enabled",
+  "vintagertx:status.disabled": "Disabled",
+
+  "vintagertx:loading": "Initializing VintageRTX...",
+  "vintagertx:loaded": "VintageRTX loaded successfully",
+  "vintagertx:error.harmony": "Error applying Harmony patches: {0}",
+  "vintagertx:error.shader": "Error modifying shader {0}: {1}",
+
+  "vintagertx:config.created": "Default configuration created",
+  "vintagertx:config.loaded": "Configuration loaded",
+  "vintagertx:config.saved": "Configuration saved",
+  "vintagertx:config.error.load": "Error loading configuration: {0}",
+  "vintagertx:config.error.save": "Error saving configuration: {0}",
+
+  "vintagertx:quality.reduced": "Quality reduced to: {0}",
+  "vintagertx:quality.increased": "Quality increased to: {0}",
+
+  "vintagertx:shader.intercepted": "Intercepting shader: {0}",
+  "vintagertx:shader.modified": "Shader modified: {0}",
+  "vintagertx:shader.error": "Error in shader modification: {0}"
+}

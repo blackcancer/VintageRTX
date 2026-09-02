@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vintagertx.local/schema/pbr-manifest-v3.schema.json",
+  "title": "VintageRTX PBR pack manifest v3",
+  "description": "Offline PBR ledger. Every map is a native sidecar at assets/<source-domain>/<source-path-with-_n,_r,_m,_e-suffix>. The manifest remains at assets/<packdomain>/config/vintagertx/pbr-manifest.json.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "schemaVersion", "pack", "sourceMods", "generator", "textures"],
+  "properties": {
+    "schema": { "const": "vintagertx.pbr-manifest" },
+    "schemaVersion": { "const": 3 },
+    "pack": { "$ref": "#/$defs/identity" },
+    "sourceMods": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["modId", "version", "origins", "domains"],
+        "properties": {
+          "modId": { "type": "string", "pattern": "^[a-z0-9]{2,64}$" },
+          "version": { "type": "string" },
+          "origins": {
+            "type": "array",
+            "items": { "type": "string", "pattern": "^[a-z0-9]{2,64}$" },
+            "uniqueItems": true
+          },
+          "domains": {
+            "type": "array",
+            "items": { "type": "string", "pattern": "^[a-z0-9]{2,64}$" },
+            "uniqueItems": true
+          }
+        }
+      }
+    },
+    "generator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "execution"],
+      "properties": {
+        "id": { "type": "string" },
+        "version": { "type": "string" },
+        "execution": { "const": "offline-only" }
+      }
+    },
+    "textures": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["source", "normal", "roughness", "metallic", "emissive", "profile", "width", "height"],
+        "properties": {
+          "source": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["modId", "modVersion", "origin", "domain", "path", "sha256"],
+            "properties": {
+              "modId": { "type": "string", "pattern": "^[a-z0-9]{2,64}$" },
+              "modVersion": { "type": "string" },
+              "origin": { "type": "string", "pattern": "^[a-z0-9]{2,64}$" },
+              "domain": { "type": "string", "pattern": "^[a-z0-9]{2,64}$" },
+              "path": { "type": "string", "pattern": "^textures/.+\\.png$" },
+              "sha256": { "$ref": "#/$defs/sha256" }
+            }
+          },
+          "normal": { "$ref": "#/$defs/map" },
+          "roughness": { "$ref": "#/$defs/map" },
+          "metallic": { "$ref": "#/$defs/map" },
+          "emissive": { "$ref": "#/$defs/map" },
+          "profile": { "type": "string" },
+          "width": { "type": "integer", "minimum": 1 },
+          "height": { "type": "integer", "minimum": 1 }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["modId", "version"],
+      "properties": {
+        "modId": { "type": "string", "pattern": "^[a-z0-9]{2,64}$" },
+        "version": { "type": "string" }
+      }
+    },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "map": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["asset", "sha256", "encoding"],
+      "properties": {
+        "asset": { "type": "string", "pattern": "^[a-z0-9]{2,64}:textures/.+_[nrme]\\.png$" },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "encoding": { "type": "string" }
+      }
+    }
+  }
+}

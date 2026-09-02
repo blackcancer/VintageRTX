@@ -1,0 +1,243 @@
+{
+  "schemaVersion": 1,
+  "worldScale": {
+    "metresPerBlock": 1.0,
+    "status": "VintageRTX calibration convention",
+    "note": "World positions are expressed in blocks by the game API. VintageRTX deliberately maps one block to one metre before evaluating SI equations; this is not claimed as an engine guarantee."
+  },
+  "engineInputCalibration": {
+    "windMetresPerSecondPerEngineUnit": 8.0,
+    "status": "VintageRTX renderer calibration",
+    "note": "GetWindSpeedAt exposes a vector but the public API does not specify SI units. This explicit conversion is therefore a renderer calibration, not a measured Vintage Story constant; the physical wave equations consume the converted m/s value."
+  },
+  "spectralApproximation": {
+    "linearRgbRepresentativeWavelengthsNm": [650, 550, 450],
+    "extinctionUnit": "m^-1",
+    "law": "T(lambda,d)=exp(-(absorption(lambda)+outScattering(lambda))*d)"
+  },
+  "sources": {
+    "iapws-water-ior-1997": {
+      "kind": "international formulation",
+      "title": "Release on the Refractive Index of Ordinary Water Substance as a Function of Wavelength, Temperature and Pressure",
+      "url": "https://iapws.org/public/documents/cMTlA/rindex.pdf",
+      "note": "Refractive index depends on wavelength, temperature and density; 589 nm is retained as the profile reference wavelength."
+    },
+    "pope-fry-water-absorption-1997": {
+      "kind": "peer-reviewed measurement",
+      "title": "Absorption spectrum (380-700 nm) of pure water. II. Integrating cavity measurements",
+      "doi": "10.1364/AO.36.008710",
+      "url": "https://pubmed.ncbi.nlm.nih.gov/18264420/",
+      "note": "Napierian absorption coefficients measured for pure water near 22 C."
+    },
+    "nasa-ocean-optics-pure-water-2003": {
+      "kind": "measurement protocol and reference table",
+      "title": "Ocean Optics Protocols for Satellite Ocean Color Sensor Validation, Revision 4, Volume IV",
+      "url": "https://ntrs.nasa.gov/api/citations/20030093642/downloads/20030093642.pdf",
+      "note": "Reference table of pure-water absorption and molecular scattering coefficients. VintageRTX samples its 650, 550 and 450 nm rows for the linear-RGB spectral approximation."
+    },
+    "cox-munk-water-slope-1954": {
+      "kind": "measured sea-surface slope distribution",
+      "title": "Measurement of the Roughness of the Sea Surface from Photographs of the Sun's Glitter",
+      "url": "https://userpages.umbc.edu/~martins/phys650/Cox%20and%20Munk%20Glint%20paper.pdf",
+      "note": "For a clean water surface, total mean-square slope is 0.003 + 0.00512 W with wind W in m/s at 41 ft. VintageRTX uses only the wind-driven 0.00512 W increment, because a game lake has no guaranteed background ocean swell."
+    },
+    "quan-fry-seawater-ior-1995": {
+      "kind": "peer-reviewed measurement and correlation",
+      "title": "Empirical equation for the index of refraction of seawater",
+      "doi": "10.1364/AO.34.003477",
+      "url": "https://opg.optica.org/ao/abstract.cfm?uri=ao-34-18-3477",
+      "note": "Index is a function of salinity, temperature and wavelength."
+    },
+    "iapws-seawater-surface-2019": {
+      "kind": "international guideline",
+      "title": "Guideline on the Surface Tension of Seawater",
+      "url": "https://iapws.org/documents/release/Seawater-Surf",
+      "note": "Surface tension correlation as a function of salinity and temperature."
+    },
+    "tyowua-honey-2023": {
+      "kind": "peer-reviewed measurement",
+      "title": "Influence of particle fluorination on the stability of honey foam",
+      "doi": "10.3389/frsfm.2023.1163393",
+      "url": "https://www.frontiersin.org/journals/soft-matter/articles/10.3389/frsfm.2023.1163393/full",
+      "note": "At 30 C: density 1496 kg/m3, refractive index 1.481, viscosity 7.85 Pa s and surface tension 0.0801 N/m for the measured honey."
+    },
+    "oroian-honey-2013": {
+      "kind": "peer-reviewed temperature study",
+      "title": "Measurement, prediction and correlation of density, viscosity, surface tension and ultrasonic velocity of different honey types at different temperatures",
+      "doi": "10.1016/j.jfoodeng.2013.05.029",
+      "url": "https://www.sciencedirect.com/science/article/pii/S0260877413002641",
+      "note": "Supports temperature-dependent honey transport properties rather than a normalized viscosity slider."
+    },
+    "aernouts-raw-milk-optics-2015": {
+      "kind": "peer-reviewed measurement",
+      "title": "Visible and near-infrared bulk optical properties of raw milk",
+      "doi": "10.3168/jds.2015-9630",
+      "url": "https://www.journalofdairyscience.org/article/S0022-0302(15)00513-5/fulltext",
+      "note": "Measured bulk absorption, scattering and anisotropy spectra; optical coefficients vary with fat, casein and globule size."
+    },
+    "venkataswami-milk-surface-1961": {
+      "kind": "peer-reviewed measurement",
+      "title": "Studies on surface tension of milk",
+      "url": "https://documentsdelivered.com/source/065/335/065335144.php",
+      "note": "Mean cow milk surface tension 0.04755 N/m at 20 C across 30 samples."
+    },
+    "orawan-oils-2017": {
+      "kind": "peer-reviewed measurement",
+      "title": "Density, viscosity, and surface tension of five vegetable oils at elevated temperatures: Measurement and modeling",
+      "doi": "10.1080/10942912.2017.1360905",
+      "url": "https://www.tandfonline.com/doi/full/10.1080/10942912.2017.1360905",
+      "note": "Measured density, dynamic viscosity and surface tension from 23 C to the smoke point for five edible oils."
+    },
+    "liu-edible-oil-optics-2015": {
+      "kind": "peer-reviewed measurement",
+      "title": "Optical properties of edible oils",
+      "doi": "10.1364/AO.54.003886",
+      "url": "https://opg.optica.org/ao/abstract.cfm?uri=ao-54-13-3886",
+      "note": "Measured refractive index and absorption from 300 to 2500 nm between 20 and 80 C."
+    },
+    "nist-ethanol-viscosity-2023": {
+      "kind": "reference correlation",
+      "title": "Reference Correlation for the Viscosity of Ethanol from the Triple Point to 620 K and up to 102 MPa",
+      "doi": "10.1007/s10765-022-03149-z",
+      "url": "https://www.nist.gov/publications/reference-correlation-viscosity-ethanol-triple-point-620-k-and-102-mpa",
+      "note": "Critically evaluated dynamic-viscosity correlation; mixtures must not reuse pure-ethanol values blindly."
+    },
+    "goncalves-ethanol-2010": {
+      "kind": "peer-reviewed measurement",
+      "title": "PVT, viscosity, and surface tension of ethanol: New measurements and literature data evaluation",
+      "doi": "10.1016/j.jct.2010.03.022",
+      "url": "https://trc.nist.gov/ThermoML/10.1016/j.jct.2010.03.022.html",
+      "note": "Measured density, viscosity and surface tension for high-purity ethanol over temperature and pressure ranges."
+    },
+    "pioli-basalt-2012": {
+      "kind": "peer-reviewed experimental scaling",
+      "title": "Experimental constraints on the outgassing dynamics of basaltic magmas",
+      "doi": "10.1029/2011JB008392",
+      "url": "https://agupubs.onlinelibrary.wiley.com/doi/full/10.1029/2011JB008392",
+      "note": "Representative basaltic magma: density about 2800 kg/m3, viscosity 1-100 Pa s, surface tension about 0.4 N/m."
+    },
+    "brogi-magmafoam-2022": {
+      "kind": "peer-reviewed physical model",
+      "title": "MagmaFOAM-1.0: a modular framework for the simulation of magmatic systems",
+      "doi": "10.5194/gmd-15-3773-2022",
+      "url": "https://gmd.copernicus.org/articles/15/3773/2022/gmd-15-3773-2022.html",
+      "note": "Confirms density, viscosity and surface tension as constitutive properties dependent on temperature, composition and phase distribution."
+    },
+    "chevrel-basalt-emissivity-2022": {
+      "kind": "peer-reviewed spectral measurement",
+      "title": "High temperature spectral emissivity of glass and crystal-bearing basalts",
+      "url": "https://ris.utwente.nl/ws/files/283379689/1_s2.0_S0377027322001548_main.pdf",
+      "note": "Thermal emission is based on temperature and spectral emissivity, not an arbitrary orange RGB multiplier."
+    }
+  },
+  "basisFamilies": {
+    "pure-water-293k": {
+      "referenceTemperatureK": 293.15,
+      "referencePressurePa": 101325,
+      "densityKgM3": 998.2,
+      "dynamicViscosityPaS": 0.001002,
+      "surfaceTensionNm": 0.07275,
+      "refractiveIndex": { "value": 1.333, "wavelengthNm": 589 },
+      "absorptionRgbM1": [0.3594, 0.0654, 0.00922],
+      "outScatteringRgbM1": [0.0007, 0.0015, 0.0035],
+      "sourceIds": ["iapws-water-ior-1997", "pope-fry-water-absorption-1997", "nasa-ocean-optics-pure-water-2003", "cox-munk-water-slope-1954"],
+      "confidence": "measured-reference"
+    },
+    "seawater-35gkg-293k": {
+      "referenceTemperatureK": 293.15,
+      "referencePressurePa": 101325,
+      "salinityGKg": 35.0,
+      "densityKgM3": 1024.8,
+      "dynamicViscosityPaS": 0.00108,
+      "surfaceTensionNm": 0.0735,
+      "refractiveIndex": { "value": 1.339, "wavelengthNm": 589 },
+      "sourceIds": ["quan-fry-seawater-ior-1995", "iapws-seawater-surface-2019"],
+      "confidence": "correlated-reference"
+    },
+    "natural-honey-303k": {
+      "referenceTemperatureK": 303.15,
+      "densityKgM3": 1496.0,
+      "dynamicViscosityPaS": 7.85,
+      "surfaceTensionNm": 0.0801,
+      "refractiveIndex": { "value": 1.481, "wavelengthNm": 589 },
+      "sourceIds": ["tyowua-honey-2023", "oroian-honey-2013"],
+      "confidence": "measured-sample"
+    },
+    "raw-cow-milk-293k": {
+      "referenceTemperatureK": 293.15,
+      "densityKgM3": 1030.0,
+      "dynamicViscosityPaS": 0.0020,
+      "surfaceTensionNm": 0.04755,
+      "refractiveIndex": { "value": 1.35, "wavelengthNm": 589 },
+      "sourceIds": ["aernouts-raw-milk-optics-2015", "venkataswami-milk-surface-1961"],
+      "confidence": "measured-range-representative",
+      "note": "Bulk optical coefficients must be selected from measured spectra according to fat/casein content; this scalar profile is not universal milk."
+    },
+    "vegetable-oil-296k": {
+      "referenceTemperatureK": 296.15,
+      "densityKgM3": 918.0,
+      "dynamicViscosityPaS": 0.065,
+      "surfaceTensionNm": 0.032,
+      "refractiveIndex": { "value": 1.47, "wavelengthNm": 589 },
+      "sourceIds": ["orawan-oils-2017", "liu-edible-oil-optics-2015"],
+      "confidence": "measured-family-representative",
+      "note": "The exact oil type should override this family representative through its own mod asset."
+    },
+    "ethanol-water-293k": {
+      "referenceTemperatureK": 293.15,
+      "densityKgM3": 789.5,
+      "dynamicViscosityPaS": 0.00120,
+      "surfaceTensionNm": 0.0224,
+      "refractiveIndex": { "value": 1.361, "wavelengthNm": 589 },
+      "sourceIds": ["nist-ethanol-viscosity-2023", "goncalves-ethanol-2010"],
+      "confidence": "pure-ethanol-reference",
+      "note": "Game alcohol concentration is not published; density, viscosity, IOR and surface tension require mixture interpolation once concentration is known."
+    },
+    "basaltic-melt-1473k": {
+      "referenceTemperatureK": 1473.15,
+      "densityKgM3": 2800.0,
+      "dynamicViscosityPaS": 10.0,
+      "dynamicViscosityRangePaS": [1.0, 100.0],
+      "surfaceTensionNm": 0.4,
+      "thermalEmissivity": 0.8,
+      "sourceIds": ["pioli-basalt-2012", "brogi-magmafoam-2022", "chevrel-basalt-emissivity-2022"],
+      "confidence": "composition-dependent-representative",
+      "note": "Visible emission must be computed from Planck radiance at the current temperature and spectral emissivity."
+    }
+  },
+  "profileAssignments": {
+    "water": { "basis": "pure-water-293k", "derivation": "direct" },
+    "rapid-water": { "basis": "pure-water-293k", "derivation": "same material; flow changes geometry only" },
+    "rivulet": { "basis": "pure-water-293k", "derivation": "same material; thin-film path length changes optics" },
+    "boiling-water": { "basis": "pure-water-293k", "derivation": "temperature correction plus unresolved vapor scattering" },
+    "saltwater": { "basis": "seawater-35gkg-293k", "derivation": "direct" },
+    "brine": { "basis": "seawater-35gkg-293k", "derivation": "salinity extrapolation required" },
+    "limewater": { "basis": "pure-water-293k", "derivation": "aqueous carrier plus solute absorption" },
+    "slaked-lime-slurry": { "basis": "pure-water-293k", "derivation": "aqueous carrier plus measured-particle scattering required" },
+    "honey": { "basis": "natural-honey-303k", "derivation": "direct measured sample" },
+    "jam-honey": { "basis": "natural-honey-303k", "derivation": "fruit concentration correction required" },
+    "plant-and-rendered-oil": { "basis": "vegetable-oil-296k", "derivation": "oil-family representative; exact item may override" },
+    "milk": { "basis": "raw-cow-milk-293k", "derivation": "composition-dependent measured spectra" },
+    "curdled-milk": { "basis": "raw-cow-milk-293k", "derivation": "protein aggregation scattering correction required" },
+    "curd": { "basis": "raw-cow-milk-293k", "derivation": "dense multiphase material; liquid solver disabled" },
+    "whey-curd": { "basis": "raw-cow-milk-293k", "derivation": "dense multiphase material; liquid solver disabled" },
+    "cottage-cheese": { "basis": "raw-cow-milk-293k", "derivation": "dense multiphase material; liquid solver disabled" },
+    "alcohol": { "basis": "ethanol-water-293k", "derivation": "mixture concentration required" },
+    "distilled-spirit": { "basis": "ethanol-water-293k", "derivation": "mixture concentration required" },
+    "cider": { "basis": "pure-water-293k", "derivation": "aqueous carrier plus measured beverage spectrum required" },
+    "vinegar": { "basis": "pure-water-293k", "derivation": "water-acetic-acid mixture" },
+    "raw-fruit-juice": { "basis": "pure-water-293k", "derivation": "aqueous carrier plus pulp scattering and pigment absorption" },
+    "mineral-acid": { "basis": "pure-water-293k", "derivation": "solution identity and concentration required from supplying mod" },
+    "aqueous-dye": { "basis": "pure-water-293k", "derivation": "Beer-Lambert solute spectrum required from supplying mod" },
+    "pitch-glue": { "basis": "vegetable-oil-296k", "derivation": "heavy-organic surrogate; supplying mod should override" },
+    "tar": { "basis": "vegetable-oil-296k", "derivation": "heavy-organic surrogate; supplying mod should override" },
+    "weak-tannin": { "basis": "pure-water-293k", "derivation": "aqueous carrier plus concentration-dependent tannin absorption" },
+    "strong-tannin": { "basis": "pure-water-293k", "derivation": "aqueous carrier plus concentration-dependent tannin absorption" },
+    "diluted-alum": { "basis": "pure-water-293k", "derivation": "dilute aqueous solution" },
+    "diluted-borax": { "basis": "pure-water-293k", "derivation": "dilute aqueous solution" },
+    "diluted-cassiterite": { "basis": "pure-water-293k", "derivation": "aqueous suspension; particle spectrum required" },
+    "diluted-chromite": { "basis": "pure-water-293k", "derivation": "aqueous suspension; particle spectrum required" },
+    "metal-sulfate-solution": { "basis": "pure-water-293k", "derivation": "ion identity and concentration required" },
+    "lava": { "basis": "basaltic-melt-1473k", "derivation": "temperature and composition dependent" }
+  }
+}

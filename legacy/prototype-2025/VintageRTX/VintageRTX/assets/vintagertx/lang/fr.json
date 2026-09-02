@@ -1,0 +1,44 @@
+{
+  "vintagertx:title": "VintageRTX",
+  "vintagertx:description": "Améliorations graphiques avancées pour Vintage Story",
+
+  "vintagertx:commands.description": "Commandes VintageRTX",
+  "vintagertx:commands.reload": "Recharger les shaders",
+  "vintagertx:commands.reload.success": "Shaders rechargés avec succès",
+  "vintagertx:commands.reload.error": "Erreur lors du rechargement des shaders : {0}",
+
+  "vintagertx:commands.toggle": "Activer/désactiver les effets RTX",
+  "vintagertx:commands.toggle.enabled": "Effets RTX activés",
+  "vintagertx:commands.toggle.disabled": "Effets RTX désactivés",
+
+  "vintagertx:commands.status": "Afficher le statut des effets",
+  "vintagertx:commands.status.format": "Statut VintageRTX :\n- Effets : {0}\n- Shaders modifiés : {1}\n- Normal Mapping : {2} (Force : {3})\n- SSR : {4} (Qualité : {5})\n- Ray Tracing : {6}\n- Préréglage : {7}",
+
+  "vintagertx:commands.preset": "Changer le préréglage de qualité (low/medium/high/ultra)",
+  "vintagertx:commands.preset.invalid": "Préréglage invalide. Utilisez : low, medium, high ou ultra",
+  "vintagertx:commands.preset.changed": "Préréglage de qualité changé pour : {0}",
+
+  "vintagertx:commands.config": "Recharger la configuration",
+  "vintagertx:commands.config.reloaded": "Configuration rechargée",
+
+  "vintagertx:status.enabled": "Activé",
+  "vintagertx:status.disabled": "Désactivé",
+
+  "vintagertx:loading": "Initialisation de VintageRTX...",
+  "vintagertx:loaded": "VintageRTX chargé avec succès",
+  "vintagertx:error.harmony": "Erreur lors de l'application des patches Harmony : {0}",
+  "vintagertx:error.shader": "Erreur lors de la modification du shader {0} : {1}",
+
+  "vintagertx:config.created": "Configuration par défaut créée",
+  "vintagertx:config.loaded": "Configuration chargée",
+  "vintagertx:config.saved": "Configuration sauvegardée",
+  "vintagertx:config.error.load": "Erreur lors du chargement de la configuration : {0}",
+  "vintagertx:config.error.save": "Erreur lors de la sauvegarde de la configuration : {0}",
+
+  "vintagertx:quality.reduced": "Qualité réduite à : {0}",
+  "vintagertx:quality.increased": "Qualité augmentée à : {0}",
+
+  "vintagertx:shader.intercepted": "Interception du shader : {0}",
+  "vintagertx:shader.modified": "Shader modifié : {0}",
+  "vintagertx:shader.error": "Erreur dans la modification du shader : {0}"
+}
