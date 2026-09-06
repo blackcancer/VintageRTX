@@ -16,6 +16,36 @@ namespace VintageRTX.Test;
 [DoNotParallelize]
 public sealed class FilmicDisplayRendererLogicCoverageTests
 {
+    /// <summary>Ensures a provisional CPU scene survives until it is safe to publish atomically.</summary>
+    [TestMethod]
+    public void DeferredVoxelSnapshotIsRetainedUntilSceneSettles()
+    {
+        VoxelSceneSnapshot expected = default;
+        VoxelSceneSnapshot pending = expected;
+        bool available = true;
+
+        Assert.IsFalse(FilmicDisplayRenderer.TrySelectSettledVoxelSnapshot(
+            ref pending,
+            ref available,
+            generationStable: false,
+            out _));
+        Assert.IsTrue(available);
+
+        Assert.IsTrue(FilmicDisplayRenderer.TrySelectSettledVoxelSnapshot(
+            ref pending,
+            ref available,
+            generationStable: true,
+            out VoxelSceneSnapshot selected));
+        Assert.AreEqual(expected, selected);
+        Assert.IsFalse(available);
+
+        Assert.IsFalse(FilmicDisplayRenderer.TrySelectSettledVoxelSnapshot(
+            ref pending,
+            ref available,
+            generationStable: true,
+            out _));
+    }
+
     /// <summary>
     /// Verifies the coordinator Properties Early Exits Fault Reset And Dispose Are Stable regression contract against deterministic fixture data.
     /// </summary>
@@ -30,6 +60,33 @@ public sealed class FilmicDisplayRendererLogicCoverageTests
         CollectionAssert.Contains(
             harness.RegisteredRendererStages,
             EnumRenderStage.AfterPostProcessing);
+        CollectionAssert.Contains(harness.RegisteredRendererStages, EnumRenderStage.ShadowFar);
+        CollectionAssert.Contains(harness.RegisteredRendererStages, EnumRenderStage.ShadowNear);
+        renderer.OnRenderFrame(0.016f, EnumRenderStage.ShadowFar);
+        Assert.IsTrue(GetField<bool>(renderer, "nativeShadowMatrixFarReady"));
+        CollectionAssert.AreEqual(
+            harness.Uniforms.ToShadowMapSpaceMatrixFar,
+            GetField<float[]>(renderer, "nativeShadowMatrixFar"));
+        Vec3d capturedFarReference = GetField<Vec3d>(renderer, "nativeShadowReferenceFar");
+        Assert.AreEqual(harness.Uniforms.playerReferencePos.X, capturedFarReference.X, 0.0);
+        Assert.AreEqual(harness.Uniforms.playerReferencePos.Y, capturedFarReference.Y, 0.0);
+        Assert.AreEqual(harness.Uniforms.playerReferencePos.Z, capturedFarReference.Z, 0.0);
+        Assert.AreEqual(96.0f, GetField<float>(renderer, "nativeShadowRangeFar"));
+        renderer.OnRenderFrame(0.016f, EnumRenderStage.ShadowNear);
+        Assert.IsTrue(GetField<bool>(renderer, "nativeShadowMatrixNearReady"));
+        Assert.AreEqual(32.0f, GetField<float>(renderer, "nativeShadowRangeNear"));
+        harness.Uniforms.ToShadowMapSpaceMatrixNear[3] = float.NaN;
+        renderer.OnRenderFrame(0.016f, EnumRenderStage.ShadowNear);
+        Assert.IsFalse(GetField<bool>(renderer, "nativeShadowMatrixNearReady"));
+        harness.Uniforms.ToShadowMapSpaceMatrixNear = IdentityMatrixFloat();
+        harness.Uniforms.ShadowRangeNear = 0.0f;
+        renderer.OnRenderFrame(0.016f, EnumRenderStage.ShadowNear);
+        Assert.IsFalse(GetField<bool>(renderer, "nativeShadowMatrixNearReady"));
+        harness.Uniforms.ShadowRangeNear = 32.0f;
+        harness.Uniforms.playerReferencePos = new Vec3d(double.NaN, 80, 20);
+        renderer.OnRenderFrame(0.016f, EnumRenderStage.ShadowFar);
+        Assert.IsFalse(GetField<bool>(renderer, "nativeShadowMatrixFarReady"));
+        harness.Uniforms.playerReferencePos = new Vec3d(10, 80, 20);
         ReflectionSourceCaptureRenderer reflectionSource =
             (ReflectionSourceCaptureRenderer)renderer.ReflectionSourceRenderer;
         Assert.AreEqual(0.79, reflectionSource.RenderOrder);
@@ -95,6 +152,50 @@ public sealed class FilmicDisplayRendererLogicCoverageTests
         CollectionAssert.Contains(
             harness.UnregisteredRendererStages,
             EnumRenderStage.AfterPostProcessing);
+        CollectionAssert.Contains(harness.UnregisteredRendererStages, EnumRenderStage.ShadowFar);
+        CollectionAssert.Contains(harness.UnregisteredRendererStages, EnumRenderStage.ShadowNear);
+    }
+
+    /// <summary>Validates safe borrowing of complete native near/far solar depth attachments.</summary>
+    [TestMethod]
+    public void NativeSunShadowDepthMapsRejectIncompleteFramebuffers()
+    {
+        Assert.AreEqual(
+            default,
+            FilmicDisplayRenderer.ResolveNativeSunShadowDepthMaps(null));
+
+        List<FrameBufferRef> frameBuffers = [];
+        while (frameBuffers.Count <= (int)EnumFrameBuffer.ShadowmapNear)
+        {
+            frameBuffers.Add(new FrameBufferRef());
+        }
+
+        frameBuffers[(int)EnumFrameBuffer.ShadowmapFar] = new FrameBufferRef
+        {
+            Width = 2048,
+            Height = 2048,
+            DepthTextureId = 71
+        };
+        frameBuffers[(int)EnumFrameBuffer.ShadowmapNear] = new FrameBufferRef
+        {
+            Width = 4096,
+            Height = 4096,
+            DepthTextureId = 72,
+            Disposed = true
+        };
+        Assert.AreEqual(
+            new NativeSunShadowDepthMaps(71, 0),
+            FilmicDisplayRenderer.ResolveNativeSunShadowDepthMaps(frameBuffers));
+
+        frameBuffers[(int)EnumFrameBuffer.ShadowmapNear].Disposed = false;
+        Assert.AreEqual(
+            new NativeSunShadowDepthMaps(71, 72),
+            FilmicDisplayRenderer.ResolveNativeSunShadowDepthMaps(frameBuffers));
+        frameBuffers[(int)EnumFrameBuffer.ShadowmapFar].Width = 0;
+        frameBuffers[(int)EnumFrameBuffer.ShadowmapNear].DepthTextureId = 0;
+        Assert.AreEqual(
+            default,
+            FilmicDisplayRenderer.ResolveNativeSunShadowDepthMaps(frameBuffers));
     }
 
     /// <summary>
@@ -147,6 +248,11 @@ public sealed class FilmicDisplayRendererLogicCoverageTests
         Assert.AreEqual(0.4f, FilmicDisplayRenderer.AdvanceRainWetness(0.4f, 0.8f, float.NaN));
         Assert.IsTrue(FilmicDisplayRenderer.AdvanceRainWetness(-1.0f, 2.0f, 9.0f) > 0.0f);
         Assert.IsTrue(FilmicDisplayRenderer.AdvanceRainWetness(1.0f, 0.0f, 0.25f) < 1.0f);
+        Assert.IsFalse(FilmicDisplayRenderer.ShouldSnapDeterministicClearWeather(null, "1", "1", 0.0f));
+        Assert.IsFalse(FilmicDisplayRenderer.ShouldSnapDeterministicClearWeather("run", "0", "1", 0.0f));
+        Assert.IsFalse(FilmicDisplayRenderer.ShouldSnapDeterministicClearWeather("run", "1", "0", 0.0f));
+        Assert.IsFalse(FilmicDisplayRenderer.ShouldSnapDeterministicClearWeather("run", "1", "1", 0.1f));
+        Assert.IsTrue(FilmicDisplayRenderer.ShouldSnapDeterministicClearWeather("run", "1", "1", 0.0f));
 
         harness.Climate = new ClimateCondition { Rainfall = 0.8f, RainCloudOverlay = 0.9f };
         Invoke(renderer, "UpdateWeatherWetness", 0.1f);
@@ -171,6 +277,20 @@ public sealed class FilmicDisplayRendererLogicCoverageTests
         }
         Assert.AreEqual(0.0f, GetField<float>(renderer, "rainWetnessTarget"));
         Assert.IsTrue(harness.Logs.Any(static entry => entry.Contains("Weather wetness", StringComparison.Ordinal)));
+
+        SetField(renderer, "smoothedRainWetness", 0.8f);
+        SetField(renderer, "rainWetnessTarget", 0.0f);
+        SetField(renderer, "weatherSampleAccumulator", 0.0f);
+        using (EnvironmentScope clearReference = new(new Dictionary<string, string?>
+        {
+            ["VINTAGERTX_TEST_RUN_ID"] = "coverage-clear",
+            ["VINTAGERTX_TEST_CLEAR_WEATHER"] = "1",
+            ["VINTAGERTX_TEST_ENVIRONMENT_READY"] = "1"
+        }))
+        {
+            Invoke(renderer, "UpdateWeatherWetness", 0.0f);
+        }
+        Assert.AreEqual(0.0f, GetField<float>(renderer, "smoothedRainWetness"));
 
         int weatherLogCount = harness.Logs.Count(static entry =>
             entry.Contains("Weather wetness", StringComparison.Ordinal));
@@ -311,13 +431,13 @@ public sealed class FilmicDisplayRendererLogicCoverageTests
         SetField(monitor, "smoothedGpuMilliseconds", 4.0);
         SetField(renderer, "adaptiveOverBudgetFrames", 119);
         Invoke(renderer, "UpdateAdaptiveQuality", config, false);
-        Assert.AreEqual(1, GetField<int>(renderer, "adaptiveQualityLevel"));
+        Assert.AreEqual(2, GetField<int>(renderer, "adaptiveQualityLevel"));
 
         SetField(renderer, "adaptiveTransitionCooldownFrames", 0);
         SetField(monitor, "smoothedGpuMilliseconds", 0.4);
         SetField(renderer, "adaptiveUnderBudgetFrames", 7199);
         Invoke(renderer, "UpdateAdaptiveQuality", config, false);
-        Assert.AreEqual(0, GetField<int>(renderer, "adaptiveQualityLevel"));
+        Assert.AreEqual(1, GetField<int>(renderer, "adaptiveQualityLevel"));
 
         SetField(renderer, "adaptiveTransitionCooldownFrames", 0);
         SetField(monitor, "smoothedGpuMilliseconds", config.GpuBudgetMilliseconds * 0.8);
@@ -327,6 +447,18 @@ public sealed class FilmicDisplayRendererLogicCoverageTests
         Assert.AreEqual("high", InvokeStatic<string>("QualityLevelName", [typeof(int)], 0));
         Assert.AreEqual("balanced", InvokeStatic<string>("QualityLevelName", [typeof(int)], 1));
         Assert.AreEqual("performance", InvokeStatic<string>("QualityLevelName", [typeof(int)], 2));
+        Assert.AreEqual(
+            2,
+            FilmicDisplayRenderer.AdaptiveDowngradeTarget(0, 12.0, 8.5),
+            "A severe initial overload must settle in one transition.");
+        Assert.AreEqual(
+            1,
+            FilmicDisplayRenderer.AdaptiveDowngradeTarget(0, 9.0, 8.5),
+            "Mild pressure must retain one-tier hysteresis.");
+        Assert.AreEqual(2, FilmicDisplayRenderer.AdaptiveDowngradeTarget(1, 20.0, 8.5));
+        Assert.AreEqual(1, FilmicDisplayRenderer.AdaptiveDowngradeTarget(-4, 4.0, 8.5));
+        Assert.AreEqual(2, FilmicDisplayRenderer.AdaptiveDowngradeTarget(7, 4.0, 8.5));
+        Assert.AreEqual(1, FilmicDisplayRenderer.AdaptiveDowngradeTarget(0, 4.0, 0.0));
 
         Type[] denseSignature = [typeof(int), typeof(int), typeof(VoxelLight[])];
         Assert.IsFalse(InvokeStatic<bool>(
@@ -471,12 +603,12 @@ public sealed class FilmicDisplayRendererLogicCoverageTests
         Assert.AreEqual(0, GetField<int>(renderer, "currentDynamicLightCount"));
 
         harness.SunDirection = new Vec3f(0, 0, 0);
-        Invoke(renderer, "BindSunUniforms", harness.Config, false);
+        Invoke(renderer, "BindSunUniforms", harness.Config, false, new Vec3d(10.5, 81.6, 20.5));
         harness.SunDirection = new Vec3f(2, 3, 4);
-        Invoke(renderer, "BindSunUniforms", harness.Config, true);
+        Invoke(renderer, "BindSunUniforms", harness.Config, true, new Vec3d(10.5, 81.6, 20.5));
         harness.CalendarAvailable = false;
         harness.Uniforms.SunPosition3D = new Vec3f(0, 1, 0);
-        Invoke(renderer, "BindSunUniforms", harness.Config, true);
+        Invoke(renderer, "BindSunUniforms", harness.Config, true, new Vec3d(10.5, 81.6, 20.5));
 
         Invoke(renderer, "UpdateVoxelTexture");
         SetField(renderer, "voxelTextureReady", true);
@@ -565,9 +697,15 @@ public sealed class FilmicDisplayRendererLogicCoverageTests
         SetField(renderer, "temporalHistoryValid", true);
         SetField(renderer, "temporalMotionResetLogCooldownFrames", 10);
         harness.Entity.CameraPos.X += 1.0;
+        Assert.IsTrue(Invoke<bool>(renderer, "UpdateTemporalCameraStability"));
+        harness.Entity.Pos.X += 1.0;
         Assert.IsFalse(Invoke<bool>(renderer, "UpdateTemporalCameraStability"));
-        Assert.AreEqual(9, GetField<int>(renderer, "temporalMotionResetLogCooldownFrames"));
+        Assert.AreEqual(8, GetField<int>(renderer, "temporalMotionResetLogCooldownFrames"));
         Assert.IsFalse(GetField<bool>(renderer, "temporalHistoryValid"));
+
+        SetField(renderer, "automatedCameraLock", true);
+        harness.Entity.Pos.X += 1.0;
+        Assert.IsTrue(Invoke<bool>(renderer, "UpdateTemporalCameraStability"));
 
         harness.MousePitch = 1.0f;
         SetField(renderer, "benchmarkCameraInitialized", true);
@@ -577,6 +715,28 @@ public sealed class FilmicDisplayRendererLogicCoverageTests
         SetField(renderer, "benchmarkCameraZ", harness.Entity.Pos.Z);
         Assert.IsTrue(Invoke<bool>(renderer, "UpdateBenchmarkCameraStability"));
         Assert.AreEqual(1.0, GetField<double>(renderer, "benchmarkPitchDiagnosticMaximumDelta"), 0.0001);
+    }
+
+    /// <summary>Verifies the full-rate mirror carrier uses only the Performance resolution reduction.</summary>
+    [TestMethod]
+    public void EntityMirrorResolutionPreservesHigherQualityAndBoundsPerformance()
+    {
+        Assert.AreEqual(2, FilmicDisplayRenderer.MirrorResolutionDivisor(0));
+        Assert.AreEqual(2, FilmicDisplayRenderer.MirrorResolutionDivisor(1));
+        Assert.AreEqual(4, FilmicDisplayRenderer.MirrorResolutionDivisor(2));
+    }
+
+    /// <summary>Verifies shadow refreshes alternate opposite the stable Performance mirror carrier.</summary>
+    [TestMethod]
+    public void ShadowVisibilityRefreshCadencePreservesMotionCaptureAndHistoryOwnership()
+    {
+        Assert.IsTrue(FilmicDisplayRenderer.ShouldRefreshShadowVisibility(0, true, false, true, 2L));
+        Assert.IsTrue(FilmicDisplayRenderer.ShouldRefreshShadowVisibility(1, true, false, true, 2L));
+        Assert.IsTrue(FilmicDisplayRenderer.ShouldRefreshShadowVisibility(2, false, false, true, 2L));
+        Assert.IsTrue(FilmicDisplayRenderer.ShouldRefreshShadowVisibility(2, true, true, true, 2L));
+        Assert.IsTrue(FilmicDisplayRenderer.ShouldRefreshShadowVisibility(2, true, false, false, 2L));
+        Assert.IsTrue(FilmicDisplayRenderer.ShouldRefreshShadowVisibility(2, true, false, true, 1L));
+        Assert.IsFalse(FilmicDisplayRenderer.ShouldRefreshShadowVisibility(2, true, false, true, 2L));
     }
 
     /// <summary>
@@ -878,12 +1038,12 @@ public sealed class FilmicDisplayRendererLogicCoverageTests
 
         harness.Config.SunShadowsEnabled = false;
         harness.SunDirection = new Vec3f(1, 2, 3);
-        Invoke(renderer, "BindSunUniforms", harness.Config, true);
+        Invoke(renderer, "BindSunUniforms", harness.Config, true, new Vec3d(10.5, 81.6, 20.5));
 
         harness.SunDirection = null!;
         harness.SunColor = null!;
         harness.Uniforms.SunPosition3D = new Vec3f(0, 0, 0);
-        Invoke(renderer, "BindSunUniforms", harness.Config, true);
+        Invoke(renderer, "BindSunUniforms", harness.Config, true, new Vec3d(10.5, 81.6, 20.5));
 
         harness.Config.VoxelLightingEnabled = false;
         SetField(renderer, "voxelTextureReady", true);
@@ -1336,6 +1496,19 @@ public sealed class FilmicDisplayRendererLogicCoverageTests
         ];
     }
 
+    /// <summary>Creates the single-precision identity used by native shadow-stage doubles.</summary>
+    /// <returns>A complete column-major identity matrix.</returns>
+    private static float[] IdentityMatrixFloat()
+    {
+        return
+        [
+            1, 0, 0, 0,
+            0, 1, 0, 0,
+            0, 0, 1, 0,
+            0, 0, 0, 1
+        ];
+    }
+
     /// <summary>
     /// Supports environment Scope within the deterministic VintageRTX test infrastructure.
     /// </summary>
@@ -1410,6 +1583,7 @@ public sealed class FilmicDisplayRendererLogicCoverageTests
             IClientGameCalendar calendar = RuntimeCoverageDispatchProxy.Create<IClientGameCalendar>((method, arguments) => method.Name switch
             {
                 "get_SunPositionNormalized" => SunDirection,
+                "GetSunPosition" => SunDirection,
                 "get_SunColor" => SunColor,
                 "GetDayLightStrength" => DayLightStrength,
                 _ => RuntimeCoverageDispatchProxy.DefaultValue(method.ReturnType)
@@ -1443,13 +1617,20 @@ public sealed class FilmicDisplayRendererLogicCoverageTests
                 "get_MousePitch" => MousePitch,
                 _ => RuntimeCoverageDispatchProxy.DefaultValue(method.ReturnType)
             });
-            Uniforms = new DefaultShaderUniforms();
+            Uniforms = new DefaultShaderUniforms
+            {
+                ToShadowMapSpaceMatrixFar = IdentityMatrixFloat(),
+                ToShadowMapSpaceMatrixNear = IdentityMatrixFloat(),
+                ShadowRangeFar = 96.0f,
+                ShadowRangeNear = 32.0f,
+                playerReferencePos = new Vec3d(10, 80, 20)
+            };
             IRenderAPI render = RuntimeCoverageDispatchProxy.Create<IRenderAPI>((method, _) => method.Name switch
             {
                 "get_FrameWidth" => FrameWidth,
                 "get_FrameHeight" => FrameHeight,
-                "get_CameraMatrixOrigin" => CameraMatrix,
-                "get_PerspectiveProjectionMat" => ProjectionMatrix,
+                 "get_CameraMatrixOrigin" => CameraMatrix,
+                 "get_PerspectiveProjectionMat" => ProjectionMatrix,
                 "get_ShaderUniforms" => Uniforms,
                 "get_FrameBuffers" => FrameBuffers,
                 _ => RuntimeCoverageDispatchProxy.DefaultValue(method.ReturnType)

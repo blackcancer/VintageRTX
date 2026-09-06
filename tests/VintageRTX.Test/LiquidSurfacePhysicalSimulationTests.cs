@@ -758,13 +758,17 @@ public sealed class LiquidSurfacePhysicalSimulationTests
             arrowPacket.SubgridWaveEnergyJoules,
             1.0e-6f);
         Assert.AreEqual(
-            diagnostic.CapillaryPacketEnergyJoules,
+            diagnostic.CavityEnergyJoules + diagnostic.CapillaryPacketEnergyJoules,
             arrowPacket.RenderedPacketEnergyJoules,
             1.0e-6f);
         Assert.AreEqual(
-            diagnostic.CavityEnergyJoules + diagnostic.SplashEnergyJoules,
+            diagnostic.SplashEnergyJoules,
             arrowPacket.LocalSplashEnergyJoules,
             1.0e-6f);
+        Assert.IsTrue(
+            arrowPacket.RenderedPacketEnergyJoules
+                > diagnostic.CapillaryPacketEnergyJoules * 20.0f,
+            "Arrow cavity collapse did not release its reversible potential into the outgoing packet.");
         Assert.AreEqual(
             diagnostic.WakeEnergyJoules,
             arrowPacket.WakeEnergyJoules,
@@ -779,10 +783,12 @@ public sealed class LiquidSurfacePhysicalSimulationTests
         Assert.IsTrue(
             packetWaveNumber * arrowPacket.PeakDisplacement <= 0.35001,
             "Arrow capillary packet exceeded the linear-wave steepness limit.");
+        // The newborn physical carrier remains capped by k*a <= 0.35. The renderer may recover
+        // the additional conserved joules only after footprint-aware wavelength reconstruction.
         Assert.IsTrue(arrowPacket.PeakDisplacement is > 0.0008f and < 0.0011f);
         Assert.AreEqual(0.10f, arrowPacket.SplashRadiusWorldBlocks, 1.0e-6f);
         Assert.AreEqual(0.045f, arrowPacket.SplashReleaseSeconds, 1.0e-6f);
-        Assert.IsTrue(arrowPacket.SplashPeakDisplacement is > 0.03f and < 0.04f);
+        Assert.IsTrue(arrowPacket.SplashPeakDisplacement is > 0.025f and < 0.035f);
         Assert.IsTrue(arrowPacket.DominantWavelengthMetres < 4.0f * simulation.CellSize);
     }
 

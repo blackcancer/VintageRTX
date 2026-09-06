@@ -439,19 +439,31 @@ internal sealed class ReflectionSourceCaptureRenderer : IRenderer
                 0,
                 GetTextureParameter.TextureInternalFormat,
                 out int internalFormat);
-            if (internalFormat == 0)
-            {
-                throw new InvalidOperationException(
-                    $"Primary texture {sourceTextureId} exposes no sized internal format.");
-            }
-
-            return (PixelInternalFormat)internalFormat;
+            return RequireSizedInternalFormat(internalFormat, sourceTextureId);
         }
         finally
         {
             GL.BindTexture(TextureTarget.Texture2D, previousTextureBinding);
             GL.ActiveTexture((TextureUnit)previousActiveTexture);
         }
+    }
+
+    /// <summary>Validates one driver-reported internal format before owned storage allocation.</summary>
+    /// <param name="internalFormat">Raw OpenGL internal-format enumeration.</param>
+    /// <param name="sourceTextureId">Engine source texture used in diagnostics.</param>
+    /// <returns>The corresponding sized pixel format.</returns>
+    /// <exception cref="InvalidOperationException">The driver reports no allocated level-zero format.</exception>
+    internal static PixelInternalFormat RequireSizedInternalFormat(
+        int internalFormat,
+        int sourceTextureId)
+    {
+        if (internalFormat == 0)
+        {
+            throw new InvalidOperationException(
+                $"Primary texture {sourceTextureId} exposes no sized internal format.");
+        }
+
+        return (PixelInternalFormat)internalFormat;
     }
 
     /// <summary>Allocates one clamp-to-edge snapshot while preserving the caller's texture state.</summary>
@@ -575,7 +587,8 @@ internal sealed class ReflectionSourceCaptureRenderer : IRenderer
     {
         primary = null;
         int primaryIndex = (int)EnumFrameBuffer.Primary;
-        if (primaryIndex < 0 || frameBuffers.Count <= primaryIndex)
+        // EnumFrameBuffer.Primary is an engine-defined non-negative registry slot.
+        if (frameBuffers.Count <= primaryIndex)
         {
             reason = "the Primary framebuffer is not available";
             return false;

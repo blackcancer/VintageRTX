@@ -48,6 +48,25 @@ public sealed class DisplayShaderAssetTests
     }
 
     /// <summary>
+    /// Verifies static crossed-plane plants retain the raster carrier even when the engine does
+    /// not set a wind-animation flag for their draw call.
+    /// </summary>
+    [TestMethod]
+    public void VoxelPlantMaterialCompletesTheTerrainVegetationClassifier()
+    {
+        string fragment = DisplayShaderSource.LoadFromFileSystem(
+            AppContext.BaseDirectory).Fragment;
+
+        StringAssert.Contains(
+            fragment,
+            "int voxelMaterialBits = int(floor(voxelLighting.material.a * 255.0 + 0.5));");
+        StringAssert.Contains(
+            fragment,
+            "float voxelVegetationSurface = (voxelMaterialBits & 8) != 0 ? 1.0 : 0.0;");
+        StringAssert.Contains(fragment, "voxelVegetationSurface * (1.0 - dynamicSurface)");
+    }
+
+    /// <summary>
     /// Verifies that unresolved microfacet peaks are integrated over a finite
     /// pixel footprint and receive a continuous energy shoulder, while the
     /// clean reflection behind a first-person overlay remains inspectable.

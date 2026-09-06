@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Reflection;
+using System.Collections.Concurrent;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using Newtonsoft.Json.Linq;
 using VintageRTX.Rendering;
@@ -434,6 +435,97 @@ public sealed class VoxelSceneCoverageTests
             -1, 0, 0, 0, 0, 0, 0, 0, 0));
     }
 
+    /// <summary>Verifies distant solar coverage follows approved block view distance with bounded LOD.</summary>
+    [TestMethod]
+    public void VoxelScene_DistantTraceFollowsViewDistanceAndCoarsensBoundedly()
+    {
+        Assert.AreEqual(96, VoxelScene.ResolveRequestedSunTraceDistance(64, 96, 0));
+        Assert.AreEqual(256, VoxelScene.ResolveRequestedSunTraceDistance(80, 384, 256));
+        Assert.AreEqual(384, VoxelScene.ResolveRequestedSunTraceDistance(384, 96, 96));
+        Assert.AreEqual(640, VoxelScene.ResolveRequestedSunTraceDistance(1000, 1000, 0));
+        Assert.AreEqual(96, VoxelScene.ResolveRequestedSunTraceDistance(float.NaN, 0, 0));
+
+        Assert.AreEqual(2, VoxelScene.CalculateSunOccupancyScale(96));
+        Assert.AreEqual(4, VoxelScene.CalculateSunOccupancyScale(128));
+        Assert.AreEqual(8, VoxelScene.CalculateSunOccupancyScale(384));
+        Assert.AreEqual(16, VoxelScene.CalculateSunOccupancyScale(640));
+
+        const int distance = 640;
+        const int scale = 12;
+        Vec3f[] directions =
+        [
+            new(1, 0, 0),
+            new(-1, 0, 0),
+            new(0, 1, 0),
+            new(0, -1, 0),
+            new(0.57735026f, 0.57735026f, 0.57735026f)
+        ];
+        foreach (Vec3f direction in directions)
+        {
+            (int x, int y, int z) = VoxelScene.CalculateSunClipmapOrigin(
+                -101,
+                79,
+                -99,
+                direction,
+                distance,
+                scale);
+            Assert.AreEqual(0, x % scale);
+            Assert.AreEqual(0, y % scale);
+            Assert.AreEqual(0, z % scale);
+            Assert.IsTrue(VoxelScene.SunClipmapContainsFullTrace(
+                x,
+                y,
+                z,
+                -101,
+                79,
+                -99,
+                direction,
+                distance,
+                scale));
+        }
+
+        Assert.AreEqual((false, true), VoxelScene.ClassifyDirtyBlockVolumes(
+            500,
+            100,
+            500,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            scale));
+    }
+
+    /// <summary>Verifies coordinate-aware solar calculation, client-cache fallback, and finite normalization.</summary>
+    [TestMethod]
+    public void VoxelScene_SolarDirectionUsesAstronomicalApiAndSafeFallbacks()
+    {
+        RuntimeCoverageProbeHarness harness = new();
+        harness.SunDirection = new Vec3f(3.0f, 4.0f, 0.0f);
+        Vec3f calculated = VoxelScene.ResolveSunDirection(
+            harness.Api.World.Calendar,
+            new Vec3d(12.0, 34.0, 56.0));
+        Assert.AreEqual(0.6f, calculated.X, 0.000001f);
+        Assert.AreEqual(0.8f, calculated.Y, 0.000001f);
+
+        harness.CalendarSunCalculationAvailable = false;
+        harness.SunDirection = new Vec3f(0.0f, 0.0f, -2.0f);
+        Vec3f cached = VoxelScene.ResolveSunDirection(
+            harness.Api.World.Calendar,
+            new Vec3d());
+        Assert.AreEqual(-1.0f, cached.Z, 0.000001f);
+
+        harness.SunDirection = new Vec3f(float.NaN, 0.0f, 0.0f);
+        Vec3f invalid = VoxelScene.ResolveSunDirection(
+            harness.Api.World.Calendar,
+            new Vec3d());
+        Assert.AreEqual(1.0f, invalid.Y, 0.000001f);
+
+        Vec3f missing = VoxelScene.ResolveSunDirection(null, new Vec3d());
+        Assert.AreEqual(1.0f, missing.Y, 0.000001f);
+    }
+
     /// <summary>
     /// Verifies the dedicated liquid map covers Cinematic's 48-block radius at the recenter
     /// threshold and retains the old positive 32-block boundary as an ordinary interior column.
@@ -508,6 +600,7 @@ public sealed class VoxelSceneCoverageTests
         Assert.AreEqual("waiting for player", scene.Status);
         Assert.IsFalse(scene.IsReady);
         Assert.IsFalse(scene.IsSettled);
+        Assert.IsFalse(scene.CanPublishRetainedSnapshot);
         Assert.IsFalse(scene.TryConsumeUpload(out _));
         Assert.IsFalse(scene.TryConsumeBlockUpdates(out VoxelSceneBlockUpdate[] noBlocks));
         Assert.AreEqual(0, noBlocks.Length);
@@ -537,6 +630,7 @@ public sealed class VoxelSceneCoverageTests
         Assert.AreEqual("ready gen=7, origin=(-4,8,12), lights=0", scene.Status);
         Assert.IsTrue(scene.IsReady);
         Assert.IsFalse(scene.IsSettled, "a complete CPU generation is not settled before its full upload is consumed");
+        Assert.IsFalse(scene.CanPublishRetainedSnapshot);
         Assert.IsTrue(scene.TryConsumeUpload(out VoxelSceneSnapshot snapshot));
         Assert.AreEqual(7, snapshot.Generation);
         Assert.AreEqual(LiquidOpticalRegistry.LookupWidth * LiquidOpticalRegistry.LookupHeight
@@ -544,16 +638,17 @@ public sealed class VoxelSceneCoverageTests
         Assert.IsFalse(scene.TryConsumeUpload(out _));
 
         Assert.IsTrue(scene.IsSettled);
+        Assert.IsTrue(scene.CanPublishRetainedSnapshot);
         SetField(scene, "rebuildRequested", true);
         Assert.IsFalse(scene.IsSettled, "a requested replacement makes the current generation obsolete");
         SetField(scene, "rebuildRequested", false);
         SetField(scene, "settleRebuildPending", true);
         Assert.IsFalse(scene.IsSettled, "the delayed confirmation scan must complete before capture");
         SetField(scene, "settleRebuildPending", false);
-        HashSet<(int X, int Y, int Z)> dirtyBlocks = GetField<HashSet<(int X, int Y, int Z)>>(
+        ConcurrentDictionary<(int X, int Y, int Z), byte> dirtyBlocks = GetField<ConcurrentDictionary<(int X, int Y, int Z), byte>>(
             scene,
             "dirtyBlocks");
-        dirtyBlocks.Add((1, 2, 3));
+        dirtyBlocks.TryAdd((1, 2, 3), 0);
         Assert.IsFalse(scene.IsSettled, "incremental world edits must reach the upload queue before capture");
         dirtyBlocks.Clear();
         Assert.IsTrue(scene.IsSettled);
@@ -571,6 +666,9 @@ public sealed class VoxelSceneCoverageTests
         sunQueue.Add(new VoxelSunOccupancyUpdate(8, 9, 10, 11));
         rainQueue.Add(new VoxelRainSurfaceUpdate(12, 13, 14.0f));
         Assert.IsFalse(scene.IsSettled, "partial GPU updates are part of the stability contract");
+        Assert.IsTrue(
+            scene.CanPublishRetainedSnapshot,
+            "queued deltas already mutate the retained ready arrays and cannot deadlock its first full upload");
         Assert.IsTrue(scene.TryConsumeBlockUpdates(out VoxelSceneBlockUpdate[] blocks));
         Assert.AreEqual(1, blocks.Length);
         Assert.IsTrue(scene.TryConsumeFluidSurfaceUpdates(out VoxelFluidSurfaceUpdate[] fluid));
@@ -700,6 +798,25 @@ public sealed class VoxelSceneCoverageTests
             new Vec3f(0, 0, 0.5f), new Vec3f(1, 0, 0.5f), new Vec3f(0, 1, 0.5f),
             new TextureUv(0, 0), new TextureUv(1, 0), new TextureUv(0, 1), opaque);
         Assert.AreEqual((byte)255, coverage);
+
+        byte fullGeometricCoverage = VoxelScene.TriangleCellGeometricCoverage(
+            new Vec3f(0.125f, 0.125f, 0.5f),
+            VoxelScene.OccupancyScale,
+            new Vec3f(0, 0, 0.5f), new Vec3f(1, 0, 0.5f), new Vec3f(0, 1, 0.5f));
+        Assert.AreEqual((byte)255, fullGeometricCoverage);
+        byte edgeGeometricCoverage = VoxelScene.TriangleCellGeometricCoverage(
+            new Vec3f(0.5f, 0.5f, 0.5f),
+            VoxelScene.LightCasterScale,
+            new Vec3f(0.47f, 0.47f, 0.5f),
+            new Vec3f(0.53f, 0.47f, 0.5f),
+            new Vec3f(0.47f, 0.53f, 0.5f));
+        Assert.IsTrue(edgeGeometricCoverage is > 0 and < 255);
+        Assert.AreEqual((byte)0, VoxelScene.TriangleCellGeometricCoverage(
+            new Vec3f(0.5f, 0.5f, 0.5f),
+            VoxelScene.LightCasterScale,
+            new Vec3f(), new Vec3f(), new Vec3f()));
+        Assert.AreEqual((byte)255, VoxelScene.CombineShadowCoverage(255, 80));
+        Assert.IsTrue(VoxelScene.CombineShadowCoverage(80, 80) is > 80 and < 255);
     }
 
     /// <summary>
@@ -1014,7 +1131,7 @@ public sealed class VoxelSceneCoverageTests
         VoxelSceneSnapshot snapshot = new(
             [1], [2], 3, 4, 5, 6, 7, 8, [light], [9], [10], [11], [12], [13.0f], 14,
             [15], [16.0f], 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28,
-            29, 30, 31, 32);
+            29, 30, 31, 32, 33, 34, 35);
         VoxelSceneBlockUpdate blockUpdate = new(1, 2, 3, [4], [5], [6], [7]);
         VoxelFluidSurfaceUpdate fluidUpdate = new(8, 9, [10]);
         VoxelSunOccupancyUpdate sunUpdate = new(1, 2, 3, 4);
@@ -1023,11 +1140,14 @@ public sealed class VoxelSceneCoverageTests
         TextureAlphaCandidate alphaCandidate = new(
             new TextureAtlasPosition(), new AssetLocation("game:fixture"));
         TextureAlphaData alphaData = new(1, 1, [255]);
-        Assert.AreEqual(28, snapshot.Generation);
-        Assert.AreEqual(29, snapshot.FluidSurfaceWidth);
-        Assert.AreEqual(30, snapshot.FluidSurfaceDepth);
-        Assert.AreEqual(31, snapshot.FluidSurfaceOriginX);
-        Assert.AreEqual(32, snapshot.FluidSurfaceOriginZ);
+        Assert.AreEqual(21, snapshot.SunTraceDistance);
+        Assert.AreEqual(27, snapshot.RainSurfaceOriginX);
+        Assert.AreEqual(28, snapshot.RainSurfaceOriginZ);
+        Assert.AreEqual(31, snapshot.Generation);
+        Assert.AreEqual(32, snapshot.FluidSurfaceWidth);
+        Assert.AreEqual(33, snapshot.FluidSurfaceDepth);
+        Assert.AreEqual(34, snapshot.FluidSurfaceOriginX);
+        Assert.AreEqual(35, snapshot.FluidSurfaceOriginZ);
         Assert.AreEqual((byte)1, snapshot.Voxels[0]);
         Assert.AreEqual((byte)2, snapshot.Occupancy[0]);
         Assert.AreEqual(3, snapshot.Width);
@@ -1049,13 +1169,13 @@ public sealed class VoxelSceneCoverageTests
         Assert.AreEqual(18, snapshot.SunOccupancyHeight);
         Assert.AreEqual(19, snapshot.SunOccupancyDepth);
         Assert.AreEqual(20, snapshot.SunOccupancyScale);
-        Assert.AreEqual(21, snapshot.SunOriginX);
-        Assert.AreEqual(22, snapshot.SunOriginY);
-        Assert.AreEqual(23, snapshot.SunOriginZ);
-        Assert.AreEqual(24, snapshot.RainSurfaceWidth);
-        Assert.AreEqual(25, snapshot.RainSurfaceDepth);
-        Assert.AreEqual(26, snapshot.FluidVoxelCount);
-        Assert.AreEqual(27, snapshot.VisibleLiquidContainerCount);
+        Assert.AreEqual(22, snapshot.SunOriginX);
+        Assert.AreEqual(23, snapshot.SunOriginY);
+        Assert.AreEqual(24, snapshot.SunOriginZ);
+        Assert.AreEqual(25, snapshot.RainSurfaceWidth);
+        Assert.AreEqual(26, snapshot.RainSurfaceDepth);
+        Assert.AreEqual(29, snapshot.FluidVoxelCount);
+        Assert.AreEqual(30, snapshot.VisibleLiquidContainerCount);
         Assert.AreEqual(1, blockUpdate.LocalX);
         Assert.AreEqual(2, blockUpdate.LocalY);
         Assert.AreEqual(3, blockUpdate.LocalZ);

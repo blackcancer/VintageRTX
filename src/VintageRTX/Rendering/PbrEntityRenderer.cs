@@ -31,6 +31,10 @@ internal sealed class PbrEntityRenderer : IRenderer
     private bool overrideAvailable;
     private int sidecarOverrideCount;
     private ulong sourceAtlasRevision;
+    /// <summary>Uncommitted entity-atlas fingerprint currently accumulating stability evidence.</summary>
+    private ulong pendingAtlasRevision;
+    /// <summary>Consecutive rendered frames for which <see cref="pendingAtlasRevision"/> was unchanged.</summary>
+    private int pendingAtlasRevisionFrames;
     private PbrAtlasSafetyKind observedAtlasSafety = PbrAtlasSafetyKind.Waiting;
     private string status = "waiting for entity atlas";
 
@@ -117,6 +121,13 @@ internal sealed class PbrEntityRenderer : IRenderer
 
         if (loaded && sourceAtlasRevision == atlasSafety.Revision)
         {
+            ResetPendingAtlasRevision();
+            return;
+        }
+
+        if (loaded && !ObserveStableAtlasRevision(atlasSafety.Revision))
+        {
+            status = $"file-backed entity PBR atlas retained while revision settles ({pendingAtlasRevisionFrames}/{PbrTerrainRenderer.AtlasRevisionStabilityFrames})";
             return;
         }
 
@@ -161,6 +172,38 @@ internal sealed class PbrEntityRenderer : IRenderer
             sidecarOverrideCount,
             materialTextureUnit,
             sourceAtlasRevision);
+    }
+
+    /// <summary>
+    /// Debounces replacement entity-atlas layouts so progressive skin and texture discovery cannot
+    /// repeatedly replace normal, roughness, metallic, and emissive responses on visible entities.
+    /// </summary>
+    /// <param name="observedRevision">Current complete entity-atlas layout fingerprint.</param>
+    /// <returns>Whether the replacement layout persisted for the shared stability window.</returns>
+    private bool ObserveStableAtlasRevision(ulong observedRevision)
+    {
+        if (pendingAtlasRevision != observedRevision)
+        {
+            pendingAtlasRevision = observedRevision;
+            pendingAtlasRevisionFrames = 1;
+            return false;
+        }
+
+        pendingAtlasRevisionFrames++;
+        if (pendingAtlasRevisionFrames < PbrTerrainRenderer.AtlasRevisionStabilityFrames)
+        {
+            return false;
+        }
+
+        ResetPendingAtlasRevision();
+        return true;
+    }
+
+    /// <summary>Clears uncommitted entity-atlas revision evidence.</summary>
+    private void ResetPendingAtlasRevision()
+    {
+        pendingAtlasRevision = 0;
+        pendingAtlasRevisionFrames = 0;
     }
 
     /// <summary>Allocates and clears the RGBA8 entity material atlas through a temporary framebuffer.</summary>
@@ -333,7 +376,8 @@ internal sealed class PbrEntityRenderer : IRenderer
             emissivePng,
             targetWidth,
             targetHeight,
-            PbrTerrainRenderer.GeneratedFallbackMaximumSlope);
+            PbrTerrainRenderer.GeneratedFallbackMaximumSlope,
+            PbrMaterialProvenance.Generated);
         MarkEntitySurfacePresence(pixels);
 
         GL.ActiveTexture(TextureUnit.Texture0);
@@ -447,6 +491,7 @@ internal sealed class PbrEntityRenderer : IRenderer
     {
         ReleaseMaterialAtlas();
         sourceAtlasRevision = 0;
+        ResetPendingAtlasRevision();
         observedAtlasSafety = PbrAtlasSafetyKind.Waiting;
     }
 }

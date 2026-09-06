@@ -51,14 +51,15 @@ internal static class ProjectileLiquidCollisionPatch
         collisionSink = sink;
         harmony = new Harmony(HarmonyId);
         HashSet<MethodInfo> targets = [];
-        MethodInfo? baseCallback = AccessTools.DeclaredMethod(
-            typeof(Entity),
+        // Entity.OnCollideWithLiquid is a compile-time API dependency of this assembly; reflection
+        // cannot legitimately return null while the already-loaded Vintage Story ABI is compatible.
+        MethodInfo baseCallback = typeof(Entity).GetMethod(
             nameof(Entity.OnCollideWithLiquid),
-            Type.EmptyTypes);
-        if (baseCallback is not null)
-        {
-            targets.Add(baseCallback);
-        }
+            BindingFlags.Instance | BindingFlags.Public,
+            binder: null,
+            types: Type.EmptyTypes,
+            modifiers: null)!;
+        targets.Add(baseCallback);
 
         foreach (Assembly assembly in AppDomain.CurrentDomain.GetAssemblies())
         {
@@ -105,13 +106,22 @@ internal static class ProjectileLiquidCollisionPatch
             {
                 clientApi.Logger.Warning(
                     "[VintageRTX] Projectile liquid callback {0}.{1} could not be patched: {2}",
-                    target.DeclaringType?.FullName ?? "<unknown>",
+                    DescribeDeclaringType(target),
                     target.Name,
                     exception.Message);
             }
         }
 
-        if (baseCallback is null || patched == 0)
+        return FinishInstallation(clientApi, patched);
+    }
+
+    /// <summary>Publishes installation outcome and tears down an unusable zero-target bridge.</summary>
+    /// <param name="clientApi">Active client API providing the diagnostic logger.</param>
+    /// <param name="patched">Number of callbacks Harmony patched successfully.</param>
+    /// <returns>Whether at least one exact collision callback is active.</returns>
+    internal static bool FinishInstallation(ICoreClientAPI clientApi, int patched)
+    {
+        if (patched <= 0)
         {
             clientApi.Logger.Warning(
                 "[VintageRTX] Exact projectile/liquid collision bridge is unavailable; periodic crossing detection remains active.");
@@ -123,6 +133,15 @@ internal static class ProjectileLiquidCollisionPatch
             "[VintageRTX] Exact projectile/liquid collision bridge installed: callbacks={0}.",
             patched);
         return true;
+    }
+
+    /// <summary>Formats a reflected callback's declaring type, including dynamic-method fixtures.</summary>
+    /// <param name="target">Candidate engine or mod callback.</param>
+    /// <returns>Full declaring type name, or an explicit marker when reflection has none.</returns>
+    internal static string DescribeDeclaringType(MethodInfo target)
+    {
+        ArgumentNullException.ThrowIfNull(target);
+        return target.DeclaringType?.FullName ?? "<unknown>";
     }
 
     /// <summary>Copies incident motion before the engine applies drag or a ricochet response.</summary>

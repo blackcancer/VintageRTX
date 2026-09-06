@@ -140,12 +140,20 @@ internal static partial class RuntimeLogValidator
                 baselineLow,
                 effectLow);
             double jitterIncrease = effectJitter - baselineJitter;
-            if (validSamples && coherentDeltas && gpu > scenario.MaximumGpuMilliseconds)
+            bool baselineCanEvaluatePerformance = BaselineCanEvaluatePerformance(
+                baselineFps,
+                baselineLow,
+                scenario);
+            if (validSamples
+                && coherentDeltas
+                && baselineCanEvaluatePerformance
+                && gpu > scenario.MaximumGpuMilliseconds)
             {
                 failures.Add($"GPU cost {gpu:0.00}ms exceeds {scenario.MaximumGpuMilliseconds:0.00}ms");
             }
             if (validSamples
                 && coherentDeltas
+                && baselineCanEvaluatePerformance
                 && averageFrameTimeCost > scenario.MaximumAverageFrameTimeCostMilliseconds)
             {
                 failures.Add(
@@ -154,6 +162,7 @@ internal static partial class RuntimeLogValidator
             }
             if (validSamples
                 && coherentDeltas
+                && baselineCanEvaluatePerformance
                 && onePercentLowFrameTimeCost
                     > scenario.MaximumOnePercentLowFrameTimeCostMilliseconds)
             {
@@ -161,7 +170,10 @@ internal static partial class RuntimeLogValidator
                     $"1% low frame-time cost {onePercentLowFrameTimeCost:0.00}ms exceeds "
                     + $"{scenario.MaximumOnePercentLowFrameTimeCostMilliseconds:0.00}ms");
             }
-            if (validSamples && coherentDeltas && effectFps < scenario.MinimumEffectFps)
+            if (validSamples
+                && coherentDeltas
+                && baselineCanEvaluatePerformance
+                && effectFps < scenario.MinimumEffectFps)
             {
                 failures.Add(
                     $"effect average {effectFps:0.0} FPS is below "
@@ -169,6 +181,7 @@ internal static partial class RuntimeLogValidator
             }
             if (validSamples
                 && coherentDeltas
+                && baselineCanEvaluatePerformance
                 && effectLow < scenario.MinimumEffectOnePercentLowFps)
             {
                 failures.Add(
@@ -177,6 +190,7 @@ internal static partial class RuntimeLogValidator
             }
             if (validSamples
                 && coherentDeltas
+                && baselineCanEvaluatePerformance
                 && jitterIncrease > scenario.MaximumJitterIncreaseMilliseconds)
             {
                 failures.Add(
@@ -212,6 +226,14 @@ internal static partial class RuntimeLogValidator
             }
         }
 
+        if (string.Equals(
+                scenario.Name,
+                "vegetation-shadow-map",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            ValidateVegetationShadowMap(log, failures);
+        }
+
         if (string.Equals(scenario.Name, "resize-and-reload", StringComparison.OrdinalIgnoreCase))
         {
             Match[] resized = ResourceResizeRegex().Matches(log)
@@ -243,6 +265,55 @@ internal static partial class RuntimeLogValidator
         }
 
         return failures;
+    }
+
+    /// <summary>
+    /// Determines whether an A/B/A baseline has enough host headroom to evaluate the scenario's
+    /// absolute FPS floors. A saturated baseline cannot prove or disprove effect stability.
+    /// </summary>
+    /// <param name="baselineFps">Measured effect-disabled average FPS.</param>
+    /// <param name="baselineLow">Measured effect-disabled one-percent-low FPS.</param>
+    /// <param name="scenario">Scenario owning the required effect floors.</param>
+    /// <returns>Whether performance thresholds may be interpreted for this run.</returns>
+    internal static bool BaselineCanEvaluatePerformance(
+        double baselineFps,
+        double baselineLow,
+        ScenarioDefinition scenario) =>
+        baselineFps >= scenario.MinimumEffectFps
+        && baselineLow >= scenario.MinimumEffectOnePercentLowFps;
+
+    /// <summary>Extracts an actionable contention note from one completed benchmark log.</summary>
+    /// <param name="log">Merged runtime log containing one stabilized A/B/A result.</param>
+    /// <param name="scenario">Scenario owning the required effect floors.</param>
+    /// <param name="diagnostic">Human-readable baseline and required values when contended.</param>
+    /// <returns>Whether the effect-disabled baseline was itself below a required effect floor.</returns>
+    internal static bool TryDescribeBenchmarkContention(
+        string log,
+        ScenarioDefinition scenario,
+        out string diagnostic)
+    {
+        MatchCollection matches = BenchmarkRegex().Matches(log);
+        if (!scenario.RunBenchmark || matches.Count != 1)
+        {
+            diagnostic = string.Empty;
+            return false;
+        }
+
+        Match benchmark = matches[0];
+        double baselineFps = Parse(benchmark.Groups[1].Value);
+        double baselineLow = Parse(benchmark.Groups[2].Value);
+        if (BaselineCanEvaluatePerformance(baselineFps, baselineLow, scenario))
+        {
+            diagnostic = string.Empty;
+            return false;
+        }
+
+        diagnostic = string.Create(
+            CultureInfo.InvariantCulture,
+            $"baseline {baselineFps:0.0} FPS / {baselineLow:0.0} 1% low is below "
+            + $"the effect floors {scenario.MinimumEffectFps:0.0} / "
+            + $"{scenario.MinimumEffectOnePercentLowFps:0.0}; performance gates are inconclusive");
+        return true;
     }
 
     /// <summary>
@@ -833,6 +904,68 @@ internal static partial class RuntimeLogValidator
     }
 
     /// <summary>
+    /// Validates the complete healthy-chunk audit, five distinct replicated plant identities, and
+    /// absence of a correlated fence-stack tessellation abort after authoritative placement.
+    /// </summary>
+    /// <param name="log">Merged copied-map runtime log.</param>
+    /// <param name="failures">Mutable validation diagnostics.</param>
+    private static void ValidateVegetationShadowMap(string log, List<string> failures)
+    {
+        Match audit = VegetationChunkAuditRegex().Matches(log)
+            .Cast<Match>()
+            .LastOrDefault()
+            ?? Match.Empty;
+        if (!audit.Success)
+        {
+            failures.Add("real-map vegetation target chunk audit is missing or malformed");
+        }
+        else if (audit.Groups[4].Value != "32768"
+            || !int.TryParse(audit.Groups[5].Value, out int fenceCount)
+            || fenceCount < 0)
+        {
+            failures.Add(
+                "real-map vegetation target chunk was not fully scanned for BlockFenceStackAware");
+        }
+
+        string[] expectedPlantCodes =
+        [
+            "game:tallgrass-verytall-free",
+            "game:tallgrass-tall-free",
+            "game:tallgrass-medium-free",
+            "game:flower-redtopgrass-free",
+            "game:fern-eaglefern"
+        ];
+        string[] verifiedPlantLines = log.Split('\n')
+            .Where(static line => line.Contains(
+                "Vegetation map block verified:",
+                StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+        if (verifiedPlantLines.Length != expectedPlantCodes.Length
+            || expectedPlantCodes.Any(code => !verifiedPlantLines.Any(line =>
+                line.Contains($"code={code}", StringComparison.OrdinalIgnoreCase))))
+        {
+            failures.Add(
+                "real-map vegetation did not verify each of the five distinct stock plant blocks");
+        }
+
+        int placementIndex = log.IndexOf(
+            "Vegetation map placement requested:",
+            StringComparison.OrdinalIgnoreCase);
+        if (placementIndex >= 0)
+        {
+            string postPlacementLog = log[placementIndex..];
+            int tessellationFailures = FenceTessellationFailureRegex()
+                .Matches(postPlacementLog)
+                .Count;
+            if (tessellationFailures > 0)
+            {
+                failures.Add(
+                    "BlockFenceStackAware aborted chunk tessellation after the vegetation witness was placed");
+            }
+        }
+    }
+
+    /// <summary>
     /// Requires a saved final reference plus three ordered pre-impact surface fields and one saved
     /// surface-field/final pair after each real projectile callback. Matching complete save lines
     /// prevents queued labels from satisfying evidence, while the ordering rejects contamination by
@@ -1002,6 +1135,7 @@ internal static partial class RuntimeLogValidator
         {
             "render-lab" => "-voxel-shadow-vintagertx.png",
             "water-reflection" => "-entity-mirror-vintagertx.png",
+            "light-stability" => "-light-stability-shadow-c-vintagertx.png",
             _ => "-wetness-vintagertx.png"
         };
         if (!scenario.RunBenchmark)
@@ -1128,6 +1262,11 @@ internal static partial class RuntimeLogValidator
     /// <returns>The fence tessellation failure matcher used by the real-case geometry gate.</returns>
     [GeneratedRegex(@"^[^\r\n]*\[Error\] Exception: Index was outside the bounds of the array\.\r?\n\s+at Vintagestory\.GameContent\.BlockFenceStackAware\.OnJsonTesselation[^\r\n]*\r?\n(?:\s+at [^\r\n]*\r?\n){0,6}?\s+at Vintagestory\.Client\.NoObf\.ChunkTesselator\.(?:TesselateBlock|BuildBlockPolygons|NowProcessChunk)", RegexOptions.IgnoreCase | RegexOptions.Multiline)]
     private static partial Regex FenceTessellationFailureRegex();
+
+    /// <summary>Matches the exact target chunk, complete 32-cubed scan, and observed fence count.</summary>
+    /// <returns>The copied-map vegetation chunk audit matcher.</returns>
+    [GeneratedRegex(@"Vegetation map chunk audit: PASS \| chunk=\((-?\d+),(-?\d+),(-?\d+)\), scanned=(\d+), BlockFenceStackAware=(\d+)", RegexOptions.IgnoreCase)]
+    private static partial Regex VegetationChunkAuditRegex();
 
     /// <summary>
     /// Executes the resource Resize Regex step used by the deterministic runtime Log Validator fixture.

@@ -95,7 +95,8 @@ public sealed class RuntimeCoverageModSystemTests
             [VintageRtxDebugView.Wetness] = ["wet", "wetness", "rain"],
             [VintageRtxDebugView.ReflectionSource] = ["reflectionsource", "reflection-source", "source"],
             [VintageRtxDebugView.LiquidSurfaceField] = ["surfacefield", "surface-field", "liquidfield"],
-            [VintageRtxDebugView.EntityMirror] = ["entitymirror", "entity-mirror", "entities"]
+            [VintageRtxDebugView.EntityMirror] = ["entitymirror", "entity-mirror", "entities"],
+            [VintageRtxDebugView.NativeSunShadow] = ["nativeshadow", "native-shadow", "cascade"]
         };
 
         foreach ((VintageRtxDebugView expected, string[] names) in aliases)
@@ -182,6 +183,47 @@ public sealed class RuntimeCoverageModSystemTests
             listener(0.1f);
 
             Assert.IsTrue(GetPrivateField<bool>(system, "startupWorldStateReady"));
+            CollectionAssert.Contains(eventCalls, "UnregisterGameTickListener");
+            Assert.AreEqual(0L, GetPrivateField<long>(system, "startupStateListenerId"));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("VINTAGERTX_AUTO_GAMEMODE", previous);
+        }
+    }
+
+    /// <summary>
+    /// Verifies that an accepted startup command cannot deadlock every later runtime command when
+    /// Vintage Story keeps the client-side <see cref="IWorldPlayerData.CurrentGameMode"/> stale.
+    /// </summary>
+    [TestMethod]
+    public void StartupRegistrationUsesBoundedSettlingWindowForStaleClientMode()
+    {
+        string? previous = Environment.GetEnvironmentVariable("VINTAGERTX_AUTO_GAMEMODE");
+        List<string> eventCalls = [];
+        List<string> chatMessages = [];
+        try
+        {
+            Environment.SetEnvironmentVariable("VINTAGERTX_AUTO_GAMEMODE", "2");
+            VintageRtxModSystem system = new();
+            ListenerCapture capture = new();
+            ICoreClientAPI api = CreateStartupApi(eventCalls, chatMessages, capture);
+            SetPrivateField(system, "api", api);
+
+            InvokePrivate(system, "RegisterStartupWorldState", api);
+            Action<float> listener = capture.Listener
+                ?? throw new InvalidOperationException("Startup listener was not registered.");
+            listener(0.1f);
+            for (int index = 0; index < 19; index++)
+            {
+                listener(0.1f);
+            }
+
+            Assert.IsFalse(GetPrivateField<bool>(system, "startupWorldStateReady"));
+            listener(0.1f);
+
+            Assert.IsTrue(GetPrivateField<bool>(system, "startupWorldStateReady"));
+            CollectionAssert.AreEqual(new[] { "/gamemode 2" }, chatMessages);
             CollectionAssert.Contains(eventCalls, "UnregisterGameTickListener");
             Assert.AreEqual(0L, GetPrivateField<long>(system, "startupStateListenerId"));
         }
@@ -307,7 +349,7 @@ public sealed class RuntimeCoverageModSystemTests
                 "status", "toggle", "reload", "lighting", "voxel", "capture", "debug", "preset", "profile"
             ];
             CollectionAssert.AreEquivalent(expectedCommands, commands.Keys.ToArray());
-            Assert.AreEqual(7, eventCalls.Count(static name => name == "RegisterRenderer"));
+            Assert.AreEqual(10, eventCalls.Count(static name => name == "RegisterRenderer"));
             string[] expectedRendererRegistrations =
             [
                 "RegisterRenderer:vintagertx-pbr-terrain:Opaque",
@@ -316,6 +358,9 @@ public sealed class RuntimeCoverageModSystemTests
                 "RegisterRenderer:vintagertx-reflection-source:Opaque",
                 "RegisterRenderer:vintagertx-display:AfterBlit",
                 "RegisterRenderer:vintagertx-color-contract:AfterPostProcessing",
+                "RegisterRenderer:vintagertx-native-shadow-far:ShadowFar",
+                "RegisterRenderer:vintagertx-native-shadow-near:ShadowNear",
+                "RegisterRenderer:vintagertx-camera-origin:Before",
                 "RegisterRenderer:vintagertx-test-camera-lock:Before"
             ];
             CollectionAssert.AreEquivalent(
@@ -356,7 +401,7 @@ public sealed class RuntimeCoverageModSystemTests
 
             system.Dispose();
 
-            Assert.AreEqual(7, eventCalls.Count(static name => name == "UnregisterRenderer"));
+            Assert.AreEqual(10, eventCalls.Count(static name => name == "UnregisterRenderer"));
             Assert.IsNull(GetPrivateField<object?>(system, "renderer"));
             Assert.IsNull(GetPrivateField<object?>(system, "voxelScene"));
             Assert.IsNull(GetPrivateField<object?>(system, "pbrTerrainRenderer"));

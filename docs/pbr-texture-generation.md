@@ -116,16 +116,19 @@ assets ordinaires dans leur domaine et demeurent accessibles au chargeur PBR.
 VintageRTX construit ensuite la table
 des albedos uniquement depuis les références réellement bakées dans l'atlas,
 puis cherche les quatre sidecars adjacents pour cette source canonique. Le
-manifeste `vintagertx.pbr-manifest` version 3 associe explicitement chaque
+manifeste `vintagertx.pbr-manifest` version 4 associe explicitement chaque
 source `domain` + `textures/...png` à ses quatre AssetLocations natives. Chaque
 carte est obligatoirement obtenue en remplaçant `.png` par `_n.png`, `_r.png`,
 `_m.png` ou `_e.png`, sans arbre `textures/pbr`, atlas central ni chemin absolu. Il enregistre
 séparément `origin` (dossier physique sous `assets`) et `domain` (domaine logique
 de l'AssetLocation), ainsi que le mod et la version source, les SHA-256, les dimensions, le profil
-et les encodages. Son schéma formel est
-[`pbr-pack-manifest-v3.schema.json`](pbr-pack-manifest-v3.schema.json). Le runtime
-continue d'accepter les manifestes v1/v2 historiques, mais le packager ne produit
-plus que la disposition native v3.
+et les encodages. `defaultProvenance` vaut `generated` pour les packs produits
+par l'outil ; une entrée peut le remplacer par `authored`. Une carte scalaire
+générée nulle laisse ainsi active la classe matériau du runtime, tandis qu'une
+carte authored nulle impose explicitement un diélectrique. Son schéma formel est
+[`pbr-pack-manifest-v4.schema.json`](pbr-pack-manifest-v4.schema.json). Le runtime
+continue d'accepter les manifestes v1/v2/v3 historiques, mais le packager ne
+produit plus que la disposition native v4.
 
 Pour les textures vanilla dont l'origine physique est `survival` ou `creative`
 mais le domaine logique est `game`, le ZIP contient donc exactement :

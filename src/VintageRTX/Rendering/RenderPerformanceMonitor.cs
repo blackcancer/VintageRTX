@@ -12,8 +12,11 @@ internal sealed class RenderPerformanceMonitor : IDisposable
     private const int FrameHistoryLength = 600;
     /// <summary>Timestamp pair count allowing the driver several frames to retire each query.</summary>
     private const int QueryRingLength = 4;
-    /// <summary>GPU timing cadence in rendered frames; lowers query overhead without losing trends.</summary>
-    private const int GpuQuerySampleInterval = 8;
+    /// <summary>
+    /// GPU timing cadence in rendered frames. Seven is deliberately coprime with the two-frame
+    /// Performance cadence, so timestamp samples cover both mirror and shadow refresh phases.
+    /// </summary>
+    private const int GpuQuerySampleInterval = 7;
 
     private readonly float[] frameTimesMilliseconds = new float[FrameHistoryLength];
     private readonly int[] startQueries = new int[QueryRingLength];

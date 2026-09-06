@@ -65,6 +65,13 @@ internal static class Program
                             scenario.ValidateWetness,
                             scenario.RequirePbrReferenceMaterials));
                         if (string.Equals(
+                                scenario.CaptureProfile,
+                                "light-stability",
+                                StringComparison.OrdinalIgnoreCase))
+                        {
+                            failures.AddRange(RuntimeImageValidator.ValidateLightStability(log));
+                        }
+                        if (string.Equals(
                                 scenario.Name,
                                 "water-reflection",
                                 StringComparison.OrdinalIgnoreCase))
@@ -92,11 +99,13 @@ internal static class Program
                     {
                         if (args.Length < 2)
                         {
-                            throw new ArgumentException("diagnose-log requires <client-main.log>.");
+                            throw new ArgumentException(
+                                "diagnose-log requires <client-main.log> [capture-directory].");
                         }
 
                         RuntimeImageValidator.PrintThinLeakDiagnostics(
-                            await File.ReadAllTextAsync(args[1]));
+                            await File.ReadAllTextAsync(args[1]),
+                            args.Length >= 3 ? args[2] : null);
                         return 0;
                     }
                 case "diagnose-checkerboard":
@@ -111,7 +120,7 @@ internal static class Program
                         return 0;
                     }
                 default:
-                    Console.Error.WriteLine("Usage: VintageRTX.Test [preflight|liquid-optics|list|runtime <scenario>|validate-log <scenario> <client-main.log>|analyze-image <capture.png>|diagnose-log <client-main.log>|diagnose-checkerboard <before.png> <after.png>]");
+                    Console.Error.WriteLine("Usage: VintageRTX.Test [preflight|liquid-optics|list|runtime <scenario>|validate-log <scenario> <client-main.log>|analyze-image <capture.png>|diagnose-log <client-main.log> [capture-directory]|diagnose-checkerboard <before.png> <after.png>]");
                     return 2;
             }
         }

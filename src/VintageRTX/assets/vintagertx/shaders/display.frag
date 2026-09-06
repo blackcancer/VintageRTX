@@ -5,8 +5,12 @@ uniform sampler2D reflectionSourceColor;
 uniform sampler2D entityMirrorColor;
 uniform sampler2D entityMirrorDepth;
 uniform sampler2D historyColor;
-uniform sampler2D shadowCurrent;
-uniform sampler2D shadowHistory;
+uniform sampler2D shadowPointCurrentA;
+uniform sampler2D shadowPointCurrentB;
+uniform sampler2D shadowSunCurrent;
+uniform sampler2D shadowPointHistoryA;
+uniform sampler2D shadowPointHistoryB;
+uniform sampler2D shadowSunHistory;
 uniform sampler2D gNormal;
 uniform sampler2D gPosition;
 uniform sampler2D gDirectPosition;
@@ -14,6 +18,8 @@ uniform sampler2D gOpaquePosition;
 uniform sampler2D gOpaqueDepth;
 uniform sampler2D gLiquidDepth;
 uniform sampler2D gMaterial;
+uniform sampler2DShadow nativeShadowMapFar;
+uniform sampler2DShadow nativeShadowMapNear;
 uniform sampler3D voxelVolume;
 uniform sampler3D voxelOccupancy;
 uniform usampler3D voxelSunOccupancy;
@@ -29,9 +35,17 @@ uniform mat4 projection;
 uniform mat4 inverseProjection;
 uniform mat4 viewMatrix;
 uniform mat4 inverseViewMatrix;
+uniform mat4 nativeShadowMatrixFar;
+uniform mat4 nativeShadowMatrixNear;
+uniform vec3 nativeShadowReferenceOffsetFar;
+uniform vec3 nativeShadowReferenceOffsetNear;
+uniform float nativeShadowRangeFar;
+uniform float nativeShadowRangeNear;
 uniform vec2 inverseFrameSize;
-// Reciprocal RG16F shadow-mask dimensions in inverse shadow pixels.
+// Reciprocal tier-scaled shadow-mask dimensions in inverse shadow pixels.
 uniform vec2 shadowInverseFrameSize;
+// Performance uses one fixed symmetric diagonal pair; higher tiers resolve the complete cross.
+uniform int shadowFilterTapCount;
 uniform vec3 cameraWorldPosition;
 uniform vec3 floatingWorldOrigin;
 uniform vec3 voxelOrigin;
@@ -45,6 +59,9 @@ uniform vec2 rainSurfaceOrigin;
 uniform vec2 rainSurfaceSize;
 uniform vec4 voxelLightPositionIntensity[8];
 uniform vec4 voxelLightColorRadius[8];
+// xy = luminous half-width/half-height in metres, z = trace cutoff in lux,
+// w = one for authored SI photometry and zero for a game-range fallback.
+uniform vec4 voxelLightPhotometry[8];
 uniform float voxelLightCasterLayer[8];
 uniform int voxelLightCount;
 uniform float exposure;
@@ -76,6 +93,7 @@ uniform int skyTraceSteps;
 uniform int albedoDetailSamples;
 uniform int temporalDenoiseSamples;
 uniform int transportInterlace;
+uniform int secondaryBounceCadence;
 uniform vec3 sunDirection;
 uniform vec4 sunColorStrength;
 uniform float sunLightStrength;
@@ -113,6 +131,8 @@ uniform float temporalBlend;
 uniform float shadowTemporalBlend;
 uniform int shadowPass;
 uniform int prefilteredShadowVisibility;
+uniform int nativeShadowFarEnabled;
+uniform int nativeShadowNearEnabled;
 uniform int debugView;
 // 0 keeps the standalone display-preview contract. 1 returns the scene RGB
 // carrier expected by Vintage Story's Luma framebuffer so final.fsh remains
@@ -121,6 +141,8 @@ uniform int outputColorDomain;
 
 in vec2 uv;
 layout(location = 0) out vec4 outColor;
+layout(location = 1) out vec4 outShadowPointB;
+layout(location = 2) out vec4 outShadowSun;
 
 const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
 const int MAX_RAYS = 8;
@@ -446,7 +468,8 @@ void accumulateSubgridImpactPacket(
     // The short-lived entry cavity owns a separate, bounded part of the
     // near-interface ledger. Its compact polynomial has finite gravity and
     // surface-gradient energy. It decays over the physical pinch time while
-    // the independently budgeted capillary packet is released.
+    // the disjoint reversible cavity-plus-interface budget is released as the
+    // outgoing gravity-capillary packet.
     float splashPeakWorldBlocks = max(splash.x, 0.0);
     float splashRadiusWorldBlocks = max(splash.y, 0.0);
     float splashReleaseSeconds = max(splash.z, 0.0001);
@@ -1262,22 +1285,24 @@ float traceLightCasterVisibility(vec3 rayOrigin, vec3 rayTarget, int lightIndex)
     // turning its transparent glass or alpha-cutout holes into blockers.
     for (int stepIndex = 0; stepIndex < MAX_LIGHT_CASTER_STEPS; stepIndex++)
     {
-        float traveled;
-        if (sideDistance.x <= sideDistance.y && sideDistance.x <= sideDistance.z)
+        float traveled = min(sideDistance.x, min(sideDistance.y, sideDistance.z));
+        // A ray that crosses an exact subvoxel edge or corner enters only the
+        // diagonally adjacent cell. Advancing a single tied axis visits a
+        // zero-width neighbour and makes the 6.25 cm cage cells cast a wider
+        // silhouette than the authored bars. Advance every tied axis, as the
+        // conservative long-range traversal already does.
+        if (sideDistance.x <= traveled + 0.00001)
         {
-            traveled = sideDistance.x;
             sideDistance.x += deltaDistance.x;
             cell.x += stepDirection.x;
         }
-        else if (sideDistance.y <= sideDistance.z)
+        if (sideDistance.y <= traveled + 0.00001)
         {
-            traveled = sideDistance.y;
             sideDistance.y += deltaDistance.y;
             cell.y += stepDirection.y;
         }
-        else
+        if (sideDistance.z <= traveled + 0.00001)
         {
-            traveled = sideDistance.z;
             sideDistance.z += deltaDistance.z;
             cell.z += stepDirection.z;
         }
@@ -1364,22 +1389,22 @@ float traceFineBlockVisibility(
             return 1.0;
         }
 
-        float traveled;
-        if (sideDistance.x <= sideDistance.y && sideDistance.x <= sideDistance.z)
+        float traveled = min(sideDistance.x, min(sideDistance.y, sideDistance.z));
+        // Edge/corner ties have zero volume in the skipped axis-aligned
+        // neighbours. Visiting them would thicken anvils, fences and other
+        // non-cubic blockers by one fine cell.
+        if (sideDistance.x <= traveled + 0.00001)
         {
-            traveled = sideDistance.x;
             sideDistance.x += deltaDistance.x;
             cell.x += stepDirection.x;
         }
-        else if (sideDistance.y <= sideDistance.z)
+        if (sideDistance.y <= traveled + 0.00001)
         {
-            traveled = sideDistance.y;
             sideDistance.y += deltaDistance.y;
             cell.y += stepDirection.y;
         }
-        else
+        if (sideDistance.z <= traveled + 0.00001)
         {
-            traveled = sideDistance.z;
             sideDistance.z += deltaDistance.z;
             cell.z += stepDirection.z;
         }
@@ -1420,22 +1445,22 @@ float traceVoxelVisibility(vec3 rayOrigin, vec3 rayTarget, int lightIndex)
     // occupancy volume, preserving anvils, roofs and modded meshes.
     for (int stepIndex = 0; stepIndex < MAX_VOXEL_STEPS; stepIndex++)
     {
-        float traveled;
-        if (sideDistance.x <= sideDistance.y && sideDistance.x <= sideDistance.z)
+        float traveled = min(sideDistance.x, min(sideDistance.y, sideDistance.z));
+        // A simultaneous boundary crossing reaches the diagonal block
+        // directly. Sampling intermediate zero-width cells inflates a caster
+        // by a whole block and is especially visible around point lights.
+        if (sideDistance.x <= traveled + 0.00001)
         {
-            traveled = sideDistance.x;
             sideDistance.x += deltaDistance.x;
             cell.x += stepDirection.x;
         }
-        else if (sideDistance.y <= sideDistance.z)
+        if (sideDistance.y <= traveled + 0.00001)
         {
-            traveled = sideDistance.y;
             sideDistance.y += deltaDistance.y;
             cell.y += stepDirection.y;
         }
-        else
+        if (sideDistance.z <= traveled + 0.00001)
         {
-            traveled = sideDistance.z;
             sideDistance.z += deltaDistance.z;
             cell.z += stepDirection.z;
         }
@@ -1659,7 +1684,7 @@ float traceCoarseSunVisibility(vec3 rayOrigin, vec3 rayDirection, float maximumD
     return traceSunClipmapVisibility(rayOrigin, rayDirection, maximumDistance);
 }
 
-float traceSunVisibility(vec3 rayOrigin)
+float traceVoxelSunVisibility(vec3 rayOrigin)
 {
     float fineDistance = min(sunFineShadowDistance, sunShadowDistance);
     if (fineDistance > 0.01)
@@ -1686,6 +1711,217 @@ float traceSunVisibility(vec3 rayOrigin)
 
     vec3 coarseOrigin = rayOrigin + sunDirection * max(fineDistance - 0.45, 0.0);
     return traceCoarseSunVisibility(coarseOrigin, sunDirection, remainingDistance + 0.45);
+}
+
+float sampleNativeShadowFar(vec3 coordinate)
+{
+    vec2 texel = 1.0 / vec2(textureSize(nativeShadowMapFar, 0));
+    float comparisonDepth = coordinate.z - 0.0009;
+    float visibility = 0.0;
+    for (int x = -1; x <= 1; x++)
+    {
+        for (int y = -1; y <= 1; y++)
+        {
+            visibility += texture(
+                nativeShadowMapFar,
+                vec3(coordinate.xy + vec2(x, y) * texel, comparisonDepth));
+        }
+    }
+    return visibility / 9.0;
+}
+
+float sampleNativeShadowNear(vec3 coordinate)
+{
+    vec2 texel = 1.0 / vec2(textureSize(nativeShadowMapNear, 0));
+    float comparisonDepth = coordinate.z - 0.0005;
+    float visibility = 0.0;
+    for (int x = -1; x <= 1; x++)
+    {
+        for (int y = -1; y <= 1; y++)
+        {
+            visibility += texture(
+                nativeShadowMapNear,
+                vec3(coordinate.xy + vec2(x, y) * texel, comparisonDepth));
+        }
+    }
+    return visibility / 9.0;
+}
+
+float nativeShadowNearWeight(vec3 coordinate, float receiverDistance)
+{
+    float transition = clamp(
+        max(max(0.0, 0.03 - coordinate.x) * 100.0,
+            max(0.0, coordinate.x - 0.97) * 100.0)
+        + max(max(0.0, 0.03 - coordinate.y) * 100.0,
+            max(0.0, coordinate.y - 0.97) * 100.0)
+        + max(0.0, coordinate.z - 0.98) * 100.0
+        + max(0.0, receiverDistance / nativeShadowRangeNear - 0.15),
+        0.0,
+        1.0);
+    float weight = clamp(1.0 - transition, 0.0, 1.0);
+    return coordinate.z >= 0.999 ? 0.0 : weight;
+}
+
+float nativeShadowFarWeight(
+    vec3 coordinate,
+    float receiverDistance,
+    float nearWeight)
+{
+    float transition = clamp(
+        max(max(0.0, 0.03 - coordinate.x) * 10.0,
+            max(0.0, coordinate.x - 0.97) * 10.0)
+        + max(max(0.0, 0.03 - coordinate.y) * 10.0,
+            max(0.0, coordinate.y - 0.97) * 10.0)
+        + max(0.0, coordinate.z - 0.98) * 10.0
+        + max(0.0, receiverDistance / nativeShadowRangeFar - 0.15),
+        0.0,
+        1.0);
+    transition = transition * 2.0 - 0.5;
+    float weight = max(
+        0.0,
+        clamp(1.0 - transition, 0.0, 1.0) - nearWeight);
+    return coordinate.z >= 0.999 ? 0.0 : weight;
+}
+
+float nativeShadowRayCoverage(
+    mat4 shadowMatrix,
+    vec3 coordinate)
+{
+    // Solar cascades are orthographic. Projecting the world-space direction
+    // with w=0 therefore gives texture-coordinate change per world metre and
+    // lets the long-range voxel tail begin exactly where this cascade exits.
+    vec3 coordinateDirection = (shadowMatrix * vec4(sunDirection, 0.0)).xyz;
+    vec3 lowerDistance = vec3(sunShadowDistance);
+    vec3 upperDistance = vec3(sunShadowDistance);
+    for (int axis = 0; axis < 3; axis++)
+    {
+        if (coordinateDirection[axis] > 0.000001)
+        {
+            upperDistance[axis] = (0.9985 - coordinate[axis])
+                / coordinateDirection[axis];
+        }
+        else if (coordinateDirection[axis] < -0.000001)
+        {
+            lowerDistance[axis] = coordinate[axis]
+                / -coordinateDirection[axis];
+        }
+    }
+    float coverage = min(
+        min(lowerDistance.x, min(lowerDistance.y, lowerDistance.z)),
+        min(upperDistance.x, min(upperDistance.y, upperDistance.z)));
+    return clamp(coverage, 0.0, sunShadowDistance);
+}
+
+void traceNativeSunShadowVisibility(
+    vec3 receiverRelativeWorldPosition,
+    out float visibility,
+    out float support,
+    out float coveredDistance)
+{
+    // Reproduce the engine's near/far cascade transition with the true,
+    // unbiased receiver. Native depth is the only representation here that
+    // preserves alpha-tested crossed plants and their wind deformation.
+    float nearWeight = 0.0;
+    float farWeight = 0.0;
+    float weightedVisibility = 0.0;
+    coveredDistance = 0.0;
+
+    if (nativeShadowNearEnabled != 0 && nativeShadowRangeNear > 0.0)
+    {
+        vec3 relativeReceiver = receiverRelativeWorldPosition
+            - nativeShadowReferenceOffsetNear;
+        vec3 coordinate = (nativeShadowMatrixNear
+            * vec4(relativeReceiver, 1.0)).xyz;
+        nearWeight = nativeShadowNearWeight(
+            coordinate,
+            length(vec4(relativeReceiver, 1.0)));
+        if (nearWeight > 0.0)
+        {
+            weightedVisibility += sampleNativeShadowNear(coordinate) * nearWeight;
+            coveredDistance = max(
+                coveredDistance,
+                nativeShadowRayCoverage(
+                    nativeShadowMatrixNear,
+                    coordinate));
+        }
+    }
+
+    if (nativeShadowFarEnabled != 0 && nativeShadowRangeFar > 0.0)
+    {
+        vec3 relativeReceiver = receiverRelativeWorldPosition
+            - nativeShadowReferenceOffsetFar;
+        vec3 coordinate = (nativeShadowMatrixFar
+            * vec4(relativeReceiver, 1.0)).xyz;
+        farWeight = nativeShadowFarWeight(
+            coordinate,
+            length(vec4(relativeReceiver, 1.0)),
+            nearWeight);
+        if (farWeight > 0.0)
+        {
+            weightedVisibility += sampleNativeShadowFar(coordinate) * farWeight;
+            coveredDistance = max(
+                coveredDistance,
+                nativeShadowRayCoverage(
+                    nativeShadowMatrixFar,
+                    coordinate));
+        }
+    }
+
+    support = clamp(nearWeight + farWeight, 0.0, 1.0);
+    visibility = support > 0.0001
+        ? clamp(weightedVisibility / support, 0.0, 1.0)
+        : 1.0;
+}
+
+float traceVoxelSunTail(vec3 rayOrigin, float coveredDistance)
+{
+    float tailStart = clamp(coveredDistance, 0.0, sunShadowDistance);
+    float remainingDistance = sunShadowDistance - tailStart;
+    if (remainingDistance <= 0.01)
+    {
+        return 1.0;
+    }
+    vec3 coarseOrigin = rayOrigin
+        + sunDirection * max(tailStart - 0.45, 0.0);
+    return traceCoarseSunVisibility(
+        coarseOrigin,
+        sunDirection,
+        remainingDistance + 0.45);
+}
+
+float traceSunVisibility(
+    vec3 receiverRelativeWorldPosition,
+    vec3 voxelRayOrigin)
+{
+    float nativeVisibility;
+    float nativeSupport;
+    float nativeCoveredDistance;
+    traceNativeSunShadowVisibility(
+        receiverRelativeWorldPosition,
+        nativeVisibility,
+        nativeSupport,
+        nativeCoveredDistance);
+
+    if (nativeSupport <= 0.0001)
+    {
+        return traceVoxelSunVisibility(voxelRayOrigin);
+    }
+
+    // Within a supported cascade, the native alpha-tested geometry is
+    // authoritative. The conservative voxel representation resumes only
+    // beyond the exact cascade exit, retaining the independent 96 m reach.
+    float nativeAndTailVisibility = min(
+        nativeVisibility,
+        traceVoxelSunTail(voxelRayOrigin, nativeCoveredDistance));
+    if (nativeSupport >= 0.9999)
+    {
+        return nativeAndTailVisibility;
+    }
+
+    return mix(
+        traceVoxelSunVisibility(voxelRayOrigin),
+        nativeAndTailVisibility,
+        nativeSupport);
 }
 
 vec3 skyRadianceColor()
@@ -1950,17 +2186,15 @@ float sampleRainExposure(vec3 worldPosition, vec3 worldNormal)
 
 vec3 skyProbeDirection(int rayIndex)
 {
-    // Two coherent, temporally rotating upper-hemisphere probes expose
+    // Two coherent, world-stable upper-hemisphere probes expose
     // roofs and room openings without the screen-space light leaks of a
     // depth-only ambient term. The vertical probe preserves stability;
-    // the oblique probe discovers side-facing skylight over time.
-    float frame = temporalBlend > 0.001 && transportInterlace == 0
-        ? float(temporalFrameIndex & 15)
-        : 0.0;
+    // the oblique probe discovers side-facing skylight. Do not rotate this
+    // set per frame: with one or two rays the rotation changes the measured
+    // aperture itself and is perceived as moving ambient light.
     float vertical = rayIndex == 0 ? 0.92 : 0.56;
     float radial = sqrt(max(1.0 - vertical * vertical, 0.0));
-    float angle = float(rayIndex) * 2.39996322973
-        + frame * 0.39269908169;
+    float angle = float(rayIndex) * 2.39996322973;
     return normalize(vec3(cos(angle) * radial, vertical, sin(angle) * radial));
 }
 
@@ -1983,11 +2217,12 @@ vec3 traceVoxelSkyLighting(
     out float averageVisibility)
 {
     averageVisibility = 0.0;
-    if (sunColorStrength.w < 0.08)
+    if (skyRayCount <= 0 || sunColorStrength.w < 0.08)
     {
-        // At night the authored moon/ambient contribution is retained
-        // by the raster source. Tracing a near-black sky only reduces
-        // FPS and amplifies sub-voxel leaks in enclosed rooms.
+        // At night, and at the Performance tier, the authored ambient
+        // contribution remains in the raster carrier. Performance also owns
+        // a directional irradiance cache plus the long-range solar visibility
+        // bank, so a per-pixel local DDA would duplicate its stable sky LOD.
         return vec3(0.0);
     }
     vec3 rayOrigin = worldPosition
@@ -2028,37 +2263,103 @@ vec3 samplePointLightSurface(
     int sampleIndex,
     int sampleCount)
 {
-    if (pointLightSourceRadius <= 0.001 || debugView != 0)
+    vec2 sourceHalfSize = voxelLightPhotometry[lightIndex].xy;
+    if (max(sourceHalfSize.x, sourceHalfSize.y) <= 0.001)
+    {
+        sourceHalfSize = vec2(pointLightSourceRadius);
+    }
+    if (max(sourceHalfSize.x, sourceHalfSize.y) <= 0.001)
     {
         return lightPosition;
     }
 
-    vec3 helper = abs(lightDirection.y) < 0.95
-        ? vec3(0.0, 1.0, 0.0)
-        : vec3(1.0, 0.0, 0.0);
-    vec3 tangent = normalize(cross(helper, lightDirection));
-    vec3 bitangent = cross(lightDirection, tangent);
+    // Model the flame as a vertical ellipsoid. Its projected support in the
+    // receiver/source plane follows orthographic ellipsoid projection: a
+    // horizontal ray sees the complete flame height, while a ray parallel to
+    // the flame axis sees only its radial width. Keeping the full height for
+    // every ray exaggerated cage penumbrae on floors and ceilings.
+    vec3 projectedVertical = vec3(0.0, 1.0, 0.0)
+        - lightDirection * lightDirection.y;
+    if (dot(projectedVertical, projectedVertical) <= 0.000001)
+    {
+        projectedVertical = vec3(0.0, 0.0, 1.0);
+    }
+    vec3 verticalAxis = normalize(projectedVertical);
+    vec3 horizontalAxis = normalize(cross(verticalAxis, lightDirection));
+    float rayVerticalSquared = clamp(
+        lightDirection.y * lightDirection.y,
+        0.0,
+        1.0);
+    float projectedHalfHeight = sqrt(
+        sourceHalfSize.y * sourceHalfSize.y * (1.0 - rayVerticalSquared)
+        + sourceHalfSize.x * sourceHalfSize.x * rayVerticalSquared);
 
-    // A coherent Vogel disk preserves a continuous shadow contour.
-    // Independent per-pixel hashes made the same penumbra look like a
-    // point cloud. Global temporal rotation adds convergence without
-    // breaking spatial continuity; each light gets a stable phase.
-    // Camera motion invalidates the history buffer. Keep the area-light
-    // pattern fixed in that state: rotating unfiltered samples every
-    // frame is perceived as a sparkling point cloud. Once accumulation
-    // is active, the global phases converge to a smooth penumbra.
-    float frame = temporalBlend > 0.001 && transportInterlace == 0
-        ? float(temporalFrameIndex & 15)
-        : 0.0;
-    float sampleNumber = float(sampleIndex) + 0.5;
-    float angle = sampleNumber * 2.39996322973
+    // Keep the finite emitter centred for every supported sample count.
+    // A rotating one-sample disk literally moves the apparent light source;
+    // an unpaired Vogel prefix shifts its centroid as adaptive quality changes.
+    // One ray therefore uses the physical centre. Larger sets use fixed,
+    // diametrically opposed pairs, plus the centre for odd counts. This is a
+    // deterministic quadrature of the same disk and cannot flicker between frames.
+    if (sampleCount <= 1)
+    {
+        return lightPosition;
+    }
+
+    int centreSampleCount = sampleCount & 1;
+    if (centreSampleCount != 0 && sampleIndex == 0)
+    {
+        return lightPosition;
+    }
+
+    int pairedSampleIndex = sampleIndex - centreSampleCount;
+    int pairIndex = pairedSampleIndex / 2;
+    int pairCount = max((sampleCount - centreSampleCount) / 2, 1);
+    float pairSide = float(pairedSampleIndex & 1) * 3.14159265359;
+    float angle = (float(pairIndex) + 0.5) * 2.39996322973
         + float(lightIndex) * 1.32471795724
-        + frame * 0.75487766625;
-    float radius = pointLightSourceRadius
-        * sqrt(sampleNumber / max(float(sampleCount), 1.0));
+        + pairSide;
+    float radius = sqrt((float(pairIndex) + 0.5) / float(pairCount));
     return lightPosition
-        + tangent * cos(angle) * radius
-        + bitangent * sin(angle) * radius;
+        + horizontalAxis * cos(angle) * radius * sourceHalfSize.x
+        + verticalAxis * sin(angle) * radius * projectedHalfHeight;
+}
+
+const float PHOTOMETRIC_LUX_TO_RENDERER_RADIANCE = 0.35014087;
+
+float physicalLightRange(int lightIndex, float intensityCandela, float configuredRange)
+{
+    float cutoffIlluminanceLux = max(
+        voxelLightPhotometry[lightIndex].z,
+        0.000001);
+    float cutoffRange = sqrt(max(intensityCandela, 0.0) / cutoffIlluminanceLux);
+    return min(configuredRange, cutoffRange);
+}
+
+float photometricRangeFade(float distanceMetres, float lightRangeMetres)
+{
+    // Only the final ten percent is a numerical trace truncation. Illumination
+    // within the retained support continues to follow the inverse-square law.
+    return 1.0 - smoothstep(
+        lightRangeMetres * 0.90,
+        lightRangeMetres,
+        distanceMetres);
+}
+
+float photometricIncidentRadiance(
+    int lightIndex,
+    float intensityCandela,
+    float distanceMetres)
+{
+    vec2 sourceHalfSize = max(voxelLightPhotometry[lightIndex].xy, vec2(0.0005));
+    float nearFieldDistance = max(length(sourceHalfSize), 0.0005);
+    float distanceSquared = max(
+        distanceMetres * distanceMetres,
+        nearFieldDistance * nearFieldDistance);
+    // CIE E = I / r^2 on the source axis. Receiver cos(theta) remains at the
+    // individual BRDF call site; this helper only transports incident energy.
+    return max(intensityCandela, 0.0)
+        * PHOTOMETRIC_LUX_TO_RENDERER_RADIANCE
+        / distanceSquared;
 }
 
 vec3 dominantAxisNormal(vec3 rayDirection)
@@ -2083,11 +2384,10 @@ vec3 voxelBounceDirection(vec3 normal, int rayIndex)
         : vec3(1.0, 0.0, 0.0);
     vec3 tangent = normalize(cross(helper, normal));
     vec3 bitangent = cross(normal, tangent);
-    float frame = temporalBlend > 0.001 && transportInterlace == 0
-        ? float(temporalFrameIndex & 15)
-        : 0.0;
-    float sequence = float(rayIndex) + 0.5
-        + frame * float(max(voxelBounceRayCount, 1));
+    // The radiance cache and temporal denoiser converge a fixed low-discrepancy
+    // set. Advancing a one-ray lobe each frame changes indirect-light direction
+    // rather than merely reducing noise, producing visible energy pulses.
+    float sequence = float(rayIndex) + 0.5;
     float radial = sqrt(fract(sequence * 0.61803398875) * 0.78);
     float angle = sequence * 2.39996322973;
     float vertical = sqrt(max(1.0 - radial * radial, 0.0));
@@ -2271,27 +2571,28 @@ vec3 traceVoxelDiffuseBounce(
             vec4 lightColorRadius = voxelLightColorRadius[lightIndex];
             vec3 toLight = lightPositionIntensity.xyz - hitPosition;
             float lightDistance = length(toLight);
-            float lightRadius = min(lightColorRadius.w, pointLightRadius);
+            float lightRadius = physicalLightRange(
+                lightIndex,
+                lightPositionIntensity.w,
+                min(lightColorRadius.w, pointLightRadius));
             if (lightDistance <= 0.001 || lightDistance >= lightRadius)
             {
                 continue;
             }
             vec3 lightDirection = toLight / lightDistance;
             float emitterReceiver = max(dot(hitNormal, lightDirection), 0.0);
-            float radiusFade = 1.0 - smoothstep(
-                lightRadius * 0.55,
-                lightRadius,
+            float radiusFade = photometricRangeFade(lightDistance, lightRadius);
+            float incidentRadiance = photometricIncidentRadiance(
+                lightIndex,
+                lightPositionIntensity.w,
                 lightDistance);
-            float inverseSquare = 1.0
-                / (1.0 + 0.075 * lightDistance * lightDistance);
             float visibility = traceCoarseBounceVisibility(
                 hitPosition + hitNormal * 0.04,
                 lightPositionIntensity.xyz);
             incident += emitterColor(lightColorRadius.rgb)
-                * lightPositionIntensity.w
                 * emitterReceiver
                 * radiusFade
-                * inverseSquare
+                * incidentRadiance
                 * visibility;
         }
 
@@ -2424,12 +2725,43 @@ vec3 softLimitSpecularRadiance(
         * (resolvedLuminance / max(specularLuminance, 0.0001));
 }
 
-float traceRawPointShadowVisibility(
-    vec3 worldPosition,
-    vec3 worldGeometricNormal)
+float pointShadowVisibilityAt(
+    vec4 pointVisibilityA,
+    vec4 pointVisibilityB,
+    int lightIndex)
 {
-    float potentialWeight = 0.0;
-    float occludedWeight = 0.0;
+    return lightIndex < 4
+        ? pointVisibilityA[lightIndex]
+        : pointVisibilityB[lightIndex - 4];
+}
+
+void setPointShadowVisibility(
+    inout vec4 pointVisibilityA,
+    inout vec4 pointVisibilityB,
+    int lightIndex,
+    float visibility)
+{
+    if (lightIndex < 4)
+    {
+        pointVisibilityA[lightIndex] = visibility;
+    }
+    else
+    {
+        pointVisibilityB[lightIndex - 4] = visibility;
+    }
+}
+
+void traceRawPointShadowVisibilities(
+    vec3 worldPosition,
+    vec3 worldGeometricNormal,
+    out vec4 pointVisibilityA,
+    out vec4 pointVisibilityB)
+{
+    // One channel owns one stable light slot. Never average visibility before
+    // the per-source BRDF/radiance evaluation: a cage blocking a warm lantern
+    // must not attenuate a separate cool emitter whose segment remains clear.
+    pointVisibilityA = vec4(1.0);
+    pointVisibilityB = vec4(1.0);
     for (int lightIndex = 0; lightIndex < MAX_VOXEL_LIGHTS; lightIndex++)
     {
         if (lightIndex >= voxelLightCount)
@@ -2441,7 +2773,10 @@ float traceRawPointShadowVisibility(
         vec4 lightColorRadius = voxelLightColorRadius[lightIndex];
         vec3 toLight = lightPositionIntensity.xyz - worldPosition;
         float lightDistance = length(toLight);
-        float lightRadius = min(lightColorRadius.w, pointLightRadius);
+        float lightRadius = physicalLightRange(
+            lightIndex,
+            lightPositionIntensity.w,
+            min(lightColorRadius.w, pointLightRadius));
         if (lightDistance <= 0.001 || lightDistance >= lightRadius)
         {
             continue;
@@ -2451,31 +2786,30 @@ float traceRawPointShadowVisibility(
         float geometricReceiver = max(
             dot(worldGeometricNormal, lightDirection),
             0.0);
-        float radiusFade = 1.0 - smoothstep(
-            lightRadius * 0.55,
-            lightRadius,
+        float radiusFade = photometricRangeFade(lightDistance, lightRadius);
+        float incidentRadiance = photometricIncidentRadiance(
+            lightIndex,
+            lightPositionIntensity.w,
             lightDistance);
-        float inverseSquare = 1.0
-            / (1.0 + 0.075 * lightDistance * lightDistance);
         float attenuation = radiusFade
-            * inverseSquare
-            * lightPositionIntensity.w;
+            * incidentRadiance;
         float shadowPotential = geometricReceiver * attenuation;
         if (shadowPotential <= 0.001)
         {
             continue;
         }
 
-        int lightSampleCount = debugView == 0
-            ? clamp(pointLightShadowSamples, 1, MAX_POINT_LIGHT_SAMPLES)
-            : 1;
+        int lightSampleCount = clamp(
+            pointLightShadowSamples,
+            1,
+            MAX_POINT_LIGHT_SAMPLES);
         bool boundedMultiLightCluster = denseDynamicLightCluster != 0;
         if (boundedMultiLightCluster)
         {
             lightSampleCount = 1;
         }
         bool cameraAlignedLight = voxelLightCasterLayer[lightIndex] < -0.5
-            && distance(lightPositionIntensity.xyz, cameraWorldPosition) < 0.75;
+            && distance(lightPositionIntensity.xyz, floatingWorldOrigin) < 0.75;
         // A held/camera-aligned emitter shares the unobstructed primary-view
         // segment and is resolved per source in the final pass. Excluding it
         // here prevents its guaranteed visibility from brightening the
@@ -2509,17 +2843,17 @@ float traceRawPointShadowVisibility(
         }
         visibility /= float(lightSampleCount);
 
-        potentialWeight += shadowPotential;
-        occludedWeight += shadowPotential * (1.0 - visibility);
+        setPointShadowVisibility(
+            pointVisibilityA,
+            pointVisibilityB,
+            lightIndex,
+            visibility);
     }
-
-    return potentialWeight > 0.001
-        ? 1.0 - clamp(occludedWeight / potentialWeight, 0.0, 1.0)
-        : 1.0;
 }
 
 float traceRawSunShadowVisibility(
     vec3 worldPosition,
+    vec3 relativeWorldPosition,
     vec3 worldGeometricNormal)
 {
     float sunGeometricReceiver = max(
@@ -2533,11 +2867,17 @@ float traceRawSunShadowVisibility(
     vec3 sunRayOrigin = worldPosition
         + worldGeometricNormal * 0.12
         + sunDirection * 0.04;
-    return traceSunVisibility(sunRayOrigin);
+    return traceSunVisibility(relativeWorldPosition, sunRayOrigin);
 }
 
 vec2 shadowFilterOffset(int index)
 {
+    if (shadowFilterTapCount == 2)
+    {
+        return index == 0
+            ? vec2(0.70710678, 0.70710678)
+            : vec2(-0.70710678, -0.70710678);
+    }
     if (index == 0)
     {
         return vec2(1.0, 0.0);
@@ -2553,22 +2893,35 @@ vec2 shadowFilterOffset(int index)
     return vec2(0.0, -1.0);
 }
 
-vec2 filterShadowVisibility(
+void filterShadowVisibilities(
     vec3 centerPosition,
-    vec3 centerNormal)
+    vec3 centerNormal,
+    out vec4 filteredPointA,
+    out vec4 filteredPointB,
+    out float filteredSun)
 {
-    // RG carries independent dimensionless visibility fractions:
-    // R = aggregate selected point lights, G = direct sun.
-    vec2 centerVisibility = clamp(texture(shadowCurrent, uv).rg, 0.0, 1.0);
-    vec2 accumulated = centerVisibility;
+    vec4 centerPointA = clamp(texture(shadowPointCurrentA, uv), 0.0, 1.0);
+    vec4 centerPointB = clamp(texture(shadowPointCurrentB, uv), 0.0, 1.0);
+    float centerSun = clamp(texture(shadowSunCurrent, uv).r, 0.0, 1.0);
+    vec4 accumulatedPointA = centerPointA;
+    vec4 accumulatedPointB = centerPointB;
+    float accumulatedSun = centerSun;
     float accumulatedWeight = 1.0;
-    vec2 neighborhoodMinimum = centerVisibility;
-    vec2 neighborhoodMaximum = centerVisibility;
+    vec4 neighborhoodMinimumPointA = centerPointA;
+    vec4 neighborhoodMaximumPointA = centerPointA;
+    vec4 neighborhoodMinimumPointB = centerPointB;
+    vec4 neighborhoodMaximumPointB = centerPointB;
+    float neighborhoodMinimumSun = centerSun;
+    float neighborhoodMaximumSun = centerSun;
     float centerDepth = abs(centerPosition.z);
     float depthScale = max(0.025, centerDepth * 0.0025);
 
     for (int index = 0; index < 4; index++)
     {
+        if (index >= shadowFilterTapCount)
+        {
+            break;
+        }
         vec2 sampleUv = clamp(
             uv + shadowFilterOffset(index) * shadowInverseFrameSize,
             shadowInverseFrameSize * 0.5,
@@ -2593,44 +2946,92 @@ vec2 filterShadowVisibility(
             continue;
         }
 
-        vec2 neighborVisibility = clamp(
-            texture(shadowCurrent, sampleUv).rg,
+        vec4 neighborPointA = clamp(
+            texture(shadowPointCurrentA, sampleUv),
             0.0,
             1.0);
-        accumulated += neighborVisibility * weight;
+        vec4 neighborPointB = clamp(
+            texture(shadowPointCurrentB, sampleUv),
+            0.0,
+            1.0);
+        float neighborSun = clamp(
+            texture(shadowSunCurrent, sampleUv).r,
+            0.0,
+            1.0);
+        accumulatedPointA += neighborPointA * weight;
+        accumulatedPointB += neighborPointB * weight;
+        accumulatedSun += neighborSun * weight;
         accumulatedWeight += weight;
-        neighborhoodMinimum = min(neighborhoodMinimum, neighborVisibility);
-        neighborhoodMaximum = max(neighborhoodMaximum, neighborVisibility);
+        neighborhoodMinimumPointA = min(neighborhoodMinimumPointA, neighborPointA);
+        neighborhoodMaximumPointA = max(neighborhoodMaximumPointA, neighborPointA);
+        neighborhoodMinimumPointB = min(neighborhoodMinimumPointB, neighborPointB);
+        neighborhoodMaximumPointB = max(neighborhoodMaximumPointB, neighborPointB);
+        neighborhoodMinimumSun = min(neighborhoodMinimumSun, neighborSun);
+        neighborhoodMaximumSun = max(neighborhoodMaximumSun, neighborSun);
     }
 
-    vec2 spatialVisibility = accumulated / max(accumulatedWeight, 0.001);
+    vec4 spatialPointA = accumulatedPointA / max(accumulatedWeight, 0.001);
+    vec4 spatialPointB = accumulatedPointB / max(accumulatedWeight, 0.001);
+    float spatialSun = accumulatedSun / max(accumulatedWeight, 0.001);
     if (shadowTemporalBlend <= 0.001)
     {
-        return spatialVisibility;
+        filteredPointA = spatialPointA;
+        filteredPointB = spatialPointB;
+        filteredSun = spatialSun;
+        return;
     }
 
-    vec2 unclampedHistory = texture(shadowHistory, uv).rg;
-    vec2 previousVisibility = clamp(
-        unclampedHistory,
-        neighborhoodMinimum,
-        neighborhoodMaximum);
-    vec2 historyDisagreement = abs(unclampedHistory - spatialVisibility);
-    vec2 historyRejection = smoothstep(
-        vec2(0.04),
-        vec2(0.15),
-        historyDisagreement);
-    vec2 acceptedHistoryWeight = clamp(shadowTemporalBlend, 0.0, 0.94)
-        * (vec2(1.0) - historyRejection);
-    return mix(spatialVisibility, previousVisibility, acceptedHistoryWeight);
+    vec4 unclampedHistoryPointA = texture(shadowPointHistoryA, uv);
+    vec4 unclampedHistoryPointB = texture(shadowPointHistoryB, uv);
+    float unclampedHistorySun = texture(shadowSunHistory, uv).r;
+    vec4 previousPointA = clamp(
+        unclampedHistoryPointA,
+        neighborhoodMinimumPointA,
+        neighborhoodMaximumPointA);
+    vec4 previousPointB = clamp(
+        unclampedHistoryPointB,
+        neighborhoodMinimumPointB,
+        neighborhoodMaximumPointB);
+    float previousSun = clamp(
+        unclampedHistorySun,
+        neighborhoodMinimumSun,
+        neighborhoodMaximumSun);
+    vec4 pointRejectionA = smoothstep(
+        vec4(0.04),
+        vec4(0.15),
+        abs(unclampedHistoryPointA - spatialPointA));
+    vec4 pointRejectionB = smoothstep(
+        vec4(0.04),
+        vec4(0.15),
+        abs(unclampedHistoryPointB - spatialPointB));
+    float sunRejection = smoothstep(
+        0.04,
+        0.15,
+        abs(unclampedHistorySun - spatialSun));
+    float historyWeight = clamp(shadowTemporalBlend, 0.0, 0.94);
+    filteredPointA = mix(
+        spatialPointA,
+        previousPointA,
+        vec4(historyWeight) * (vec4(1.0) - pointRejectionA));
+    filteredPointB = mix(
+        spatialPointB,
+        previousPointB,
+        vec4(historyWeight) * (vec4(1.0) - pointRejectionB));
+    filteredSun = mix(
+        spatialSun,
+        previousSun,
+        historyWeight * (1.0 - sunRejection));
 }
 
 VoxelLightingResult traceVoxelPointLight(
     vec3 worldPosition,
+    vec3 relativeWorldPosition,
     vec3 worldNormal,
     vec3 worldGeometricNormal,
     float surfaceRoughness,
     float authoredMetallicHint,
-    float filteredPointVisibility,
+    vec4 filteredPointVisibilityA,
+    vec4 filteredPointVisibilityB,
     float filteredSunVisibility)
 {
     VoxelLightingResult result;
@@ -2682,7 +3083,10 @@ VoxelLightingResult traceVoxelPointLight(
         vec3 linearEmitterColor = emitterColor(lightColorRadius.rgb);
         vec3 toLight = lightPositionIntensity.xyz - worldPosition;
         float lightDistance = length(toLight);
-        float lightRadius = min(lightColorRadius.w, pointLightRadius);
+        float lightRadius = physicalLightRange(
+            lightIndex,
+            lightPositionIntensity.w,
+            min(lightColorRadius.w, pointLightRadius));
         if (lightDistance <= 0.001 || lightDistance >= lightRadius)
         {
             continue;
@@ -2693,9 +3097,11 @@ VoxelLightingResult traceVoxelPointLight(
         float geometricReceiver = max(
             dot(worldGeometricNormal, lightDirection),
             0.0);
-        float radiusFade = 1.0 - smoothstep(lightRadius * 0.55, lightRadius, lightDistance);
-        float inverseSquare = 1.0 / (1.0 + 0.075 * lightDistance * lightDistance);
-        float attenuation = radiusFade * inverseSquare * lightPositionIntensity.w;
+        float radiusFade = photometricRangeFade(lightDistance, lightRadius);
+        float attenuation = radiusFade * photometricIncidentRadiance(
+            lightIndex,
+            lightPositionIntensity.w,
+            lightDistance);
         float directionWeight = dot(
             linearEmitterColor,
             LUMA) * attenuation;
@@ -2713,28 +3119,32 @@ VoxelLightingResult traceVoxelPointLight(
         }
 
         bool cameraAlignedLight = voxelLightCasterLayer[lightIndex] < -0.5
-            && distance(lightPositionIntensity.xyz, cameraWorldPosition) < 0.75;
-        // The half-resolution R channel aggregates only world-space lamps.
-        // A camera-aligned held emitter must remain unoccluded independently
-        // of that aggregate, including when prefiltered visibility is active.
+            && distance(lightPositionIntensity.xyz, floatingWorldOrigin) < 0.75;
+        // Each half-resolution channel belongs to exactly one world-space
+        // lamp. A camera-aligned held emitter remains independently
+        // unobstructed because it shares the primary-view origin.
         float visibility = cameraAlignedLight
             ? 1.0
-            : clamp(filteredPointVisibility, 0.0, 1.0);
+            : clamp(pointShadowVisibilityAt(
+                filteredPointVisibilityA,
+                filteredPointVisibilityB,
+                lightIndex), 0.0, 1.0);
         if (prefilteredShadowVisibility == 0 && !cameraAlignedLight)
         {
             vec3 rayOrigin = worldPosition
                 + worldGeometricNormal * 0.12
                 + lightDirection * 0.04;
-            int lightSampleCount = debugView == 0
-                ? clamp(pointLightShadowSamples, 1, MAX_POINT_LIGHT_SAMPLES)
-                : 1;
+            int lightSampleCount = clamp(
+                pointLightShadowSamples,
+                1,
+                MAX_POINT_LIGHT_SAMPLES);
             if (denseDynamicLightCluster != 0)
             {
                 lightSampleCount = 1;
             }
             // The dedicated raw pass traces every shadowable world-space
             // source. This fallback preserves identical physics only when
-            // the owned RG16F filter target is unavailable.
+            // the owned MRT visibility history is unavailable.
             visibility = 0.0;
             for (int sampleIndex = 0; sampleIndex < MAX_POINT_LIGHT_SAMPLES; sampleIndex++)
             {
@@ -2809,15 +3219,13 @@ VoxelLightingResult traceVoxelPointLight(
         result.irradianceDirection = normalize(irradianceDirectionSum);
     }
 
-    // At the interlaced tier, amortize only the secondary bounce over
-    // three whole frames. A full-frame cadence avoids divergent 2x2
-    // pixel branches (and their checkerboard artifacts), while temporal
-    // history and the directional cache retain the previous radiance.
-    // History resets always issue a fresh ray immediately.
-    bool traceSecondaryBounce = transportInterlace == 0
+    // Retain the cadence uniform for shader ABI compatibility, but normal
+    // runtime profiles bind one: writing zero radiance on skipped frames made
+    // temporal history decay twice and then spike on the traced frame.
+    bool traceSecondaryBounce = secondaryBounceCadence <= 1
         || temporalBlend <= 0.001
         || debugView == 8
-        || temporalFrameIndex % 3 == 0;
+        || temporalFrameIndex % max(secondaryBounceCadence, 1) == 0;
     result.bounce = traceSecondaryBounce
         ? traceVoxelDiffuseBounce(
             worldPosition,
@@ -2832,9 +3240,14 @@ VoxelLightingResult traceVoxelPointLight(
     result.visibility = potentialWeight > 0.001
         ? 1.0 - clamp(occludedWeight / potentialWeight, 0.0, 1.0)
         : 1.0;
+    // strongestBlockedEnergy is scene-linear incident radiance after the
+    // CIE candela-to-lux transport above. The response begins near 0.034 lux
+    // and reaches full display contrast near 0.34 lux after undoing the fixed
+    // 1.1/pi exposure conversion. This preserves low-light shadow perception
+    // without extending the physical source or altering its inverse-square law.
     float localShadowEnergy = smoothstep(
-        0.100,
-        0.450,
+        0.012,
+        0.120,
         strongestBlockedEnergy);
     result.shadow = (1.0 - result.visibility) * localShadowEnergy;
 
@@ -2850,7 +3263,7 @@ VoxelLightingResult traceVoxelPointLight(
             + sunDirection * 0.04;
         result.sunVisibility = prefilteredShadowVisibility != 0
             ? clamp(filteredSunVisibility, 0.0, 1.0)
-            : traceSunVisibility(sunRayOrigin);
+            : traceSunVisibility(relativeWorldPosition, sunRayOrigin);
         result.sunDirect = srgbToLinear(sunColorStrength.rgb) * sunColorStrength.w
             * sunReceiver * result.sunVisibility;
         if (directSpecularHint > 0.001)
@@ -2930,10 +3343,10 @@ LightingResult traceScreenSpaceLighting(vec3 origin, vec3 normal)
     // point clouds on broad walls. While the camera moves, hold the
     // phase fixed; once history is valid, eight golden-angle phases
     // converge without spatial sparkle.
-    float temporalSample = temporalBlend > 0.001
-        ? float(temporalFrameIndex & 7)
-        : 0.0;
-    float rotation = temporalSample * 2.39996322973;
+    // Screen-space transport uses a fixed coherent basis. Rotating a one-ray
+    // basis per frame makes broad walls change irradiance even when neither
+    // the receiver nor any source moved.
+    float rotation = 0.0;
     float rotationCos = cos(rotation);
     float rotationSin = sin(rotation);
 
@@ -2984,7 +3397,19 @@ LightingResult traceScreenSpaceLighting(vec3 origin, vec3 normal)
                 continue;
             }
 
-            vec3 hitNormal = normalize(texture(gNormal, hitUv).xyz);
+            vec4 hitNormalRoughness = texture(gNormal, hitUv);
+            // Animated entities have no motion vectors or previous geometry
+            // identity in this screen-space transport buffer. Treating them as
+            // diffuse bounce sources made one passing animal relight broad,
+            // otherwise static walls and then linger in temporal history.
+            // They remain fully shaded as receivers and keep their dedicated
+            // reflection path; only their unstable SSGI source role is skipped.
+            if (hitNormalRoughness.a < -0.0005)
+            {
+                continue;
+            }
+
+            vec3 hitNormal = normalize(hitNormalRoughness.xyz);
             float receiverTerm = max(dot(normal, rayDirection), 0.0);
             float emitterTerm = max(dot(hitNormal, -rayDirection), 0.0);
             float distanceFade = 1.0 - stepFraction;
@@ -2992,7 +3417,11 @@ LightingResult traceScreenSpaceLighting(vec3 origin, vec3 normal)
             float edgeFade = smoothstep(0.0, 0.08, min(edgeDistance.x, edgeDistance.y));
             float confidence = receiverTerm * (0.2 + 0.8 * emitterTerm) * distanceFade * edgeFade;
 
-            result.indirect += texture(sourceColor, hitUv).rgb * confidence;
+            // Colour, position and normal must come from the same late-opaque
+            // snapshot. The post-processed source can already contain a moving
+            // entity at a pixel whose retained G-buffer still describes terrain,
+            // which incorrectly turns that entity into wall-bounce radiance.
+            result.indirect += sampleReflectionSource(hitUv) * confidence;
             result.occlusion += receiverTerm * distanceFade * distanceFade;
             result.confidence += confidence;
             break;
@@ -3037,7 +3466,10 @@ vec3 shadeVoxelReflectionHit(
         vec4 lightColorRadius = voxelLightColorRadius[lightIndex];
         vec3 toLight = lightPositionIntensity.xyz - hitPosition;
         float distanceToLight = length(toLight);
-        float lightRadius = min(lightColorRadius.w, pointLightRadius);
+        float lightRadius = physicalLightRange(
+            lightIndex,
+            lightPositionIntensity.w,
+            min(lightColorRadius.w, pointLightRadius));
         if (distanceToLight <= 0.001 || distanceToLight >= lightRadius)
         {
             continue;
@@ -3045,18 +3477,16 @@ vec3 shadeVoxelReflectionHit(
 
         vec3 lightDirection = toLight / distanceToLight;
         float receiver = max(dot(hitNormal, lightDirection), 0.0);
-        float radiusFade = 1.0 - smoothstep(
-            lightRadius * 0.55,
-            lightRadius,
+        float radiusFade = photometricRangeFade(distanceToLight, lightRadius);
+        float incidentRadiance = photometricIncidentRadiance(
+            lightIndex,
+            lightPositionIntensity.w,
             distanceToLight);
-        float inverseSquare = 1.0
-            / (1.0 + 0.075 * distanceToLight * distanceToLight);
         reflectedColor += hitAlbedo
             * lightColorRadius.rgb
-            * lightPositionIntensity.w
             * receiver
             * radiusFade
-            * inverseSquare
+            * incidentRadiance
             * 0.75;
     }
 
@@ -3162,22 +3592,22 @@ ReflectionResult traceVoxelReflection(
             break;
         }
 
-        float traveled;
-        if (sideDistance.x <= sideDistance.y && sideDistance.x <= sideDistance.z)
+        float traveled = min(sideDistance.x, min(sideDistance.y, sideDistance.z));
+        // Reflection rays obey the same measure-zero boundary rule as shadow
+        // rays; otherwise a diagonal contact reports a neighbouring full
+        // block that the ray never enters.
+        if (sideDistance.x <= traveled + 0.00001)
         {
-            traveled = sideDistance.x;
             sideDistance.x += deltaDistance.x;
             cell.x += stepDirection.x;
         }
-        else if (sideDistance.y <= sideDistance.z)
+        if (sideDistance.y <= traveled + 0.00001)
         {
-            traveled = sideDistance.y;
             sideDistance.y += deltaDistance.y;
             cell.y += stepDirection.y;
         }
-        else
+        if (sideDistance.z <= traveled + 0.00001)
         {
-            traveled = sideDistance.z;
             sideDistance.z += deltaDistance.z;
             cell.z += stepDirection.z;
         }
@@ -3237,6 +3667,8 @@ ReflectionResult traceVoxelReflection(
 ReflectionResult traceScreenSpaceReflection(
     vec3 origin,
     vec3 normal,
+    vec3 worldPosition,
+    vec3 worldNormal,
     float roughness,
     vec3 surfaceColor,
     int allowVoxelFallback)
@@ -3278,10 +3710,6 @@ ReflectionResult traceScreenSpaceReflection(
         return result;
     }
 
-    vec3 viewRay = normalize(origin);
-    vec3 rayDirection = normalize(reflect(viewRay, normal));
-    vec3 rayOrigin = origin + normal * 0.055 + rayDirection * 0.035;
-    float roughDistance = reflectionDistance * mix(1.0, 0.45, roughness);
     float voxelRoughnessLimit = voxelReflectionSteps >= 24
         ? 0.78
         : voxelReflectionSteps >= 12
@@ -3301,15 +3729,6 @@ ReflectionResult traceScreenSpaceReflection(
     // material alpha marks fluids/glass at 0.25; combine it with an
     // upward-facing world normal to provide a stable planar fallback
     // instead of returning a black, stippled miss mask.
-    vec3 worldPosition = (inverseViewMatrix * vec4(origin, 1.0)).xyz
-        + floatingWorldOrigin;
-    vec3 worldNormal = normalize((inverseViewMatrix * vec4(normal, 0.0)).xyz);
-    float surfaceLuminance = dot(surfaceColor, LUMA);
-    float blueGreenLead = min(
-        surfaceColor.g - surfaceColor.r,
-        surfaceColor.b - surfaceColor.r);
-    float waterColorHint = (1.0 - smoothstep(0.42, 0.68, surfaceLuminance))
-        * smoothstep(0.015, 0.12, blueGreenLead);
     vec3 localWorldPosition = worldPosition - voxelOrigin;
     vec2 fluidSurfaceLocalWorldPosition = worldPosition.xz - fluidSurfaceOrigin;
     bool insideFluidColumns = all(greaterThanEqual(
@@ -3357,6 +3776,16 @@ ReflectionResult traceScreenSpaceReflection(
     {
         return result;
     }
+    vec3 viewRay = normalize(origin);
+    vec3 rayDirection = normalize(reflect(viewRay, normal));
+    vec3 rayOrigin = origin + normal * 0.055 + rayDirection * 0.035;
+    float roughDistance = reflectionDistance * mix(1.0, 0.45, roughness);
+    float surfaceLuminance = dot(surfaceColor, LUMA);
+    float blueGreenLead = min(
+        surfaceColor.g - surfaceColor.r,
+        surfaceColor.b - surfaceColor.r);
+    float waterColorHint = (1.0 - smoothstep(0.42, 0.68, surfaceLuminance))
+        * smoothstep(0.015, 0.12, blueGreenLead);
     float fluidSurfaceWorldY = encodedFluidSurface > 0.5 / 255.0
         ? decodeFluidSurfaceWorldY(fluidColumnData)
         : containedSurfaceWorldY;
@@ -4742,12 +5171,18 @@ vec3 denoiseTemporalHistory(
         return centerHistory;
     }
 
-    // Cross-bilateral temporal denoiser: only history samples belonging
-    // to the same surface and source-colour neighbourhood are mixed.
-    // This removes residual ray speckles without bleeding across block
-    // silhouettes, lantern bars or high-frequency material boundaries.
-    vec3 accumulated = centerHistory;
+    // Cross-bilateral temporal denoiser: only transport deltas belonging
+    // to the same surface and source-colour neighbourhood are mixed. Keeping
+    // each sample relative to its own full-resolution carrier prevents the
+    // denoiser from blurring texture, alpha-test and lantern-bar detail.
+    vec3 centerCarrier = outputColorDomain != 0
+        ? centerSource
+        : applyDisplayGrade(centerSource);
+    vec3 accumulatedDelta = centerHistory - centerCarrier;
     float accumulatedWeight = 1.0;
+    vec3 coherentMinimumDelta = vec3(1000.0);
+    vec3 coherentMaximumDelta = vec3(-1000.0);
+    int coherentNeighborCount = 0;
     float centerLuminance = dot(centerSource, LUMA);
     float luminanceSum = centerLuminance;
     float luminanceSquaredSum = centerLuminance * centerLuminance;
@@ -4764,6 +5199,9 @@ vec3 denoiseTemporalHistory(
             inverseFrameSize * 0.5,
             vec2(1.0) - inverseFrameSize * 0.5);
         vec3 neighborSource = texture(sourceColor, sampleUv).rgb;
+        vec3 neighborCarrier = outputColorDomain != 0
+            ? neighborSource
+            : applyDisplayGrade(neighborSource);
         float neighborLuminance = dot(neighborSource, LUMA);
         luminanceSum += neighborLuminance;
         luminanceSquaredSum += neighborLuminance * neighborLuminance;
@@ -4782,12 +5220,38 @@ vec3 denoiseTemporalHistory(
         float depthWeight = exp(
             -abs(neighborPosition.z - centerPosition.z) / depthScale);
         float sourceWeight = exp(-length(neighborSource - centerSource) * 28.0);
-        float weight = normalWeight * depthWeight * sourceWeight;
-        accumulated += texture(historyColor, sampleUv).rgb * weight;
+        float geometryWeight = normalWeight * depthWeight;
+        float weight = geometryWeight * sourceWeight;
+        vec3 neighborDelta = texture(historyColor, sampleUv).rgb
+            - neighborCarrier;
+        // A one-pixel-long voxel ray can occasionally miss a distant caster
+        // while every coherent neighbour hits it. Build a source-independent
+        // transport envelope from the same geometric surface: the carrier-
+        // relative representation preserves authored texture even when the
+        // correction is clamped to that neighbourhood.
+        if (geometryWeight > 0.05)
+        {
+            coherentMinimumDelta = min(coherentMinimumDelta, neighborDelta);
+            coherentMaximumDelta = max(coherentMaximumDelta, neighborDelta);
+            coherentNeighborCount++;
+        }
+        accumulatedDelta += neighborDelta * weight;
         accumulatedWeight += weight;
     }
 
-    vec3 filteredHistory = accumulated / max(accumulatedWeight, 0.001);
+    vec3 filteredDelta = accumulatedDelta / max(accumulatedWeight, 0.001);
+    if (coherentNeighborCount >= 2)
+    {
+        // Excluding the centre from this envelope is intentional: a stable
+        // isolated visibility miss would otherwise enlarge its own bounds and
+        // survive forever. A small radiometric margin retains soft penumbrae.
+        const float transportEnvelopeMargin = 0.020;
+        filteredDelta = clamp(
+            filteredDelta,
+            coherentMinimumDelta - vec3(transportEnvelopeMargin),
+            coherentMaximumDelta + vec3(transportEnvelopeMargin));
+    }
+    vec3 filteredHistory = centerCarrier + filteredDelta;
     float temporalSampleCount = float(temporalDenoiseSamples + 1);
     float meanLuminance = luminanceSum / temporalSampleCount;
     float variance = max(
@@ -4795,8 +5259,7 @@ vec3 denoiseTemporalHistory(
             - meanLuminance * meanLuminance,
         0.0);
     float sigma = sqrt(variance);
-    vec3 displaySource = applyDisplayGrade(centerSource);
-    float effectMagnitude = min(length(currentColor - displaySource), 0.16);
+    float effectMagnitude = min(length(currentColor - centerCarrier), 0.16);
     float clippingRadius = 0.018 + sigma * 0.9 + effectMagnitude * 0.65;
 
     // Variance clipping prevents one anomalous ray from being retained
@@ -4830,7 +5293,9 @@ void main()
     float normalLength = length(encodedNormal);
     bool hasGeometry = dot(position, position) > 0.0001 && normalLength > 0.1;
     bool geometryWasRepaired = false;
-    vec2 repairedShadowVisibility = vec2(0.0);
+    vec4 repairedPointVisibilityA = vec4(0.0);
+    vec4 repairedPointVisibilityB = vec4(0.0);
+    float repairedSunVisibility = 0.0;
     int repairedShadowVisibilityCount = 0;
     // Raw/filter masks classify only real G-buffer receivers. Repeating the
     // four-neighbour hole repair in both half-resolution passes spent ten
@@ -4880,11 +5345,20 @@ void main()
             filledRoughness += candidateNormalRoughness.a;
             if (prefilteredShadowVisibility != 0)
             {
-                // Dimensionless R=point/G=sun visibility is sampled at the
-                // same full-resolution neighbour UV. Linear sampling performs
-                // the intended half-resolution mask reconstruction.
-                repairedShadowVisibility += clamp(
-                    texture(shadowHistory, neighbourUv).rg,
+                // Every point-light slot and the sun inherit only the same
+                // coherent receiver neighbours. Linear sampling performs the
+                // intended half-resolution mask reconstruction without
+                // collapsing physically independent sources.
+                repairedPointVisibilityA += clamp(
+                    texture(shadowPointHistoryA, neighbourUv),
+                    0.0,
+                    1.0);
+                repairedPointVisibilityB += clamp(
+                    texture(shadowPointHistoryB, neighbourUv),
+                    0.0,
+                    1.0);
+                repairedSunVisibility += clamp(
+                    texture(shadowSunHistory, neighbourUv).r,
                     0.0,
                     1.0);
                 repairedShadowVisibilityCount++;
@@ -4910,46 +5384,76 @@ void main()
     vec3 normal = hasGeometry
         ? encodedNormal / normalLength
         : vec3(0.0, 0.0, 1.0);
-    vec3 earlyWorldPosition = (inverseViewMatrix * vec4(position, 1.0)).xyz
-        + floatingWorldOrigin;
-    vec3 earlyWorldNormal = normalize(
-        (inverseViewMatrix * vec4(normal, 0.0)).xyz);
     if (shadowPass == 2)
     {
-        vec2 filteredVisibility = hasGeometry
-            ? filterShadowVisibility(position, normal)
-            : vec2(1.0);
-        outColor = vec4(filteredVisibility, 0.0, 1.0);
+        vec4 filteredPointA = vec4(1.0);
+        vec4 filteredPointB = vec4(1.0);
+        float filteredSun = 1.0;
+        if (hasGeometry)
+        {
+            filterShadowVisibilities(
+                position,
+                normal,
+                filteredPointA,
+                filteredPointB,
+                filteredSun);
+        }
+        outColor = filteredPointA;
+        outShadowPointB = filteredPointB;
+        outShadowSun = vec4(filteredSun, 0.0, 0.0, 1.0);
         return;
     }
     if (shadowPass == 1)
     {
-        vec2 rawVisibility = vec2(1.0);
-        if (hasGeometry
-            && voxelLightingEnabled != 0
-            && isInsideVoxelVolume(earlyWorldPosition))
+        vec4 rawPointA = vec4(1.0);
+        vec4 rawPointB = vec4(1.0);
+        float rawSun = 1.0;
+        if (hasGeometry && voxelLightingEnabled != 0)
         {
-            vec3 positionDx = dFdx(earlyWorldPosition);
-            vec3 positionDy = dFdy(earlyWorldPosition);
-            vec3 derivativeNormal = cross(positionDx, positionDy);
-            vec3 worldGeometricNormal = earlyWorldNormal;
-            if (dot(derivativeNormal, derivativeNormal) > 0.000001)
+            vec3 rawRelativeWorldPosition = (
+                inverseViewMatrix * vec4(position, 1.0)).xyz;
+            vec3 rawWorldPosition = rawRelativeWorldPosition + floatingWorldOrigin;
+            if (isInsideVoxelVolume(rawWorldPosition))
             {
-                derivativeNormal = normalize(derivativeNormal);
-                worldGeometricNormal = dot(derivativeNormal, earlyWorldNormal) < 0.0
-                    ? -derivativeNormal
-                    : derivativeNormal;
+                vec3 rawWorldNormal = normalize(
+                    (inverseViewMatrix * vec4(normal, 0.0)).xyz);
+                vec3 positionDx = dFdx(rawWorldPosition);
+                vec3 positionDy = dFdy(rawWorldPosition);
+                vec3 derivativeNormal = cross(positionDx, positionDy);
+                vec3 worldGeometricNormal = rawWorldNormal;
+                if (dot(derivativeNormal, derivativeNormal) > 0.000001)
+                {
+                    derivativeNormal = normalize(derivativeNormal);
+                    worldGeometricNormal = dot(derivativeNormal, rawWorldNormal) < 0.0
+                        ? -derivativeNormal
+                        : derivativeNormal;
+                }
+                traceRawPointShadowVisibilities(
+                    rawWorldPosition,
+                    worldGeometricNormal,
+                    rawPointA,
+                    rawPointB);
+                rawSun = traceRawSunShadowVisibility(
+                    rawWorldPosition,
+                    rawRelativeWorldPosition,
+                    worldGeometricNormal);
             }
-            rawVisibility.r = traceRawPointShadowVisibility(
-                earlyWorldPosition,
-                worldGeometricNormal);
-            rawVisibility.g = traceRawSunShadowVisibility(
-                earlyWorldPosition,
-                worldGeometricNormal);
         }
-        outColor = vec4(rawVisibility, 0.0, 1.0);
+        outColor = rawPointA;
+        outShadowPointB = rawPointB;
+        outShadowSun = vec4(rawSun, 0.0, 0.0, 1.0);
         return;
     }
+    if (debugView == 0 && !hasGeometry)
+    {
+        outColor = vec4(texture(sourceColor, uv).rgb, 1.0);
+        return;
+    }
+    vec3 earlyRelativeWorldPosition = (
+        inverseViewMatrix * vec4(position, 1.0)).xyz;
+    vec3 earlyWorldPosition = earlyRelativeWorldPosition + floatingWorldOrigin;
+    vec3 earlyWorldNormal = normalize(
+        (inverseViewMatrix * vec4(normal, 0.0)).xyz);
     float earlyRainExposure = hasGeometry
         ? sampleRainExposure(earlyWorldPosition, earlyWorldNormal)
         : 0.0;
@@ -4965,7 +5469,7 @@ void main()
             deferredFirstPersonOverlayEvidence(uv, position))
         : 0.0;
     if (debugView == 0
-        && (!hasGeometry || primaryFirstPersonOverlay > 0.001))
+        && primaryFirstPersonOverlay > 0.001)
     {
         outColor = vec4(texture(sourceColor, uv).rgb, 1.0);
         return;
@@ -5053,9 +5557,10 @@ void main()
         ? (packedAlbedoBits + 0.5) / 32.0
         : -1.0;
     int packedMaterial = int(floor(deferredMaterial.b * 255.0 + 0.5));
+    float pbrPayloadPresent = (packedMaterial & 32) != 0 ? 1.0 : 0.0;
     float materialMapPresent = (packedMaterial & 64) != 0 ? 1.0 : 0.0;
-    float authoredMetallic = float(packedMaterial & 7) / 7.0;
-    float authoredEmissive = float((packedMaterial >> 3) & 7) / 7.0;
+    float authoredMetallic = float(packedMaterial & 3) / 3.0;
+    float authoredEmissive = float((packedMaterial >> 2) & 7) / 7.0;
     float rasterGlow = clamp(deferredMaterial.r, 0.0, 1.0);
     float vegetationSurface = dynamicSurface > 0.5
         ? 0.0
@@ -5120,11 +5625,18 @@ void main()
     reflection.liquidShoreColumnEvidence = 0.0;
     reflection.liquidShoreSurfaceUv = uv;
     reflection.liquidShoreSurfaceConfidence = 0.0;
-    if (screenSpaceReflectionsEnabled != 0 && hasGeometry)
+    // Performance skips the screen-depth walk but retains the off-screen
+    // voxel/environment branch. Keeping this call alive for either source
+    // makes the lowest tier a real reflection LOD instead of silently
+    // disabling reflections together with SSR.
+    if ((screenSpaceReflectionsEnabled != 0 || voxelReflectionsEnabled != 0)
+        && hasGeometry)
     {
         reflection = traceScreenSpaceReflection(
             position,
             normal,
+            earlyWorldPosition,
+            earlyWorldNormal,
             surfaceRoughness,
             source,
             1);
@@ -5268,26 +5780,55 @@ void main()
                 // one-pixel receiver inherits at least two already filtered,
                 // geometrically coherent neighbours rather than forcing both
                 // half-resolution passes to reconstruct and trace empty sky.
-                vec2 resolvedShadowVisibility = vec2(1.0);
+                vec4 resolvedPointVisibilityA = vec4(1.0);
+                vec4 resolvedPointVisibilityB = vec4(1.0);
+                float resolvedSunVisibility = 1.0;
                 if (prefilteredShadowVisibility != 0)
                 {
-                    resolvedShadowVisibility = geometryWasRepaired
-                        && repairedShadowVisibilityCount >= 2
-                        ? clamp(
-                            repairedShadowVisibility
-                                / float(repairedShadowVisibilityCount),
+                    if (geometryWasRepaired
+                        && repairedShadowVisibilityCount >= 2)
+                    {
+                        float inverseRepairCount = 1.0
+                            / float(repairedShadowVisibilityCount);
+                        resolvedPointVisibilityA = clamp(
+                            repairedPointVisibilityA * inverseRepairCount,
                             0.0,
-                            1.0)
-                        : clamp(texture(shadowHistory, uv).rg, 0.0, 1.0);
+                            1.0);
+                        resolvedPointVisibilityB = clamp(
+                            repairedPointVisibilityB * inverseRepairCount,
+                            0.0,
+                            1.0);
+                        resolvedSunVisibility = clamp(
+                            repairedSunVisibility * inverseRepairCount,
+                            0.0,
+                            1.0);
+                    }
+                    else
+                    {
+                        resolvedPointVisibilityA = clamp(
+                            texture(shadowPointHistoryA, uv),
+                            0.0,
+                            1.0);
+                        resolvedPointVisibilityB = clamp(
+                            texture(shadowPointHistoryB, uv),
+                            0.0,
+                            1.0);
+                        resolvedSunVisibility = clamp(
+                            texture(shadowSunHistory, uv).r,
+                            0.0,
+                            1.0);
+                    }
                 }
                 voxelLighting = traceVoxelPointLight(
                     worldPosition,
+                    earlyRelativeWorldPosition,
                     worldNormal,
                     worldGeometricNormal,
                     specularFilteredSurfaceRoughness,
                     materialMapPresent * authoredMetallic,
-                    resolvedShadowVisibility.r,
-                    resolvedShadowVisibility.g);
+                    resolvedPointVisibilityA,
+                    resolvedPointVisibilityB,
+                    resolvedSunVisibility);
             }
         }
     }
@@ -5297,6 +5838,18 @@ void main()
         outColor = vec4(hasGeometry ? normal * 0.5 + 0.5 : vec3(0.0), 1.0);
         return;
     }
+
+    // Wind animation is not a complete vegetation classifier: static flowers,
+    // reeds and some crossed-plane plants legitimately omit WindModeBitMask.
+    // The voxel scene therefore carries the block material as a separate low
+    // alpha bit. It is sampled at the exact visible surface, so ground below a
+    // plant remains eligible for physical relighting while the plant fragment
+    // retains its alpha-tested raster chroma and coverage.
+    int voxelMaterialBits = int(floor(voxelLighting.material.a * 255.0 + 0.5));
+    float voxelVegetationSurface = (voxelMaterialBits & 8) != 0 ? 1.0 : 0.0;
+    vegetationSurface = max(
+        vegetationSurface,
+        voxelVegetationSurface * (1.0 - dynamicSurface));
 
     if (debugView == 12)
     {
@@ -5435,6 +5988,38 @@ void main()
         return;
     }
 
+    if (debugView == 17)
+    {
+        // R=full voxel solar occlusion, G=native alpha-tested occlusion,
+        // B=near/far cascade support. This intentionally traces both paths so
+        // a real-map capture can prove which representation shaped vegetation.
+        if (!hasGeometry)
+        {
+            outColor = vec4(0.0, 0.0, 0.0, 1.0);
+            return;
+        }
+        vec3 diagnosticVoxelOrigin = worldPosition
+            + worldGeometricNormal * 0.12
+            + sunDirection * 0.04;
+        float diagnosticVoxelVisibility = traceVoxelSunVisibility(
+            diagnosticVoxelOrigin);
+        float diagnosticNativeVisibility;
+        float diagnosticNativeSupport;
+        float diagnosticNativeCoverage;
+        traceNativeSunShadowVisibility(
+            earlyRelativeWorldPosition,
+            diagnosticNativeVisibility,
+            diagnosticNativeSupport,
+            diagnosticNativeCoverage);
+        outColor = vec4(
+            1.0 - clamp(diagnosticVoxelVisibility, 0.0, 1.0),
+            (1.0 - clamp(diagnosticNativeVisibility, 0.0, 1.0))
+                * diagnosticNativeSupport,
+            diagnosticNativeSupport,
+            1.0);
+        return;
+    }
+
     if (debugView == 7)
     {
         // Reflection tracing above consumes the clean opaque G-buffer and the
@@ -5521,11 +6106,11 @@ void main()
         * clamp(reflection.planarConfidence, 0.0, 1.0);
     if (debugView == 11)
     {
-        // R=metallic, G=smoothness, B=patched terrain/albedo metadata.
+        // R=metallic, G=smoothness, B=file-backed normal/roughness payload.
         outColor = vec4(
             clamp(metallic, 0.0, 1.0),
             clamp(1.0 - surfaceRoughness, 0.0, 1.0),
-            min(packedSurfaceAvailable, materialMapPresent),
+            min(packedSurfaceAvailable, pbrPayloadPresent),
             1.0);
         return;
     }
@@ -5569,13 +6154,16 @@ void main()
     float transparencyRisk = max(
         vegetationSurface,
         max(transmissiveSurface, planarResponse));
-    // A valid opaque G-buffer pixel can fall exactly on a voxel/block
-    // boundary where the nearest material lookup returns air. Use the
-    // reconstructed source albedo as a bounded opaque fallback so the
-    // transport does not leave bright vanilla seams in deep shadows.
+    // A valid opaque G-buffer pixel inside the volume can fall exactly on a
+    // voxel/block boundary where the nearest material lookup returns air.
+    // Use the reconstructed source albedo as a bounded opaque fallback so the
+    // transport does not leave bright vanilla seams in deep shadows. Geometry
+    // outside the volume must retain the exact source carrier: no authoritative
+    // voxel material or occlusion information exists there.
     // Foliage and transmission still require authoritative material
     // agreement and therefore never inherit this fallback.
-    float opaqueGeometryFallback = hasGeometry ? 0.86 : 0.0;
+    float opaqueGeometryFallback = hasGeometry
+        && isInsideVoxelVolume(worldPosition) ? 0.86 : 0.0;
     float opaqueReliability = max(
         materialConfidence,
         opaqueGeometryFallback);
@@ -5601,6 +6189,8 @@ void main()
         ReflectionResult wetReflection = traceScreenSpaceReflection(
             position,
             normal,
+            worldPosition,
+            worldNormal,
             wetTraceRoughness,
             source,
             0);
@@ -5630,10 +6220,12 @@ void main()
         + srgbToLinear(lighting.indirect)
             * indirectLightStrength * (0.38 + 0.32 * lighting.confidence))
         * ambientVisibility;
+    // Visibility was already integrated per emitter above. Shadow opacity is
+    // a presentation control for the inherited raster carrier; it must never
+    // increase unoccluded candela. Coupling it here made a stronger shadow
+    // setting brighten the same lantern by up to 40 percent.
     vec3 tracedDirect = voxelLighting.sunDirect * sunLightStrength * 1.42
-        + voxelLighting.direct
-            * emissiveLightStrength
-            * (1.05 + pointLightShadowStrength * 0.35);
+        + voxelLighting.direct * emissiveLightStrength;
 
     // Keep diffuse transport split by path. The framebuffer is the only
     // full-resolution source of authored texel detail exposed at this
@@ -5782,6 +6374,21 @@ void main()
     // microfacet/reflection terms below. Dielectrics remain unchanged.
     float metallicTransportScale = mix(1.0, 0.72, metallic);
     transportWeight *= metallicTransportScale;
+    // A verified static opaque texel has coherent albedo, normal, position,
+    // photometric emitters and traced visibility. Keeping most of the stock
+    // lightmap in that case double-counts the lamp and imports its animated
+    // luminance into an otherwise fixed scene. Make the physical transport
+    // dominant while retaining a small high-frequency carrier remainder;
+    // conductors keep slightly more of it when their environment ray misses.
+    float opaquePhysicalTransportConfidence = packedSurfaceAvailable
+        * surfaceReliability
+        * (1.0 - transparencyRisk)
+        * (1.0 - dynamicSurface);
+    float opaquePhysicalTransportFloor = mix(0.96, 0.90, metallic);
+    transportWeight = mix(
+        transportWeight,
+        max(transportWeight, opaquePhysicalTransportFloor),
+        opaquePhysicalTransportConfidence);
 
     vec3 viewDirection = hasGeometry ? normalize(-position) : vec3(0.0, 0.0, 1.0);
     float normalView = hasGeometry
@@ -5947,22 +6554,20 @@ void main()
         1.0,
         exteriorEnergyScale,
         exteriorEnergyMatch * 0.55);
-    // At night and during twilight, the engine raster remains the most
-    // reliable carrier for chromatic local lights. In daylight, a verified
-    // packed opaque surface is transport-dominant and no longer inherits
-    // the old double exterior ceiling.
+    // Local emitter chromaticity and candela are now supplied by the authored
+    // photometry catalogue, so fixed opaque receivers no longer need the
+    // engine lightmap as their primary night-time lighting solution. Daylight
+    // retains a little more carrier energy for unresolved distant transport.
     float daylightRelighting = smoothstep(
         0.18,
         0.62,
         clamp(sunColorStrength.w, 0.0, 1.0));
     float enclosedPhysicalRelighting = mix(
-        0.20,
-        0.68,
+        0.94,
+        0.84,
         daylightRelighting);
-    float physicalRelightingWeight = packedSurfaceAvailable
-        * surfaceReliability
-        * (1.0 - transparencyRisk)
-        * mix(enclosedPhysicalRelighting, 0.72, exteriorConfidence);
+    float physicalRelightingWeight = opaquePhysicalTransportConfidence
+        * mix(enclosedPhysicalRelighting, 0.84, exteriorConfidence);
     vec3 reconstructedTransport = mix(
         hybridTransport,
         energyMatchedPhysicalTransport,

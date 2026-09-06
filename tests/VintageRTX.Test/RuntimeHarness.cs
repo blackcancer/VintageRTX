@@ -1,8 +1,11 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.Net;
+using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
 using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using VintageRTX.Configuration;
 
 namespace VintageRTX.Test;
@@ -55,6 +58,15 @@ internal static class RuntimeHarness
             dataSandbox.CopyVintageRtxConfigurationTo(
                 Path.Combine(artifactRoot, "Config", "Seeded"));
         }
+        if (!string.IsNullOrWhiteSpace(scenario.WorldSeed))
+        {
+            await PrecreateSeededWorldAsync(
+                gameRoot,
+                dataSandbox.DataRoot,
+                dataSandbox.WorldName,
+                scenario.WorldSeed,
+                cancellationToken);
+        }
 
         ProcessStartInfo startInfo = new()
         {
@@ -84,6 +96,10 @@ internal static class RuntimeHarness
         startInfo.ArgumentList.Add(modBuildPath);
         string runtimeTestModBuildPath = ResolveRuntimeTestModPath(modBuildPath);
         startInfo.Environment["VINTAGERTX_AUTO_CAPTURE"] = "1";
+        // RuntimeScenarioProbe changes this process-local gate only after the
+        // official calendar/weather/sky pass and the requested scene/camera
+        // setup completes. Frame numbers alone are not a readiness contract.
+        startInfo.Environment["VINTAGERTX_TEST_ENVIRONMENT_READY"] = "0";
         // Readback-heavy diagnostic captures must not overlap the A/B/A sample
         // windows: a sequence of fourteen PNG readbacks otherwise looks like a
         // renderer frame-time regression even though it is test instrumentation.
@@ -138,6 +154,10 @@ internal static class RuntimeHarness
             || scenario.ValidateWetness
             || scenario.ShadowValidation == ShadowValidation.SunProjected
             || scenario.CaptureProfile == "render-lab"
+            // The authored lantern camera pins both entity pose and view angles.
+            // Declaring that contract prevents harmless engine-side position
+            // recanonicalization from invalidating temporal or benchmark gates.
+            || string.Equals(scenario.Name, "lantern-night", StringComparison.OrdinalIgnoreCase)
                 ? "1"
                 : "0";
         startInfo.Environment["VINTAGERTX_TEST_RUN_ID"] = Path.GetFileName(artifactRoot);
@@ -172,6 +192,9 @@ internal static class RuntimeHarness
         string serverLogPath = Path.Combine(logRoot, "server-main.log");
         Stopwatch stopwatch = Stopwatch.StartNew();
         string log = string.Empty;
+        bool harnessStoppedProcess = false;
+        bool runtimeCompleted = false;
+        bool runtimeFailed = false;
         try
         {
             while (stopwatch.Elapsed < Timeout && !process.HasExited)
@@ -183,8 +206,9 @@ internal static class RuntimeHarness
                         clientLogPath,
                         serverLogPath,
                         cancellationToken);
-                    if (RuntimeLogValidator.IsComplete(log, scenario)
-                        || RuntimeLogValidator.HasFatalFailure(log))
+                    runtimeCompleted = RuntimeLogValidator.IsComplete(log, scenario);
+                    runtimeFailed = RuntimeLogValidator.HasFatalFailure(log);
+                    if (runtimeCompleted || runtimeFailed)
                     {
                         break;
                     }
@@ -197,6 +221,7 @@ internal static class RuntimeHarness
         {
             if (!process.HasExited)
             {
+                harnessStoppedProcess = true;
                 process.Kill(entireProcessTree: true);
                 await process.WaitForExitAsync(cancellationToken);
             }
@@ -204,7 +229,20 @@ internal static class RuntimeHarness
             await Task.WhenAll(standardOutput, standardError);
         }
 
-        Console.WriteLine($"Vintage Story exit code: {process.ExitCode}.");
+        if (harnessStoppedProcess)
+        {
+            string reason = runtimeCompleted
+                ? "the scenario completed"
+                : runtimeFailed
+                    ? "a fatal runtime signature was captured"
+                    : "the harness timeout or cancellation boundary was reached";
+            Console.WriteLine(
+                $"Vintage Story was intentionally stopped by the test harness after {reason}; OS exit code {process.ExitCode} is not a game crash.");
+        }
+        else
+        {
+            Console.WriteLine($"Vintage Story exited on its own with code {process.ExitCode}.");
+        }
 
         if (File.Exists(clientLogPath) || File.Exists(serverLogPath))
         {
@@ -223,6 +261,13 @@ internal static class RuntimeHarness
             scenario.ValidateVoxelBounce,
             scenario.ValidateWetness,
             scenario.RequirePbrReferenceMaterials));
+        if (string.Equals(
+                scenario.CaptureProfile,
+                "light-stability",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            failures.AddRange(RuntimeImageValidator.ValidateLightStability(log));
+        }
         if (string.Equals(
                 scenario.Name,
                 "water-reflection",
@@ -282,6 +327,14 @@ internal static class RuntimeHarness
                 : "runtime scenario timed out before the focused capture sequence completed");
         }
 
+        if (RuntimeLogValidator.TryDescribeBenchmarkContention(
+                log,
+                scenario,
+                out string contentionDiagnostic))
+        {
+            Console.WriteLine($"INCONCLUSIVE performance: {contentionDiagnostic}");
+        }
+
         foreach (string failure in failures)
         {
             Console.Error.WriteLine($"FAIL {failure}");
@@ -294,6 +347,260 @@ internal static class RuntimeHarness
         }
 
         return 1;
+    }
+
+    /// <summary>
+    /// Uses Vintage Story's own dedicated server to create and save an isolated
+    /// world whose seed is authoritative before the integrated client opens it.
+    /// </summary>
+    /// <param name="gameRoot">Installation containing the matching server executable.</param>
+    /// <param name="dataRoot">Disposable data path owned by this runtime invocation.</param>
+    /// <param name="worldName">Save name later passed to the integrated client.</param>
+    /// <param name="worldSeed">Stable numeric seed shared by comparable laboratory runs.</param>
+    /// <param name="cancellationToken">Cancels both world creation and its bounded shutdown.</param>
+    private static async Task PrecreateSeededWorldAsync(
+        string gameRoot,
+        string dataRoot,
+        string worldName,
+        string worldSeed,
+        CancellationToken cancellationToken)
+    {
+        string serverExecutable = Path.Combine(gameRoot, "VintagestoryServer.exe");
+        ProcessStartInfo generatorStartInfo = new()
+        {
+            FileName = serverExecutable,
+            WorkingDirectory = gameRoot,
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+        generatorStartInfo.ArgumentList.Add("--dataPath");
+        generatorStartInfo.ArgumentList.Add(dataRoot);
+        generatorStartInfo.ArgumentList.Add("--genconfig");
+        using Process generator = Process.Start(generatorStartInfo)
+            ?? throw new InvalidOperationException(
+                "Vintage Story's server configuration generator could not be started.");
+        string standardOutput = generator.StandardOutput.ReadToEnd();
+        string standardError = generator.StandardError.ReadToEnd();
+        if (!generator.WaitForExit(30_000))
+        {
+            generator.Kill(entireProcessTree: true);
+            throw new TimeoutException(
+                "Vintage Story's server configuration generator did not finish within 30 seconds.");
+        }
+
+        string configurationPath = Path.Combine(dataRoot, "serverconfig.json");
+        if (generator.ExitCode != 0 || !File.Exists(configurationPath))
+        {
+            throw new InvalidOperationException(
+                $"Vintage Story's server configuration generator failed with exit code {generator.ExitCode}. "
+                + $"stdout={standardOutput.Trim()} stderr={standardError.Trim()}");
+        }
+
+        int port = FindFreeLoopbackPort();
+        string savePath = Path.Combine(dataRoot, "Saves", worldName + ".vcdbs");
+        ApplyWorldCreationSettingsToGeneratedServerConfiguration(
+            configurationPath,
+            worldSeed,
+            savePath,
+            port);
+
+        ProcessStartInfo serverStartInfo = new()
+        {
+            FileName = serverExecutable,
+            WorkingDirectory = gameRoot,
+            UseShellExecute = false,
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+        serverStartInfo.ArgumentList.Add("--dataPath");
+        serverStartInfo.ArgumentList.Add(dataRoot);
+        using Process server = Process.Start(serverStartInfo)
+            ?? throw new InvalidOperationException(
+                "Vintage Story's deterministic world precreation server could not be started.");
+        StringBuilder standardOutputBuilder = new();
+        StringBuilder standardErrorBuilder = new();
+        object outputLock = new();
+        TaskCompletionSource ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        server.OutputDataReceived += (_, eventArgs) =>
+        {
+            if (eventArgs.Data is null)
+            {
+                return;
+            }
+
+            lock (outputLock)
+            {
+                standardOutputBuilder.AppendLine(eventArgs.Data);
+            }
+
+            if (eventArgs.Data.Contains(
+                    "Dedicated Server now running",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                ready.TrySetResult();
+            }
+        };
+        server.ErrorDataReceived += (_, eventArgs) =>
+        {
+            if (eventArgs.Data is null)
+            {
+                return;
+            }
+
+            lock (outputLock)
+            {
+                standardErrorBuilder.AppendLine(eventArgs.Data);
+            }
+        };
+        server.BeginOutputReadLine();
+        server.BeginErrorReadLine();
+
+        using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(
+            cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(75));
+        Task exitTask = server.WaitForExitAsync(timeout.Token);
+        try
+        {
+            Task first = await Task.WhenAny(ready.Task, exitTask);
+            if (first == exitTask)
+            {
+                await exitTask;
+                throw new InvalidOperationException(
+                    "Vintage Story's deterministic world precreation server exited before becoming ready. "
+                    + FormatProcessEvidence(server.ExitCode, standardOutputBuilder, standardErrorBuilder, outputLock));
+            }
+
+            await server.StandardInput.WriteLineAsync("/stop");
+            await server.StandardInput.FlushAsync();
+            await exitTask;
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            if (!server.HasExited)
+            {
+                server.Kill(entireProcessTree: true);
+            }
+
+            throw new TimeoutException(
+                "Vintage Story's deterministic world precreation did not finish within 75 seconds.");
+        }
+
+        string standardOutputEvidence;
+        lock (outputLock)
+        {
+            standardOutputEvidence = standardOutputBuilder.ToString();
+        }
+
+        if (server.ExitCode != 0
+            || !File.Exists(savePath)
+            || !standardOutputEvidence.Contains(
+                $"Using world seed: {worldSeed}",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                "Vintage Story did not persist the requested deterministic world. "
+                + FormatProcessEvidence(server.ExitCode, standardOutputBuilder, standardErrorBuilder, outputLock));
+        }
+
+        Console.WriteLine(
+            $"Precreated deterministic Vintage Story world '{worldName}' with seed {worldSeed}.");
+    }
+
+    /// <summary>Returns one currently available TCP port bound to the local interface only.</summary>
+    /// <returns>An ephemeral port suitable for the short-lived precreation server.</returns>
+    private static int FindFreeLoopbackPort()
+    {
+        TcpListener listener = new(IPAddress.Loopback, 0);
+        listener.Start();
+        try
+        {
+            return ((IPEndPoint)listener.LocalEndpoint).Port;
+        }
+        finally
+        {
+            listener.Stop();
+        }
+    }
+
+    /// <summary>Formats bounded process output when official world creation cannot complete.</summary>
+    /// <param name="exitCode">Native server exit code.</param>
+    /// <param name="standardOutput">Captured standard output.</param>
+    /// <param name="standardError">Captured standard error.</param>
+    /// <param name="outputLock">Lock shared by asynchronous output callbacks.</param>
+    /// <returns>Exit code plus the tail of both diagnostic streams.</returns>
+    private static string FormatProcessEvidence(
+        int exitCode,
+        StringBuilder standardOutput,
+        StringBuilder standardError,
+        object outputLock)
+    {
+        lock (outputLock)
+        {
+            return $"exit={exitCode}, stdout={Tail(standardOutput.ToString(), 4000)}, "
+                + $"stderr={Tail(standardError.ToString(), 2000)}";
+        }
+    }
+
+    /// <summary>Keeps only the end of a potentially verbose native diagnostic stream.</summary>
+    /// <param name="value">Complete captured stream.</param>
+    /// <param name="maximumCharacters">Maximum number of trailing characters retained.</param>
+    /// <returns>The original value or its bounded tail.</returns>
+    private static string Tail(string value, int maximumCharacters)
+    {
+        return value.Length <= maximumCharacters
+            ? value.Trim()
+            : value[^maximumCharacters..].Trim();
+    }
+
+    /// <summary>Configures the authoritative seed, save path, and private endpoint for world creation.</summary>
+    /// <param name="configurationPath">Generated JSON file owned by the disposable data path.</param>
+    /// <param name="worldSeed">Numeric seed accepted by Vintage Story's world configuration.</param>
+    /// <param name="savePath">Exact save database later opened by the integrated client.</param>
+    /// <param name="port">Available loopback port reserved for the short-lived server.</param>
+    internal static void ApplyWorldCreationSettingsToGeneratedServerConfiguration(
+        string configurationPath,
+        string worldSeed,
+        string savePath,
+        int port)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(savePath);
+        if (port is < 1 or > IPEndPoint.MaxPort)
+        {
+            throw new ArgumentOutOfRangeException(nameof(port));
+        }
+
+        ApplyWorldSeedToGeneratedServerConfiguration(configurationPath, worldSeed);
+        JObject configuration = JObject.Parse(File.ReadAllText(configurationPath));
+        JObject worldConfiguration = (JObject)configuration["WorldConfig"]!;
+        worldConfiguration["SaveFileLocation"] = Path.GetFullPath(savePath);
+        configuration["Ip"] = IPAddress.Loopback.ToString();
+        configuration["Port"] = port;
+        configuration["AdvertiseServer"] = false;
+        configuration["Upnp"] = false;
+        File.WriteAllText(
+            configurationPath,
+            configuration.ToString(Formatting.Indented));
+    }
+
+    /// <summary>Writes one stable seed into an already generated isolated server configuration.</summary>
+    /// <param name="configurationPath">Generated JSON file owned by the disposable data path.</param>
+    /// <param name="worldSeed">Numeric seed accepted by Vintage Story's world configuration.</param>
+    internal static void ApplyWorldSeedToGeneratedServerConfiguration(
+        string configurationPath,
+        string worldSeed)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(configurationPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(worldSeed);
+        JObject configuration = JObject.Parse(File.ReadAllText(configurationPath));
+        JObject worldConfiguration = configuration["WorldConfig"] as JObject
+            ?? throw new InvalidDataException(
+                "Vintage Story's generated server configuration has no WorldConfig object.");
+        worldConfiguration["Seed"] = worldSeed;
+        File.WriteAllText(
+            configurationPath,
+            configuration.ToString(Formatting.Indented));
     }
 
     /// <summary>Compares every setting owned by an authored hardware profile with its canonical value.</summary>

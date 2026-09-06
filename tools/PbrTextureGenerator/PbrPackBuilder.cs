@@ -11,7 +11,7 @@ namespace VintageRTX.PbrTextureGenerator;
 internal sealed class PbrPackBuilder
 {
     public const string SchemaId = "vintagertx.pbr-manifest";
-    public const int SchemaVersion = 3;
+    public const int SchemaVersion = 4;
     public const string ManifestAssetPath = "config/vintagertx/pbr-manifest.json";
 
     private static readonly DateTimeOffset DeterministicZipTimestamp =
@@ -608,6 +608,7 @@ internal sealed class PbrPackBuilder
                 textures.Select(item => item.Source.Origin).Distinct(StringComparer.Ordinal).OrderBy(value => value, StringComparer.Ordinal).ToArray(),
                 textures.Select(item => item.Source.Domain).Distinct(StringComparer.Ordinal).OrderBy(value => value, StringComparer.Ordinal).ToArray())],
             new PbrGeneratorIdentity("vintagertx-pbr-generator", PbrGenerator.AlgorithmVersion, "offline-only"),
+            "generated",
             textures);
         WriteJson(manifestPath, manifest);
     }
@@ -902,6 +903,7 @@ internal sealed record PbrPackManifest(
     PbrPackIdentity Pack,
     IReadOnlyList<PbrSourceMod> SourceMods,
     PbrGeneratorIdentity Generator,
+    string DefaultProvenance,
     IReadOnlyList<PbrPackTexture> Textures);
 
 internal sealed record PbrPackIdentity(string ModId, string Version);

@@ -54,7 +54,7 @@ internal static class SelfTests
             Console.WriteLine("  byte-for-byte determinism: PASS");
             Console.WriteLine("  tangent normal amplitude, OpenGL +Y convention and tiling seam: PASS");
             Console.WriteLine("  profile routing, roughness and material maps: PASS");
-            Console.WriteLine("  third-party native-sidecar pack and manifest v3: PASS");
+            Console.WriteLine("  third-party native-sidecar pack and manifest v4: PASS");
             Console.WriteLine("  source-asset precedence and logical collision journal: PASS");
             Console.WriteLine("  standalone pack integrity and deep pixel validation: PASS");
         }
@@ -171,7 +171,8 @@ internal static class SelfTests
         using JsonDocument manifest = JsonDocument.Parse(manifestStream);
         JsonElement manifestRoot = manifest.RootElement;
         Assert(manifestRoot.GetProperty("schema").GetString() == "vintagertx.pbr-manifest", "manifest schema id");
-        Assert(manifestRoot.GetProperty("schemaVersion").GetInt32() == 3, "manifest schema version");
+        Assert(manifestRoot.GetProperty("schemaVersion").GetInt32() == 4, "manifest schema version");
+        Assert(manifestRoot.GetProperty("defaultProvenance").GetString() == "generated", "manifest material provenance");
         Assert(manifestRoot.GetProperty("generator").GetProperty("execution").GetString() == "offline-only", "manifest must declare offline-only generation");
         List<string> manifestSourcePaths = [];
         foreach (JsonElement texture in manifestRoot.GetProperty("textures").EnumerateArray())

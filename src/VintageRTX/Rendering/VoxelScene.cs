@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Vintagestory.API.Client;
 using Vintagestory.API.Common;
 using Vintagestory.API.Config;
@@ -27,6 +28,12 @@ internal sealed class VoxelScene : IDisposable
     /// dielectric, transmissive, or conductor thresholds consumed by the shader.
     /// </summary>
     internal const byte PartialGeometryMaterialFlag = 4;
+    /// <summary>
+    /// Low material-alpha bit identifying plant/foliage cells independently of render flags.
+    /// Some authored crossed-plane plants do not request wind animation, so the terrain G-buffer
+    /// alone cannot reliably classify them as alpha-tested vegetation.
+    /// </summary>
+    internal const byte VegetationMaterialFlag = 8;
     /// <summary>Fine occupancy texture width in quarter-block cells.</summary>
     public const int OccupancyWidth = Width * OccupancyScale;
     /// <summary>Fine occupancy texture height in quarter-block cells.</summary>
@@ -43,6 +50,8 @@ internal sealed class VoxelScene : IDisposable
     public const int SunOccupancyScale = 2;
     /// <summary>Maximum configured long-range sun trace represented without leaving the clipmap.</summary>
     public const int MaximumSunTraceDistance = 96;
+    /// <summary>Maximum supported block-view distance mirrored by the distant trace LOD.</summary>
+    public const int MaximumViewTraceDistance = GlobalConstants.MaxViewDistanceForLodBiases;
     /// <summary>Long-range sun clipmap width in occupancy cells.</summary>
     public const int SunOccupancyWidth = 76;
     /// <summary>Long-range sun clipmap height in occupancy cells.</summary>
@@ -94,6 +103,10 @@ internal sealed class VoxelScene : IDisposable
     private const int RainSurfaceCellsPerTick = 512;
     /// <summary>Dedicated liquid-surface columns sampled per 20 ms game tick.</summary>
     private const int FluidSurfaceCellsPerTick = 128;
+    /// <summary>Subcells per coarse sun cell edge in the packed 64-bit distant mask.</summary>
+    private const int SunMaskAxis = 4;
+    /// <summary>Rain-height samples processed per tick while building a reduced distant LOD.</summary>
+    private const int DistantSunSurfaceSamplesPerTick = 1024;
     /// <summary>Horizontal block margin triggering material clipmap recentering.</summary>
     private const int HorizontalRecenterMargin = 16;
     /// <summary>Vertical block margin triggering material clipmap recentering.</summary>
@@ -117,7 +130,10 @@ internal sealed class VoxelScene : IDisposable
     ];
 
     private readonly ICoreClientAPI api;
+    private readonly Func<float>? configuredSunDistance;
     private readonly LiquidOpticalRegistry liquidOptics;
+    private readonly IReadOnlyDictionary<string, Newtonsoft.Json.Linq.JObject>
+        emitterPhotometryByCodeRoot;
     private readonly byte[] buildVoxels = new byte[Width * Height * Depth * BytesPerVoxel];
     private readonly byte[] buildOccupancy = new byte[OccupancyWidth * OccupancyHeight * OccupancyDepth];
     private readonly byte[] buildFluidSurface = new byte[
@@ -135,7 +151,12 @@ internal sealed class VoxelScene : IDisposable
     private readonly Dictionary<(int X, int Y, int Z, int Dimension), InstanceMeshOccupancy>
         instanceMeshOccupancyByPosition = new();
     private readonly Dictionary<(string Code, string Reason), int> fallbackOccupancyHistogram = new();
-    private readonly HashSet<(int X, int Y, int Z)> dirtyBlocks = [];
+    /// <summary>
+    /// Coalesced world edits shared by the block-event thread and the budgeted
+    /// game-tick consumer. A concurrent set prevents collection corruption when
+    /// chunk updates arrive while the render loop drains a batch.
+    /// </summary>
+    private readonly ConcurrentDictionary<(int X, int Y, int Z), byte> dirtyBlocks = new();
     private readonly List<VoxelSceneBlockUpdate> pendingBlockUpdates = [];
     private readonly List<VoxelFluidSurfaceUpdate> pendingFluidSurfaceUpdates = [];
     private readonly List<VoxelSunOccupancyUpdate> pendingSunOccupancyUpdates = [];
@@ -161,11 +182,16 @@ internal sealed class VoxelScene : IDisposable
     private int sunOriginX;
     private int sunOriginY;
     private int sunOriginZ;
+    private int rainSurfaceOriginX;
+    private int rainSurfaceOriginZ;
+    private int sunOccupancyScale = SunOccupancyScale;
+    private int sunTraceDistance = MaximumSunTraceDistance;
     private int fluidSurfaceOriginX;
     private int fluidSurfaceOriginZ;
     private int buildIndex;
     private int fluidSurfaceBuildIndex;
     private int sunBuildIndex;
+    private int distantSunSurfaceBuildIndex;
     private int rainSurfaceBuildIndex;
     private int generation;
     private bool building;
@@ -186,10 +212,15 @@ internal sealed class VoxelScene : IDisposable
 
     /// <summary>Initializes liquid profiles and registers budgeted tick/block-change observers.</summary>
     /// <param name="api">Client world, tessellator, block accessor, events, and logging services.</param>
-    public VoxelScene(ICoreClientAPI api)
+    /// <param name="configuredSunDistance">Optional configured minimum shadow reach in blocks.</param>
+    public VoxelScene(ICoreClientAPI api, Func<float>? configuredSunDistance = null)
     {
         this.api = api;
+        this.configuredSunDistance = configuredSunDistance;
         liquidOptics = new LiquidOpticalRegistry(api.World.Collectibles, api.Assets, api.Logger);
+        emitterPhotometryByCodeRoot = api.Assets is null
+            ? new Dictionary<string, Newtonsoft.Json.Linq.JObject>(StringComparer.Ordinal)
+            : EmitterPhotometryCatalog.Load(api.Assets, api.Logger);
         tickListenerId = api.Event.RegisterGameTickListener(OnGameTick, 20);
         api.Event.BlockChanged += OnBlockChanged;
     }
@@ -202,7 +233,7 @@ internal sealed class VoxelScene : IDisposable
             if (building)
             {
                 int completed = buildIndex + fluidSurfaceBuildIndex
-                    + sunBuildIndex + rainSurfaceBuildIndex;
+                    + SunBuildCompletedCellEquivalent + rainSurfaceBuildIndex;
                 int total = Width * Height * Depth
                     + FluidSurfaceWidth * FluidSurfaceDepth
                     + SunOccupancyWidth * SunOccupancyHeight * SunOccupancyDepth
@@ -234,6 +265,19 @@ internal sealed class VoxelScene : IDisposable
         && pendingFluidSurfaceUpdates.Count == 0
         && pendingSunOccupancyUpdates.Count == 0
         && pendingRainSurfaceUpdates.Count == 0;
+
+    /// <summary>
+    /// Gets whether a renderer-retained full snapshot may be published. Pending
+    /// partial updates deliberately do not block this state: their mutations are
+    /// already present in the ready arrays referenced by the full snapshot, and
+    /// their queued GPU subuploads are therefore safe, redundant follow-ups.
+    /// </summary>
+    internal bool CanPublishRetainedSnapshot => generation > 0
+        && !building
+        && !rebuildRequested
+        && !settleRebuildPending
+        && dirtyBlocks.Count == 0
+        && !uploadPending;
 
     /// <summary>Exposes one complete generation exactly once without transferring array ownership.</summary>
     /// <param name="snapshot">Dimensions/origins plus scene-owned immutable-until-next-swap arrays.</param>
@@ -268,12 +312,15 @@ internal sealed class VoxelScene : IDisposable
             SunOccupancyWidth,
             SunOccupancyHeight,
             SunOccupancyDepth,
-            SunOccupancyScale,
+            sunOccupancyScale,
+            sunTraceDistance,
             sunOriginX,
             sunOriginY,
             sunOriginZ,
             RainSurfaceWidth,
             RainSurfaceDepth,
+            rainSurfaceOriginX,
+            rainSurfaceOriginZ,
             readyFluidVoxels,
             readyVisibleLiquidContainers,
             generation,
@@ -363,6 +410,59 @@ internal sealed class VoxelScene : IDisposable
         int cameraZ = (int)Math.Floor(cameraPosition.Z);
         samplePosition.dimension = api.World.Player.Entity.Pos.Dimension;
 
+        Vec3f sunDirection = GetNormalizedSunDirection();
+        float configuredTraceDistance = configuredSunDistance?.Invoke()
+            ?? MaximumSunTraceDistance;
+        int desiredViewDistance = api.World.Player.WorldData?.DesiredViewDistance ?? 0;
+        int approvedViewDistance = api.World.Player.WorldData?.LastApprovedViewDistance ?? 0;
+        int requestedTraceDistance = ResolveRequestedSunTraceDistance(
+            configuredTraceDistance,
+            desiredViewDistance,
+            approvedViewDistance);
+        int requestedOccupancyScale = CalculateSunOccupancyScale(requestedTraceDistance);
+        if (requestedTraceDistance != sunTraceDistance
+            || requestedOccupancyScale != sunOccupancyScale)
+        {
+            api.Logger.Notification(
+                "[VintageRTX] Sun-shadow reach adapted: configured={0:0} blocks, desired-view={1}, approved-view={2}, effective-trace={3}, distant-cell={4} blocks.",
+                configuredTraceDistance,
+                desiredViewDistance,
+                approvedViewDistance,
+                requestedTraceDistance,
+                requestedOccupancyScale);
+            sunTraceDistance = requestedTraceDistance;
+            sunOccupancyScale = requestedOccupancyScale;
+            if (building)
+            {
+                BeginRebuild(cameraX, cameraY, cameraZ, true);
+            }
+            else
+            {
+                rebuildRequested = true;
+            }
+        }
+
+        if (building
+            && (MaterialVolumeNeedsRecentering(cameraX, cameraY, cameraZ)
+                || FluidSurfaceVolumeNeedsRecentering(cameraX, cameraZ)
+                || !SunClipmapContainsFullTrace(
+                    sunOriginX,
+                    sunOriginY,
+                    sunOriginZ,
+                    cameraX,
+                    cameraY,
+                    cameraZ,
+                    sunDirection,
+                    sunTraceDistance,
+                    sunOccupancyScale)))
+        {
+            // A spawn, teleport, or authoritative calendar update can move the
+            // receiver while a budgeted scan is still in flight. Never publish
+            // that stale scan: restart immediately and retain the last complete
+            // snapshot until the correctly centred generation is ready.
+            BeginRebuild(cameraX, cameraY, cameraZ, true);
+        }
+
         if (!building && settleRebuildPending)
         {
             settleRebuildDelaySeconds -= Math.Max(deltaTime, 0.0f);
@@ -383,7 +483,7 @@ internal sealed class VoxelScene : IDisposable
             cameraX,
             cameraY,
             cameraZ,
-            GetNormalizedSunDirection());
+            sunDirection);
         if (!building
             && (rebuildRequested
                 || needsRecentering
@@ -417,12 +517,26 @@ internal sealed class VoxelScene : IDisposable
             SampleFluidSurfaceColumn(fluidSurfaceBuildIndex++);
         }
 
-        int sunEndIndex = Math.Min(
-            sunBuildIndex + SunOccupancyCellsPerTick,
-            SunOccupancyWidth * SunOccupancyHeight * SunOccupancyDepth);
-        while (sunBuildIndex < sunEndIndex)
+        if (sunOccupancyScale == SunOccupancyScale)
         {
-            SampleSunOccupancyCell(sunBuildIndex++);
+            int sunEndIndex = Math.Min(
+                sunBuildIndex + SunOccupancyCellsPerTick,
+                SunOccupancyWidth * SunOccupancyHeight * SunOccupancyDepth);
+            while (sunBuildIndex < sunEndIndex)
+            {
+                SampleSunOccupancyCell(sunBuildIndex++);
+            }
+        }
+        else
+        {
+            int distantSampleCount = DistantSunSurfaceSampleCount;
+            int distantEndIndex = Math.Min(
+                distantSunSurfaceBuildIndex + DistantSunSurfaceSamplesPerTick,
+                distantSampleCount);
+            while (distantSunSurfaceBuildIndex < distantEndIndex)
+            {
+                SampleDistantSunSurface(distantSunSurfaceBuildIndex++);
+            }
         }
 
         int rainSurfaceEndIndex = Math.Min(
@@ -435,7 +549,7 @@ internal sealed class VoxelScene : IDisposable
 
         if (buildIndex == Width * Height * Depth
             && fluidSurfaceBuildIndex == FluidSurfaceWidth * FluidSurfaceDepth
-            && sunBuildIndex == SunOccupancyWidth * SunOccupancyHeight * SunOccupancyDepth
+            && SunBuildComplete
             && rainSurfaceBuildIndex == RainSurfaceWidth * RainSurfaceDepth)
         {
             CompleteRebuild();
@@ -454,6 +568,16 @@ internal sealed class VoxelScene : IDisposable
             return true;
         }
 
+        return MaterialVolumeNeedsRecentering(cameraX, cameraY, cameraZ);
+    }
+
+    /// <summary>Checks the protected material-volume margins without consulting publication state.</summary>
+    /// <param name="cameraX">Integer camera X in blocks.</param>
+    /// <param name="cameraY">Integer camera Y in blocks.</param>
+    /// <param name="cameraZ">Integer camera Z in blocks.</param>
+    /// <returns>Whether an in-flight or published material scan is centred on stale coordinates.</returns>
+    private bool MaterialVolumeNeedsRecentering(int cameraX, int cameraY, int cameraZ)
+    {
         return cameraX < originX + HorizontalRecenterMargin
             || cameraX >= originX + Width - HorizontalRecenterMargin
             || cameraY < originY + VerticalRecenterMargin
@@ -473,6 +597,15 @@ internal sealed class VoxelScene : IDisposable
             return true;
         }
 
+        return FluidSurfaceVolumeNeedsRecentering(cameraX, cameraZ);
+    }
+
+    /// <summary>Checks protected liquid-footprint margins without consulting publication state.</summary>
+    /// <param name="cameraX">Integer camera X in blocks.</param>
+    /// <param name="cameraZ">Integer camera Z in blocks.</param>
+    /// <returns>Whether an in-flight or published liquid scan is centred on stale coordinates.</returns>
+    private bool FluidSurfaceVolumeNeedsRecentering(int cameraX, int cameraZ)
+    {
         return cameraX < fluidSurfaceOriginX + FluidSurfaceRecenterMargin
             || cameraX >= fluidSurfaceOriginX
                 + FluidSurfaceWidth - FluidSurfaceRecenterMargin
@@ -536,7 +669,9 @@ internal sealed class VoxelScene : IDisposable
             cameraX,
             cameraY,
             cameraZ,
-            sunDirection);
+            sunDirection,
+            sunTraceDistance,
+            sunOccupancyScale);
     }
 
     /// <summary>Tests containment of the receiver footprint swept through the configured sun-ray reach.</summary>
@@ -557,26 +692,63 @@ internal sealed class VoxelScene : IDisposable
         int cameraZ,
         Vec3f sunDirection)
     {
+        return SunClipmapContainsFullTrace(
+            clipmapOriginX,
+            clipmapOriginY,
+            clipmapOriginZ,
+            cameraX,
+            cameraY,
+            cameraZ,
+            sunDirection,
+            MaximumSunTraceDistance,
+            SunOccupancyScale);
+    }
+
+    /// <summary>Tests a view-distance-driven distant trace against its runtime cell scale.</summary>
+    /// <param name="clipmapOriginX">Sun volume minimum X.</param>
+    /// <param name="clipmapOriginY">Sun volume minimum Y.</param>
+    /// <param name="clipmapOriginZ">Sun volume minimum Z.</param>
+    /// <param name="cameraX">Receiver center X.</param>
+    /// <param name="cameraY">Receiver center Y.</param>
+    /// <param name="cameraZ">Receiver center Z.</param>
+    /// <param name="sunDirection">Normalized direction toward the sun.</param>
+    /// <param name="traceDistance">Required ray reach in blocks.</param>
+    /// <param name="occupancyScale">World blocks represented by one distant cell.</param>
+    /// <returns>Whether the complete receiver sweep is represented.</returns>
+    internal static bool SunClipmapContainsFullTrace(
+        int clipmapOriginX,
+        int clipmapOriginY,
+        int clipmapOriginZ,
+        int cameraX,
+        int cameraY,
+        int cameraZ,
+        Vec3f sunDirection,
+        int traceDistance,
+        int occupancyScale)
+    {
         const float horizontalReceiverRadius = 24.0f;
         const float verticalReceiverRadius = 8.0f;
         return ContainsSweptAxis(
                 clipmapOriginX,
-                SunWorldWidth,
+                SunOccupancyWidth * occupancyScale,
                 cameraX,
                 horizontalReceiverRadius,
-                sunDirection.X)
+                sunDirection.X,
+                traceDistance)
             && ContainsSweptAxis(
                 clipmapOriginY,
-                SunWorldHeight,
+                SunOccupancyHeight * occupancyScale,
                 cameraY,
                 verticalReceiverRadius,
-                sunDirection.Y)
+                sunDirection.Y,
+                traceDistance)
             && ContainsSweptAxis(
                 clipmapOriginZ,
-                SunWorldDepth,
+                SunOccupancyDepth * occupancyScale,
                 cameraZ,
                 horizontalReceiverRadius,
-                sunDirection.Z);
+                sunDirection.Z,
+                traceDistance);
     }
 
     /// <summary>Per-axis containment test for a receiver interval swept through the maximum sun reach.</summary>
@@ -585,15 +757,17 @@ internal sealed class VoxelScene : IDisposable
     /// <param name="camera">Receiver center coordinate.</param>
     /// <param name="receiverRadius">Receiver half-extent.</param>
     /// <param name="direction">Normalized ray-axis component.</param>
+    /// <param name="traceDistance">Required sweep reach in blocks.</param>
     /// <returns>Whether the complete swept interval is contained.</returns>
     private static bool ContainsSweptAxis(
         int origin,
         int extent,
         int camera,
         float receiverRadius,
-        float direction)
+        float direction,
+        int traceDistance)
     {
-        float rayOffset = Math.Clamp(direction, -1.0f, 1.0f) * MaximumSunTraceDistance;
+        float rayOffset = Math.Clamp(direction, -1.0f, 1.0f) * traceDistance;
         float minimum = camera - receiverRadius + Math.Min(rayOffset, 0.0f);
         float maximum = camera + receiverRadius + Math.Max(rayOffset, 0.0f);
         return minimum >= origin && maximum <= origin + extent;
@@ -615,14 +789,19 @@ internal sealed class VoxelScene : IDisposable
         originZ = cameraZ - Depth / 2;
         fluidSurfaceOriginX = cameraX - FluidSurfaceWidth / 2;
         fluidSurfaceOriginZ = cameraZ - FluidSurfaceDepth / 2;
+        rainSurfaceOriginX = cameraX - RainSurfaceWidth / 2;
+        rainSurfaceOriginZ = cameraZ - RainSurfaceDepth / 2;
         (sunOriginX, sunOriginY, sunOriginZ) = CalculateSunClipmapOrigin(
             cameraX,
             cameraY,
             cameraZ,
-            GetNormalizedSunDirection());
+            GetNormalizedSunDirection(),
+            sunTraceDistance,
+            sunOccupancyScale);
         buildIndex = 0;
         fluidSurfaceBuildIndex = 0;
         sunBuildIndex = 0;
+        distantSunSurfaceBuildIndex = 0;
         rainSurfaceBuildIndex = 0;
         buildLights.Clear();
         Array.Clear(buildVoxels);
@@ -763,6 +942,85 @@ internal sealed class VoxelScene : IDisposable
         }
     }
 
+    /// <summary>Total top-surface samples used by the reduced distant shadow representation.</summary>
+    private static int DistantSunSurfaceSampleCount =>
+        SunOccupancyWidth * SunOccupancyDepth * SunMaskAxis * SunMaskAxis;
+
+    /// <summary>Reports completion of either the exact two-block grid or the distant surface LOD.</summary>
+    private bool SunBuildComplete => sunOccupancyScale == SunOccupancyScale
+        ? sunBuildIndex == SunOccupancyWidth * SunOccupancyHeight * SunOccupancyDepth
+        : distantSunSurfaceBuildIndex == DistantSunSurfaceSampleCount;
+
+    /// <summary>Maps distant surface-sample progress onto the legacy cell-count status scale.</summary>
+    private int SunBuildCompletedCellEquivalent => sunOccupancyScale == SunOccupancyScale
+        ? sunBuildIndex
+        : (int)((long)distantSunSurfaceBuildIndex
+            * SunOccupancyWidth * SunOccupancyHeight * SunOccupancyDepth
+            / DistantSunSurfaceSampleCount);
+
+    /// <summary>Combines the configured floor with the client/server-approved visible block range.</summary>
+    /// <param name="configuredMinimum">User/profile minimum shadow reach.</param>
+    /// <param name="desiredViewDistance">Client-requested block view distance.</param>
+    /// <param name="approvedViewDistance">Server-approved block view distance, or zero while unknown.</param>
+    /// <returns>Finite trace reach bounded by the engine's supported LOD range.</returns>
+    internal static int ResolveRequestedSunTraceDistance(
+        float configuredMinimum,
+        int desiredViewDistance,
+        int approvedViewDistance)
+    {
+        int finiteConfigured = float.IsFinite(configuredMinimum)
+            ? (int)MathF.Ceiling(configuredMinimum)
+            : MaximumSunTraceDistance;
+        int visibleDistance = desiredViewDistance > 0
+            ? desiredViewDistance
+            : MaximumSunTraceDistance;
+        if (approvedViewDistance > 0)
+        {
+            visibleDistance = Math.Min(visibleDistance, approvedViewDistance);
+        }
+
+        return Math.Clamp(
+            Math.Max(finiteConfigured, visibleDistance),
+            16,
+            MaximumViewTraceDistance);
+    }
+
+    /// <summary>Chooses a power-of-two distant LOD able to contain any solar direction.</summary>
+    /// <param name="traceDistance">Required trace reach in blocks.</param>
+    /// <returns>World blocks per distant occupancy cell.</returns>
+    internal static int CalculateSunOccupancyScale(int traceDistance)
+    {
+        int boundedDistance = Math.Clamp(traceDistance, 16, MaximumViewTraceDistance);
+        // Horizontal receivers span 48 blocks plus eight blocks of recenter
+        // hysteresis. Vertical receivers span 16 plus four. The single scalar
+        // cell size must satisfy both axes for every possible sun direction.
+        int horizontalScale = DivideRoundUp(
+            boundedDistance + 56,
+            SunOccupancyWidth);
+        int verticalScale = DivideRoundUp(
+            boundedDistance + 20,
+            SunOccupancyHeight);
+        int requiredScale = Math.Clamp(
+            Math.Max(SunOccupancyScale, Math.Max(horizontalScale, verticalScale)),
+            SunOccupancyScale,
+            16);
+        // Quantized LODs prevent a one-block view-distance adjustment from
+        // reallocating the entire clipmap. Beyond 96 blocks, progressively
+        // larger cells also bound the number of GPU DDA steps: near geometry
+        // remains 4x detailed, while 128/384/640-block reaches use 4/8/16 m
+        // distant cells respectively.
+        int lodScale = SunOccupancyScale;
+        while (lodScale < requiredScale)
+        {
+            lodScale *= 2;
+        }
+        return Math.Min(lodScale, 16);
+    }
+
+    /// <summary>Integer ceiling division for positive clipmap dimensions.</summary>
+    private static int DivideRoundUp(int numerator, int denominator) =>
+        (numerator + denominator - 1) / denominator;
+
     /// <summary>
     /// Samples the highest optical fluid surface in one column of the independent 128-square
     /// footprint. The vertical encoding remains relative to the unchanged 48-block voxel origin.
@@ -809,13 +1067,119 @@ internal sealed class VoxelScene : IDisposable
         buildSunOccupancy[index] = SampleSunOccupancyMask(localX, localY, localZ);
     }
 
+    /// <summary>
+    /// Samples one X/Z subcell of the reduced distant LOD from the engine-maintained
+    /// rain surface. The fixed 76x58x76 texture therefore covers the complete visible
+    /// range without scanning the cubic world volume as cell scale increases.
+    /// </summary>
+    /// <param name="index">Flat X/Z/subcell sample index.</param>
+    private void SampleDistantSunSurface(int index)
+    {
+        int subcellIndex = index % (SunMaskAxis * SunMaskAxis);
+        int columnIndex = index / (SunMaskAxis * SunMaskAxis);
+        int localX = columnIndex % SunOccupancyWidth;
+        int localZ = columnIndex / SunOccupancyWidth;
+        int subcellX = subcellIndex % SunMaskAxis;
+        int subcellZ = subcellIndex / SunMaskAxis;
+        if (!TryResolveDistantSunSurfaceSample(
+                localX,
+                localZ,
+                subcellX,
+                subcellZ,
+                out int localY,
+                out int bitIndex))
+        {
+            return;
+        }
+
+        int destination = (localZ * SunOccupancyHeight + localY)
+            * SunOccupancyWidth + localX;
+        buildSunOccupancy[destination] |= 1UL << bitIndex;
+    }
+
+    /// <summary>Maps one distant X/Z sample to the packed vertical surface bit it owns.</summary>
+    /// <param name="localX">Distant cell X.</param>
+    /// <param name="localZ">Distant cell Z.</param>
+    /// <param name="subcellX">Packed subcell X in 0..3.</param>
+    /// <param name="subcellZ">Packed subcell Z in 0..3.</param>
+    /// <param name="localY">Resolved distant cell Y.</param>
+    /// <param name="bitIndex">Resolved packed 4-cubed bit.</param>
+    /// <returns>Whether a rain-blocking caster surface exists inside the distant volume.</returns>
+    private bool TryResolveDistantSunSurfaceSample(
+        int localX,
+        int localZ,
+        int subcellX,
+        int subcellZ,
+        out int localY,
+        out int bitIndex)
+    {
+        float subcellWorldSize = sunOccupancyScale / (float)SunMaskAxis;
+        int worldX = sunOriginX + localX * sunOccupancyScale
+            + Math.Min(
+                sunOccupancyScale - 1,
+                (int)MathF.Floor((subcellX + 0.5f) * subcellWorldSize));
+        int worldZ = sunOriginZ + localZ * sunOccupancyScale
+            + Math.Min(
+                sunOccupancyScale - 1,
+                (int)MathF.Floor((subcellZ + 0.5f) * subcellWorldSize));
+        samplePosition.Set(worldX, 0, worldZ);
+        int rainHeight = api.World.BlockAccessor.GetRainMapHeightAt(samplePosition);
+        int casterY = ResolveDistantSurfaceCasterY(worldX, rainHeight, worldZ);
+        if (casterY == int.MinValue)
+        {
+            localY = -1;
+            bitIndex = -1;
+            return false;
+        }
+
+        int localSurfaceY = casterY - sunOriginY;
+        if (localSurfaceY < 0
+            || localSurfaceY >= SunOccupancyHeight * sunOccupancyScale)
+        {
+            localY = -1;
+            bitIndex = -1;
+            return false;
+        }
+
+        localY = localSurfaceY / sunOccupancyScale;
+        int withinCellY = localSurfaceY - localY * sunOccupancyScale;
+        int subcellY = Math.Clamp(
+            withinCellY * SunMaskAxis / sunOccupancyScale,
+            0,
+            SunMaskAxis - 1);
+        bitIndex = (subcellZ * SunMaskAxis + subcellY) * SunMaskAxis + subcellX;
+        return true;
+    }
+
+    /// <summary>Finds the solid caster at or immediately below a public rain-map height.</summary>
+    /// <param name="worldX">Sample X.</param>
+    /// <param name="rainHeight">Engine rain-map height.</param>
+    /// <param name="worldZ">Sample Z.</param>
+    /// <returns>Caster block Y, or <see cref="int.MinValue"/> when none is represented.</returns>
+    private int ResolveDistantSurfaceCasterY(int worldX, int rainHeight, int worldZ)
+    {
+        IBlockAccessor accessor = api.World.BlockAccessor;
+        for (int offset = 0; offset <= 1; offset++)
+        {
+            int worldY = rainHeight - offset;
+            samplePosition.Set(worldX, worldY, worldZ);
+            Block? block = accessor.GetBlock(samplePosition, BlockLayersAccess.Solid);
+            if (block is not null && IsSunShadowCaster(block))
+            {
+                return worldY;
+            }
+        }
+
+        return int.MinValue;
+    }
+
     /// <summary>Samples engine-maintained rain-map surface Y for one world X/Z column.</summary>
     /// <param name="index">Flat rain-grid index.</param>
     private void SampleRainSurfaceCell(int index)
     {
         int localX = index % RainSurfaceWidth;
         int localZ = index / RainSurfaceWidth;
-        samplePosition.Set(sunOriginX + localX, 0, sunOriginZ + localZ);
+        samplePosition.Set(rainSurfaceOriginX + localX, 0, rainSurfaceOriginZ + localZ);
         // Public rain height respects Block.RainPermeable and is maintained by
         // the engine after block edits. Store world Y directly in R32F so tall
         // worlds and negative dimensions do not need a lossy byte encoding.
@@ -832,7 +1196,7 @@ internal sealed class VoxelScene : IDisposable
         }
 
         List<(int X, int Y, int Z)> batch = new(maximumUpdatesPerTick);
-        foreach ((int X, int Y, int Z) position in dirtyBlocks)
+        foreach ((int X, int Y, int Z) position in dirtyBlocks.Keys)
         {
             batch.Add(position);
             if (batch.Count == maximumUpdatesPerTick)
@@ -843,7 +1207,13 @@ internal sealed class VoxelScene : IDisposable
 
         foreach ((int X, int Y, int Z) position in batch)
         {
-            dirtyBlocks.Remove(position);
+            // Remove before sampling. A concurrent edit after this point adds
+            // the key again and is therefore processed by a later tick rather
+            // than being lost behind the in-flight world read.
+            if (!dirtyBlocks.TryRemove(position, out _))
+            {
+                continue;
+            }
             UpdateReadyVoxel(position.X, position.Y, position.Z);
             UpdateReadyFluidSurface(position.X, position.Z);
             UpdateReadySunOccupancy(position.X, position.Y, position.Z);
@@ -856,8 +1226,8 @@ internal sealed class VoxelScene : IDisposable
     /// <param name="worldZ">Changed world Z.</param>
     private void UpdateReadyRainSurface(int worldX, int worldZ)
     {
-        int localX = worldX - sunOriginX;
-        int localZ = worldZ - sunOriginZ;
+        int localX = worldX - rainSurfaceOriginX;
+        int localZ = worldZ - rainSurfaceOriginZ;
         if ((uint)localX >= RainSurfaceWidth || (uint)localZ >= RainSurfaceDepth)
         {
             return;
@@ -885,14 +1255,20 @@ internal sealed class VoxelScene : IDisposable
     /// <param name="worldZ">Changed world Z.</param>
     private void UpdateReadySunOccupancy(int worldX, int worldY, int worldZ)
     {
-        int localX = (worldX - sunOriginX) / SunOccupancyScale;
-        int localY = (worldY - sunOriginY) / SunOccupancyScale;
-        int localZ = (worldZ - sunOriginZ) / SunOccupancyScale;
+        int localX = (worldX - sunOriginX) / sunOccupancyScale;
+        int localY = (worldY - sunOriginY) / sunOccupancyScale;
+        int localZ = (worldZ - sunOriginZ) / sunOccupancyScale;
         if (worldX < sunOriginX || worldY < sunOriginY || worldZ < sunOriginZ
             || (uint)localX >= SunOccupancyWidth
             || (uint)localY >= SunOccupancyHeight
             || (uint)localZ >= SunOccupancyDepth)
         {
+            return;
+        }
+
+        if (sunOccupancyScale != SunOccupancyScale)
+        {
+            UpdateReadyDistantSunColumn(localX, localZ);
             return;
         }
 
@@ -1146,6 +1522,48 @@ internal sealed class VoxelScene : IDisposable
         else
         {
             pendingFluidSurfaceUpdates.Add(update);
+        }
+    }
+
+    /// <summary>Rebuilds one complete distant X/Z column after a rain-surface edit.</summary>
+    /// <param name="localX">Distant cell X.</param>
+    /// <param name="localZ">Distant cell Z.</param>
+    private void UpdateReadyDistantSunColumn(int localX, int localZ)
+    {
+        Span<ulong> columnMasks = stackalloc ulong[SunOccupancyHeight];
+        for (int subcellZ = 0; subcellZ < SunMaskAxis; subcellZ++)
+        {
+            for (int subcellX = 0; subcellX < SunMaskAxis; subcellX++)
+            {
+                if (TryResolveDistantSunSurfaceSample(
+                        localX,
+                        localZ,
+                        subcellX,
+                        subcellZ,
+                        out int localY,
+                        out int bitIndex))
+                {
+                    columnMasks[localY] |= 1UL << bitIndex;
+                }
+            }
+        }
+
+        for (int localY = 0; localY < SunOccupancyHeight; localY++)
+        {
+            int index = (localZ * SunOccupancyHeight + localY)
+                * SunOccupancyWidth + localX;
+            ulong occupancy = columnMasks[localY];
+            if (readySunOccupancy[index] == occupancy)
+            {
+                continue;
+            }
+
+            readySunOccupancy[index] = occupancy;
+            pendingSunOccupancyUpdates.Add(new VoxelSunOccupancyUpdate(
+                localX,
+                localY,
+                localZ,
+                occupancy));
         }
     }
 
@@ -1992,10 +2410,10 @@ internal sealed class VoxelScene : IDisposable
             transparentSurfaceIgnored);
     }
 
-    /// <summary>Rasterizes shadow-casting triangles into 16-cubed occupancy using texture alpha tests.</summary>
+    /// <summary>Rasterizes shadow-casting triangles into 16-cubed fractional coverage using texture alpha tests.</summary>
     /// <param name="block">Block supplying texture graph and render-pass semantics.</param>
     /// <param name="mesh">Detailed default mesh.</param>
-    /// <returns>Binary mask; transparent glass contributes no caster samples.</returns>
+    /// <returns>UNorm8 coverage mask; transparent glass contributes no caster samples.</returns>
     private byte[] BuildLightCasterMask(Block block, MeshData? mesh)
     {
         if (mesh?.xyz is not { Length: >= 9 }
@@ -2075,7 +2493,12 @@ internal sealed class VoxelScene : IDisposable
                         }
 
                         byte coverage = alphaSampler is null
-                            ? (byte)255
+                            ? TriangleCellGeometricCoverage(
+                                center,
+                                LightCasterScale,
+                                a,
+                                b,
+                                c)
                             : TriangleCellOpaqueAlphaCoverage(
                                 center,
                                 LightCasterScale,
@@ -2086,13 +2509,85 @@ internal sealed class VoxelScene : IDisposable
                                 uvB,
                                 uvC,
                                 alphaSampler);
-                        mask[voxelIndex] = Math.Max(mask[voxelIndex], coverage);
+                        mask[voxelIndex] = CombineShadowCoverage(
+                            mask[voxelIndex],
+                            coverage);
                     }
                 }
             }
         }
 
         return mask;
+    }
+
+    /// <summary>
+    /// Estimates the fraction of one subvoxel covered by an opaque triangle.
+    /// Conservative triangle-box intersection selects candidate cells, while
+    /// this supersampled fraction prevents a millimetric bar touching one cell
+    /// corner from becoming a fully opaque 6.25-centimetre cube.
+    /// </summary>
+    /// <param name="center">Candidate subvoxel center in block space.</param>
+    /// <param name="scale">Subvoxels per block edge.</param>
+    /// <param name="a">First triangle vertex.</param>
+    /// <param name="b">Second triangle vertex.</param>
+    /// <param name="c">Third triangle vertex.</param>
+    /// <returns>Projected geometric coverage encoded as UNorm8.</returns>
+    internal static byte TriangleCellGeometricCoverage(
+        Vec3f center,
+        int scale,
+        Vec3f a,
+        Vec3f b,
+        Vec3f c)
+    {
+        if (scale <= 0
+            || LengthSquared(Cross(Subtract(b, a), Subtract(c, a))) < 0.0000001f)
+        {
+            return 0;
+        }
+
+        float halfExtent = 0.48f / scale;
+        ReadOnlySpan<float> offsets = [-halfExtent, 0.0f, halfExtent];
+        int coveredSamples = 0;
+        const int sampleCount = 27;
+        foreach (float offsetZ in offsets)
+        {
+            foreach (float offsetY in offsets)
+            {
+                foreach (float offsetX in offsets)
+                {
+                    Vec3f sample = new(
+                        center.X + offsetX,
+                        center.Y + offsetY,
+                        center.Z + offsetZ);
+                    coveredSamples += TryInterpolateUv(
+                        sample,
+                        a,
+                        b,
+                        c,
+                        default,
+                        default,
+                        default,
+                        out _)
+                            ? 1
+                            : 0;
+                }
+            }
+        }
+
+        return checked((byte)Math.Clamp(
+            (int)MathF.Round(255.0f * coveredSamples / sampleCount),
+            1,
+            255));
+    }
+
+    /// <summary>Combines independent per-triangle coverages without exceeding opaque.</summary>
+    /// <param name="current">Coverage already present in the cell.</param>
+    /// <param name="additional">Coverage contributed by another triangle.</param>
+    /// <returns>Union coverage encoded as UNorm8.</returns>
+    internal static byte CombineShadowCoverage(byte current, byte additional)
+    {
+        int remainingTransmission = (255 - current) * (255 - additional);
+        return checked((byte)(255 - (remainingTransmission + 127) / 255));
     }
 
     /// <summary>Maps block composite/baked texture sources to their exact atlas rectangles.</summary>
@@ -2369,8 +2864,8 @@ internal sealed class VoxelScene : IDisposable
     {
         float halfExtent = 0.48f / scale;
         ReadOnlySpan<float> offsets = [-halfExtent, 0.0f, halfExtent];
-        int coveredSamples = 0;
         int opaqueSamples = 0;
+        const int sampleCount = 27;
         foreach (float offsetZ in offsets)
         {
             foreach (float offsetY in offsets)
@@ -2386,18 +2881,15 @@ internal sealed class VoxelScene : IDisposable
                         continue;
                     }
 
-                    coveredSamples++;
                     opaqueSamples += sampler.IsOpaque(uv.U, uv.V) ? 1 : 0;
                 }
             }
         }
 
-        return coveredSamples > 0
-            ? checked((byte)Math.Clamp(
-                (int)MathF.Round(255.0f * opaqueSamples / coveredSamples),
-                0,
-                255))
-            : (byte)0;
+        return checked((byte)Math.Clamp(
+            (int)MathF.Round(255.0f * opaqueSamples / sampleCount),
+            0,
+            255));
     }
 
     /// <summary>Projects a point onto a non-degenerate triangle and interpolates barycentric UVs.</summary>
@@ -3256,7 +3748,10 @@ internal sealed class VoxelScene : IDisposable
         MeshBounds bounds = MeshBounds.Empty;
         foreach (MeshData mesh in meshes)
         {
-            bounds = bounds.Include(mesh);
+            if (mesh is not null)
+            {
+                bounds = bounds.Include(mesh);
+            }
         }
         if (bounds.IsEmpty)
         {
@@ -3276,10 +3771,15 @@ internal sealed class VoxelScene : IDisposable
         ulong mask = 0;
         foreach (MeshData source in meshes)
         {
+            if (source?.xyz is not { Length: >= 3 } || source.VerticesCount <= 0)
+            {
+                continue;
+            }
+
             MeshData projected = CloneInstanceMesh(source);
             int vertexCount = Math.Min(
                 projected.VerticesCount,
-                projected.xyz?.Length / 3 ?? 0);
+                projected.xyz.Length / 3);
             for (int vertexIndex = 0; vertexIndex < vertexCount; vertexIndex++)
             {
                 int vertexOffset = vertexIndex * 3;
@@ -3926,14 +4426,27 @@ internal sealed class VoxelScene : IDisposable
         return ShouldCastShadow(block.RenderPass);
     }
 
-    /// <summary>Reads the client calendar sun direction and guarantees a finite unit/up fallback vector.</summary>
+    /// <summary>Calculates the position-aware calendar sun direction for the current player.</summary>
     /// <returns>Normalized world-space direction toward the sun.</returns>
-    private Vec3f GetNormalizedSunDirection()
+    private Vec3f GetNormalizedSunDirection() => ResolveSunDirection(
+        api.World.Calendar,
+        api.World.Player?.Entity?.CameraPos ?? new Vec3d());
+
+    /// <summary>
+    /// Resolves the public coordinate/date-aware solar vector and falls back to the client cache only
+    /// when a test double or incomplete calendar cannot provide it. This avoids stale solar
+    /// directions after automated time jumps and makes sun shadows follow geographic latitude.
+    /// </summary>
+    /// <param name="calendar">World calendar supplying date and astronomical calculation.</param>
+    /// <param name="worldPosition">Receiver/camera position used for latitude-dependent solar altitude.</param>
+    /// <returns>Finite normalized world-space direction toward the sun, or world up as a safe fallback.</returns>
+    internal static Vec3f ResolveSunDirection(IGameCalendar? calendar, Vec3d worldPosition)
     {
-        IClientGameCalendar? calendar = api.World.Calendar as IClientGameCalendar;
-        Vec3f direction = calendar?.SunPositionNormalized ?? new Vec3f(0.0f, 1.0f, 0.0f);
+        Vec3f? direction = calendar?.GetSunPosition(worldPosition, calendar.TotalDays);
+        direction ??= (calendar as IClientGameCalendar)?.SunPositionNormalized;
+        direction ??= new Vec3f(0.0f, 1.0f, 0.0f);
         float lengthSquared = LengthSquared(direction);
-        return lengthSquared > 0.000001f
+        return float.IsFinite(lengthSquared) && lengthSquared > 0.000001f
             ? Scale(direction, 1.0f / MathF.Sqrt(lengthSquared))
             : new Vec3f(0.0f, 1.0f, 0.0f);
     }
@@ -3950,27 +4463,55 @@ internal sealed class VoxelScene : IDisposable
         int cameraZ,
         Vec3f sunDirection)
     {
-        // Center the complete 96-block ray sweep inside the volume while keeping
+        return CalculateSunClipmapOrigin(
+            cameraX,
+            cameraY,
+            cameraZ,
+            sunDirection,
+            MaximumSunTraceDistance,
+            SunOccupancyScale);
+    }
+
+    /// <summary>Places a runtime-scaled distant volume asymmetrically toward the sun.</summary>
+    /// <param name="cameraX">Integer camera X.</param>
+    /// <param name="cameraY">Integer camera Y.</param>
+    /// <param name="cameraZ">Integer camera Z.</param>
+    /// <param name="sunDirection">Normalized world sun direction.</param>
+    /// <param name="traceDistance">Required reach in blocks.</param>
+    /// <param name="occupancyScale">Blocks represented by one distant texture cell.</param>
+    /// <returns>Runtime origin aligned to the selected cell size.</returns>
+    internal static (int X, int Y, int Z) CalculateSunClipmapOrigin(
+        int cameraX,
+        int cameraY,
+        int cameraZ,
+        Vec3f sunDirection,
+        int traceDistance,
+        int occupancyScale)
+    {
+        // Center the complete ray sweep inside the volume while keeping
         // at least 24 horizontal and 8 vertical blocks of receiver coverage.
-        // The remaining 8x4x8 blocks are symmetric hysteresis against small sun
-        // movements. Origins stay aligned to the 2-block cells so incremental
+        // Remaining blocks are symmetric hysteresis against small sun
+        // movements. Origins stay cell-aligned so incremental
         // updates and DDA texture coordinates remain exact for negative worlds.
-        int cameraLocalX = SunWorldWidth / 2
+        int worldWidth = SunOccupancyWidth * occupancyScale;
+        int worldHeight = SunOccupancyHeight * occupancyScale;
+        int worldDepth = SunOccupancyDepth * occupancyScale;
+        int cameraLocalX = worldWidth / 2
             - (int)MathF.Round(
                 Math.Clamp(sunDirection.X, -1.0f, 1.0f)
-                    * (MaximumSunTraceDistance * 0.5f));
-        int cameraLocalY = SunWorldHeight / 2
+                    * (traceDistance * 0.5f));
+        int cameraLocalY = worldHeight / 2
             - (int)MathF.Round(
                 Math.Clamp(sunDirection.Y, -1.0f, 1.0f)
-                    * (MaximumSunTraceDistance * 0.5f));
-        int cameraLocalZ = SunWorldDepth / 2
+                    * (traceDistance * 0.5f));
+        int cameraLocalZ = worldDepth / 2
             - (int)MathF.Round(
                 Math.Clamp(sunDirection.Z, -1.0f, 1.0f)
-                    * (MaximumSunTraceDistance * 0.5f));
+                    * (traceDistance * 0.5f));
         return (
-            AlignDown(cameraX - cameraLocalX, SunOccupancyScale),
-            AlignDown(cameraY - cameraLocalY, SunOccupancyScale),
-            AlignDown(cameraZ - cameraLocalZ, SunOccupancyScale));
+            AlignDown(cameraX - cameraLocalX, occupancyScale),
+            AlignDown(cameraY - cameraLocalY, occupancyScale),
+            AlignDown(cameraZ - cameraLocalZ, occupancyScale));
     }
 
     /// <summary>Floors an integer coordinate to a positive grid scale, including negative worlds.</summary>
@@ -4021,6 +4562,11 @@ internal sealed class VoxelScene : IDisposable
                 EnumBlockMaterial.Metal => (byte)192,
                 _ => (byte)128
             };
+        if (block.BlockMaterial == EnumBlockMaterial.Plant)
+        {
+            baseMaterialClass |= VegetationMaterialFlag;
+        }
+
         destination[byteIndex + 3] = EncodeMaterialGeometryClass(
             baseMaterialClass,
             partialGeometry);
@@ -4079,17 +4625,35 @@ internal sealed class VoxelScene : IDisposable
         float green = ColorUtil.ColorG(rgb) / 255.0f;
         float blue = ColorUtil.ColorB(rgb) / 255.0f;
         string blockCode = block.Code?.ToString() ?? "unknown";
-        if (IsWarmEmitter(blockCode))
+        bool hasAuthoredPhotometry = EmitterPhotometry.TryRead(
+                block.Attributes,
+                lightHsv[2],
+                out EmitterPhotometry photometry)
+            || EmitterPhotometryCatalog.TryResolve(
+                block.Code,
+                lightHsv[2],
+                emitterPhotometryByCodeRoot,
+                out photometry);
+        if (!hasAuthoredPhotometry)
+        {
+            photometry = EmitterPhotometry.FromGameLight(blockCode, lightHsv[2]);
+        }
+
+        if (photometry.TryGetSrgb(out float measuredRed, out float measuredGreen, out float measuredBlue))
+        {
+            red = measuredRed;
+            green = measuredGreen;
+            blue = measuredBlue;
+        }
+        else if (IsWarmEmitter(blockCode))
         {
             // Vanilla lanterns intentionally use a low-saturation lightHsv.
-            // Blend it with a 2700 K sRGB response while retaining part of the
-            // authored hue. The previous green/blue targets were far below a
-            // black-body response and covered interiors in an orange veil.
+            // Unprofiled mod emitters retain a bounded warm fallback. Authored
+            // emitters instead use their measured CIE chromaticity above.
             red = red * 0.22f + 0.78f;
             green = green * 0.22f + 0.507f;
             blue = blue * 0.22f + 0.265f;
         }
-        float brightness = Math.Clamp(lightHsv[2] / 16.0f, 0.25f, 2.0f);
         CachedBlockOccupancy occupancy = GetCachedBlockOccupancy(block);
         CachedLightCaster caster = GetLightCaster(block, occupancy);
         buildLights.Add(new VoxelLight(
@@ -4099,9 +4663,13 @@ internal sealed class VoxelScene : IDisposable
             red,
             green,
             blue,
-            brightness,
+            photometry.LuminousIntensityCandela,
             blockCode,
-            caster.Mask));
+            caster.Mask,
+            photometry.SourceHalfWidthMetres,
+            photometry.SourceHalfHeightMetres,
+            photometry.CutoffIlluminanceLux,
+            photometry.Basis));
     }
 
     /// <summary>Recognizes fire-temperature emitter families requiring the calibrated 2700 K blend.</summary>
@@ -4159,7 +4727,7 @@ internal sealed class VoxelScene : IDisposable
         building = false;
 
         api.Logger.Notification(
-            "[VintageRTX] Voxel scene generation {0} ready: {1}x{2}x{3} materials, {4}x occupancy, {5} emissive blocks, {6} fluid voxels, {7} visible liquid containers, {8} optical profiles; geometry mesh={9}, collision={10}, selection={11}, fallback={12}; sun clipmap={13}x{14}x{15} blocks at ({16},{17},{18}); liquid surface={19}x{20} at ({21},{22}).",
+            "[VintageRTX] Voxel scene generation {0} ready: {1}x{2}x{3} materials, {4}x occupancy, {5} emissive blocks, {6} fluid voxels, {7} visible liquid containers, {8} optical profiles; geometry mesh={9}, collision={10}, selection={11}, fallback={12}; sun clipmap={13}x{14}x{15} blocks at ({16},{17},{18}), trace={19}, cell={20}; liquid surface={21}x{22} at ({23},{24}).",
             generation,
             Width,
             Height,
@@ -4173,12 +4741,14 @@ internal sealed class VoxelScene : IDisposable
             collisionOccupancyBlocks,
             selectionOccupancyBlocks,
             fallbackOccupancyBlocks,
-            SunWorldWidth,
-            SunWorldHeight,
-            SunWorldDepth,
+            SunOccupancyWidth * sunOccupancyScale,
+            SunOccupancyHeight * sunOccupancyScale,
+            SunOccupancyDepth * sunOccupancyScale,
             sunOriginX,
             sunOriginY,
             sunOriginZ,
+            sunTraceDistance,
+            sunOccupancyScale,
             FluidSurfaceWidth,
             FluidSurfaceDepth,
             fluidSurfaceOriginX,
@@ -4206,7 +4776,7 @@ internal sealed class VoxelScene : IDisposable
                 : api.Logger.Notification;
             LightCasterBandCoverage bands = MeasureLightCasterBands(light.CasterMask);
             log(
-                "[VintageRTX] Emissive {0}: {1} at ({2:0.000},{3:0.000},{4:0.000}), rgb=({5:0.000},{6:0.000},{7:0.000}), intensity={8:0.00}, fine caster solid={9}, alpha={10}, total={11}/{12} voxels; bands lower={13}, middle={14}, upper={15}, empty={16}.",
+                "[VintageRTX] Emissive {0}: {1} at ({2:0.000},{3:0.000},{4:0.000}), rgb=({5:0.000},{6:0.000},{7:0.000}), intensity={8:0.00} cd, source={9:0.000}x{10:0.000} m, cutoff={11:0.000} lux, basis={12}; fine caster solid={13}, alpha={14}, total={15}/{16} voxels; bands lower={17}, middle={18}, upper={19}, empty={20}.",
                 [
                     index,
                     light.Code,
@@ -4217,6 +4787,10 @@ internal sealed class VoxelScene : IDisposable
                     light.Green,
                     light.Blue,
                     light.Intensity,
+                    light.SourceHalfWidthMetres * 2.0f,
+                    light.SourceHalfHeightMetres * 2.0f,
+                    light.CutoffIlluminanceLux,
+                    light.PhotometricBasis,
                     light.CasterMask.Count(value => value == 255),
                     light.CasterMask.Count(value => value is > 0 and < 255),
                     light.CasterMask.Count(value => value != 0),
@@ -4294,7 +4868,10 @@ internal sealed class VoxelScene : IDisposable
             int centerX = (int)MathF.Floor(light.X) - sceneOriginX;
             int centerY = (int)MathF.Floor(light.Y) - sceneOriginY;
             int centerZ = (int)MathF.Floor(light.Z) - sceneOriginZ;
-            int radius = (int)MathF.Ceiling(IrradianceEmitterRadius);
+            float emitterRange = Math.Min(
+                IrradianceEmitterRadius,
+                light.TraceRadiusMetres());
+            int radius = (int)MathF.Ceiling(emitterRange);
             for (int z = Math.Max(centerZ - radius, 0); z <= Math.Min(centerZ + radius, Depth - 1); z++)
             {
                 for (int y = Math.Max(centerY - radius, 0); y <= Math.Min(centerY + radius, Height - 1); y++)
@@ -4338,7 +4915,7 @@ internal sealed class VoxelScene : IDisposable
                                 + toLightY * toLightY
                                 + toLightZ * toLightZ;
                             if (distanceSquared <= 0.0001f
-                                || distanceSquared >= IrradianceEmitterRadius * IrradianceEmitterRadius)
+                                || distanceSquared >= emitterRange * emitterRange)
                             {
                                 continue;
                             }
@@ -4360,13 +4937,14 @@ internal sealed class VoxelScene : IDisposable
                             }
 
                             float radiusFade = 1.0f - SmoothStep(
-                                IrradianceEmitterRadius * 0.58f,
-                                IrradianceEmitterRadius,
+                                emitterRange * 0.90f,
+                                emitterRange,
                                 distance);
                             float attenuation = light.Intensity
                                 * receiver
                                 * radiusFade
-                                / (1.0f + 0.075f * distanceSquared);
+                                / distanceSquared
+                                * EmitterPhotometry.LuxToRendererRadiance;
                             AddIrradianceSeed(
                                 seeds,
                                 seedDirections,
@@ -4881,7 +5459,8 @@ internal sealed class VoxelScene : IDisposable
             originZ,
             sunOriginX,
             sunOriginY,
-            sunOriginZ);
+            sunOriginZ,
+            sunOccupancyScale);
         bool insideFluidSurface = position.X >= fluidSurfaceOriginX
             && position.X < fluidSurfaceOriginX + FluidSurfaceWidth
             && position.Y >= originY
@@ -4912,7 +5491,7 @@ internal sealed class VoxelScene : IDisposable
             }
         }
 
-        dirtyBlocks.Add((position.X, position.Y, position.Z));
+        dirtyBlocks.TryAdd((position.X, position.Y, position.Z), 0);
     }
 
     /// <summary>Classifies one world edit independently against fine and long-range clipmap volumes.</summary>
@@ -4931,12 +5510,46 @@ internal sealed class VoxelScene : IDisposable
         int clipmapOriginY,
         int clipmapOriginZ)
     {
+        return ClassifyDirtyBlockVolumes(
+            worldX,
+            worldY,
+            worldZ,
+            mainOriginX,
+            mainOriginY,
+            mainOriginZ,
+            clipmapOriginX,
+            clipmapOriginY,
+            clipmapOriginZ,
+            SunOccupancyScale);
+    }
+
+    /// <summary>Classifies edits against a runtime-scaled distant clipmap.</summary>
+    /// <param name="worldX">Edit X.</param><param name="worldY">Edit Y.</param><param name="worldZ">Edit Z.</param>
+    /// <param name="mainOriginX">Fine origin X.</param><param name="mainOriginY">Fine origin Y.</param><param name="mainOriginZ">Fine origin Z.</param>
+    /// <param name="clipmapOriginX">Sun origin X.</param><param name="clipmapOriginY">Sun origin Y.</param><param name="clipmapOriginZ">Sun origin Z.</param>
+    /// <param name="occupancyScale">Blocks represented by one distant cell.</param>
+    /// <returns>Containment flags for both volumes.</returns>
+    internal static (bool FineOccupancy, bool SunOccupancy) ClassifyDirtyBlockVolumes(
+        int worldX,
+        int worldY,
+        int worldZ,
+        int mainOriginX,
+        int mainOriginY,
+        int mainOriginZ,
+        int clipmapOriginX,
+        int clipmapOriginY,
+        int clipmapOriginZ,
+        int occupancyScale)
+    {
         bool fine = worldX >= mainOriginX && worldX < mainOriginX + Width
             && worldY >= mainOriginY && worldY < mainOriginY + Height
             && worldZ >= mainOriginZ && worldZ < mainOriginZ + Depth;
-        bool sun = worldX >= clipmapOriginX && worldX < clipmapOriginX + SunWorldWidth
-            && worldY >= clipmapOriginY && worldY < clipmapOriginY + SunWorldHeight
-            && worldZ >= clipmapOriginZ && worldZ < clipmapOriginZ + SunWorldDepth;
+        bool sun = worldX >= clipmapOriginX
+            && worldX < clipmapOriginX + SunOccupancyWidth * occupancyScale
+            && worldY >= clipmapOriginY
+            && worldY < clipmapOriginY + SunOccupancyHeight * occupancyScale
+            && worldZ >= clipmapOriginZ
+            && worldZ < clipmapOriginZ + SunOccupancyDepth * occupancyScale;
         return (fine, sun);
     }
 
@@ -5137,7 +5750,20 @@ internal readonly record struct CasterGeometryEvidence(
     bool CageHeightCovered,
     bool TransparentSurfaceIgnored);
 
-/// <summary>World-space colored emitter with intensity, provenance code, and detailed self-caster mask.</summary>
+/// <summary>World-space colored emitter with SI photometry, provenance, and detailed self-caster mask.</summary>
+/// <param name="X">World source centre X in metres/blocks.</param>
+/// <param name="Y">World source centre Y in metres/blocks.</param>
+/// <param name="Z">World source centre Z in metres/blocks.</param>
+/// <param name="Red">Display-sRGB source chromaticity red.</param>
+/// <param name="Green">Display-sRGB source chromaticity green.</param>
+/// <param name="Blue">Display-sRGB source chromaticity blue.</param>
+/// <param name="Intensity">Directional luminous intensity in candela.</param>
+/// <param name="Code">Canonical emitter block code.</param>
+/// <param name="CasterMask">Fractional 16-cubed self-occlusion mask.</param>
+/// <param name="SourceHalfWidthMetres">Horizontal luminous half-width in metres.</param>
+/// <param name="SourceHalfHeightMetres">Vertical luminous half-height in metres.</param>
+/// <param name="CutoffIlluminanceLux">Numerical trace cutoff in lux.</param>
+/// <param name="PhotometricBasis">Measured or fallback provenance label.</param>
 internal readonly record struct VoxelLight(
     float X,
     float Y,
@@ -5147,7 +5773,11 @@ internal readonly record struct VoxelLight(
     float Blue,
     float Intensity,
     string Code,
-    byte[] CasterMask)
+    byte[] CasterMask,
+    float SourceHalfWidthMetres = 0.025f,
+    float SourceHalfHeightMetres = 0.025f,
+    float CutoffIlluminanceLux = EmitterPhotometry.DefaultCutoffIlluminanceLux,
+    string PhotometricBasis = "legacy-fixture")
 {
     /// <summary>Scores selection by intensity over one plus squared camera distance.</summary>
     /// <param name="cameraPosition">World camera position.</param><returns>Relative bounded-selection importance.</returns>
@@ -5157,6 +5787,15 @@ internal readonly record struct VoxelLight(
         double dy = Y - cameraPosition.Y;
         double dz = Z - cameraPosition.Z;
         return Intensity / (1.0 + dx * dx + dy * dy + dz * dz);
+    }
+
+    /// <summary>Computes the maximum axial trace range before the declared lux cutoff.</summary>
+    /// <returns>Finite range in metres/blocks.</returns>
+    public float TraceRadiusMetres()
+    {
+        return MathF.Sqrt(
+            Math.Max(Intensity, 0.0f)
+            / Math.Max(CutoffIlluminanceLux, 0.000001f));
     }
 }
 
@@ -5183,11 +5822,14 @@ internal readonly record struct VoxelSceneSnapshot(
     int SunOccupancyHeight,
     int SunOccupancyDepth,
     int SunOccupancyScale,
+    int SunTraceDistance,
     int SunOriginX,
     int SunOriginY,
     int SunOriginZ,
     int RainSurfaceWidth,
     int RainSurfaceDepth,
+    int RainSurfaceOriginX,
+    int RainSurfaceOriginZ,
     int FluidVoxelCount,
     int VisibleLiquidContainerCount,
     int Generation,

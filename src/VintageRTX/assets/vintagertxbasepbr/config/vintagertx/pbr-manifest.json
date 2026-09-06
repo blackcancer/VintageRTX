@@ -1,6 +1,6 @@
 {
   "schema": "vintagertx.pbr-manifest",
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "pack": {
     "modId": "vintagertxbasepbr",
     "version": "1.22.7"
@@ -24,6 +24,7 @@
     "version": "vintagertx-pbr-v6",
     "execution": "offline-only"
   },
+  "defaultProvenance": "generated",
   "textures": [
     {
       "source": {

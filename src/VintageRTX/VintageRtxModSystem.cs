@@ -31,6 +31,13 @@ public sealed class VintageRtxModSystem : ModSystem
     private bool startupGameModeCommandSent;
     private bool startupWorldStateReady = true;
 
+    /// <summary>
+    /// Maximum opt-in validation ticks spent waiting for the client game-mode mirror after the
+    /// server command; two seconds cover multiple local network round trips without deadlocking
+    /// every later time, weather, camera, and capture command on stale <c>WorldData</c>.
+    /// </summary>
+    private const int StartupGameModeAcknowledgementTimeoutTicks = 20;
+
     /// <summary>Creates the production mod-system with the real asset-discovery services.</summary>
     public VintageRtxModSystem()
         : this(
@@ -88,11 +95,12 @@ public sealed class VintageRtxModSystem : ModSystem
         RegisterStartupWorldState(clientApi);
         pbrSidecarAssets ??= capturePbrAssets(clientApi);
         configStore = new ConfigStore(clientApi);
-        voxelScene = new VoxelScene(clientApi);
+        voxelScene = new VoxelScene(clientApi, () => configStore.Current.SunShadowDistance);
         pbrTerrainRenderer = new PbrTerrainRenderer(clientApi, pbrSidecarAssets);
         pbrEntityRenderer = new PbrEntityRenderer(clientApi, pbrSidecarAssets);
         renderer = new FilmicDisplayRenderer(clientApi, () => configStore.Current, voxelScene);
         renderer.InstallFirstPersonReflectionIsolation();
+        renderer.InstallFenceStackAwareTessellationGuard();
         renderer.InstallProjectileLiquidCollisionBridge();
         runtimeScenarioProbe = RuntimeScenarioProbe.TryStart(
             clientApi,
@@ -180,10 +188,20 @@ public sealed class VintageRtxModSystem : ModSystem
         }
 
         startupWorldReadyTicks++;
-        if (player.WorldData is null
-            || (int)player.WorldData.CurrentGameMode != startupGameMode)
+        bool acknowledged = player.WorldData is not null
+            && (int)player.WorldData.CurrentGameMode == startupGameMode;
+        if (!acknowledged
+            && startupWorldReadyTicks < StartupGameModeAcknowledgementTimeoutTicks)
         {
             return;
+        }
+
+        if (!acknowledged)
+        {
+            api!.Logger.Warning(
+                "[VintageRTX] Startup game-mode client acknowledgement remained stale after {0} ticks; "
+                + "continuing only after the bounded post-command settling window.",
+                startupWorldReadyTicks);
         }
 
         startupWorldStateReady = true;
@@ -316,7 +334,7 @@ public sealed class VintageRtxModSystem : ModSystem
         if (!TryResolveDebugView(requestedView, out VintageRtxDebugView debugView))
         {
             return TextCommandResult.Error(
-                "Available debug views: final, normal, position, lighting, reflection, reflectionsource, voxel, bounce, voxelreflection, visibility, shadowmask, components, material, water, surfacefield, wetness.");
+                "Available debug views: final, normal, position, lighting, reflection, reflectionsource, voxel, bounce, voxelreflection, visibility, shadowmask, nativeshadow, components, material, water, surfacefield, wetness.");
         }
 
         configStore!.Current.DebugView = debugView;
@@ -352,6 +370,7 @@ public sealed class VintageRtxModSystem : ModSystem
             "reflectionsource" or "reflection-source" or "source" => VintageRtxDebugView.ReflectionSource,
             "surfacefield" or "surface-field" or "liquidfield" => VintageRtxDebugView.LiquidSurfaceField,
             "entitymirror" or "entity-mirror" or "entities" => VintageRtxDebugView.EntityMirror,
+            "nativeshadow" or "native-shadow" or "cascade" => VintageRtxDebugView.NativeSunShadow,
             _ => (VintageRtxDebugView)(-1)
         };
 

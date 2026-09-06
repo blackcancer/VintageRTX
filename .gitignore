@@ -21,6 +21,7 @@ packages/
 [Tt]est[Rr]esults/
 coverage-results/
 coverage/
+/tests/coverage-*/
 *.coverage
 *.coveragexml
 coverage.cobertura.xml

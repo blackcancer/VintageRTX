@@ -350,6 +350,10 @@ internal sealed class StandaloneRenderer : IDisposable
         SetMatrix("inverseViewMatrix", inverseView);
         Set("inverseFrameSize", 1.0f / options.Width, 1.0f / options.Height);
         Set("cameraWorldPosition", SyntheticScene.CameraPosition);
+        // Runtime view positions are relative to the player's floating origin.
+        // The authored lab camera is that origin, so supply it explicitly and
+        // reconstruct the same absolute coordinates consumed by voxel fields.
+        Set("floatingWorldOrigin", SyntheticScene.CameraPosition);
         Set("voxelOrigin", Vector3.Zero);
         Set("voxelSize", new Vector3(SyntheticScene.VoxelWidth, SyntheticScene.VoxelHeight, SyntheticScene.VoxelDepth));
         Set("sunVoxelOrigin", Vector3.Zero);

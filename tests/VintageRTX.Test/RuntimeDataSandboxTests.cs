@@ -1,3 +1,4 @@
+using Microsoft.Data.Sqlite;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
@@ -50,6 +51,10 @@ public sealed class RuntimeDataSandboxTests
                     copiedSettings["stringListSettings"]!["modPaths"]!
                         .Values<string>()
                         .ToArray());
+                Assert.AreEqual(
+                    2,
+                    copiedSettings["intSettings"]!.Value<int>("shadowMapQuality"),
+                    "The isolated runtime must enable both native sun-shadow cascades.");
                 Assert.IsNull(copiedSettings["modPaths"]);
 
                 string copiedSave = Path.Combine(
@@ -144,6 +149,173 @@ public sealed class RuntimeDataSandboxTests
         }
     }
 
+    /// <summary>Verifies isolated seed injection and rejects malformed generated configurations.</summary>
+    [TestMethod]
+    public void GeneratedServerConfigurationReceivesOnlyTheRequestedWorldSeed()
+    {
+        string sourceRoot = CreateSourceRoot();
+        try
+        {
+            string configurationPath = Path.Combine(sourceRoot, "serverconfig.json");
+            File.WriteAllText(
+                configurationPath,
+                "{ \"ServerName\": \"fixture\", \"WorldConfig\": { \"Seed\": null, \"WorldType\": \"standard\" } }");
+
+            RuntimeHarness.ApplyWorldSeedToGeneratedServerConfiguration(
+                configurationPath,
+                ScenarioCatalog.RenderLabWorldSeed);
+
+            JObject configuration = JObject.Parse(File.ReadAllText(configurationPath));
+            Assert.AreEqual("fixture", configuration.Value<string>("ServerName"));
+            Assert.AreEqual(
+                ScenarioCatalog.RenderLabWorldSeed,
+                configuration["WorldConfig"]!.Value<string>("Seed"));
+            Assert.AreEqual(
+                "standard",
+                configuration["WorldConfig"]!.Value<string>("WorldType"));
+
+            File.WriteAllText(configurationPath, "{ \"ServerName\": \"malformed\" }");
+            Assert.ThrowsException<InvalidDataException>(() =>
+                RuntimeHarness.ApplyWorldSeedToGeneratedServerConfiguration(
+                    configurationPath,
+                    ScenarioCatalog.RenderLabWorldSeed));
+            Assert.ThrowsException<ArgumentException>(() =>
+                RuntimeHarness.ApplyWorldSeedToGeneratedServerConfiguration(
+                    string.Empty,
+                    ScenarioCatalog.RenderLabWorldSeed));
+            Assert.ThrowsException<ArgumentException>(() =>
+                RuntimeHarness.ApplyWorldSeedToGeneratedServerConfiguration(
+                    configurationPath,
+                    " "));
+        }
+        finally
+        {
+            DeleteSourceRoot(sourceRoot);
+        }
+    }
+
+    /// <summary>Verifies the saved-world path and private endpoint used during deterministic precreation.</summary>
+    [TestMethod]
+    public void GeneratedServerConfigurationReceivesSafeWorldCreationSettings()
+    {
+        string sourceRoot = CreateSourceRoot();
+        try
+        {
+            string configurationPath = Path.Combine(sourceRoot, "serverconfig.json");
+            string savePath = Path.Combine(sourceRoot, "Saves", "deterministic.vcdbs");
+            File.WriteAllText(
+                configurationPath,
+                "{ \"ServerName\": \"fixture\", \"Ip\": null, \"Port\": 42420, \"AdvertiseServer\": true, \"Upnp\": true, \"WorldConfig\": { \"Seed\": null, \"SaveFileLocation\": \"old.vcdbs\", \"WorldType\": \"standard\" } }");
+
+            RuntimeHarness.ApplyWorldCreationSettingsToGeneratedServerConfiguration(
+                configurationPath,
+                ScenarioCatalog.RenderLabWorldSeed,
+                savePath,
+                43871);
+
+            JObject configuration = JObject.Parse(File.ReadAllText(configurationPath));
+            Assert.AreEqual("fixture", configuration.Value<string>("ServerName"));
+            Assert.AreEqual("127.0.0.1", configuration.Value<string>("Ip"));
+            Assert.AreEqual(43871, configuration.Value<int>("Port"));
+            Assert.IsFalse(configuration.Value<bool>("AdvertiseServer"));
+            Assert.IsFalse(configuration.Value<bool>("Upnp"));
+            Assert.AreEqual(
+                ScenarioCatalog.RenderLabWorldSeed,
+                configuration["WorldConfig"]!.Value<string>("Seed"));
+            Assert.AreEqual(
+                Path.GetFullPath(savePath),
+                configuration["WorldConfig"]!.Value<string>("SaveFileLocation"));
+            Assert.AreEqual(
+                "standard",
+                configuration["WorldConfig"]!.Value<string>("WorldType"));
+
+            Assert.ThrowsException<ArgumentException>(() =>
+                RuntimeHarness.ApplyWorldCreationSettingsToGeneratedServerConfiguration(
+                    configurationPath,
+                    ScenarioCatalog.RenderLabWorldSeed,
+                    " ",
+                    43871));
+            Assert.ThrowsException<ArgumentOutOfRangeException>(() =>
+                RuntimeHarness.ApplyWorldCreationSettingsToGeneratedServerConfiguration(
+                    configurationPath,
+                    ScenarioCatalog.RenderLabWorldSeed,
+                    savePath,
+                    0));
+        }
+        finally
+        {
+            DeleteSourceRoot(sourceRoot);
+        }
+    }
+
+    /// <summary>
+    /// Verifies that a copied real-map database loses mod-owned player inventories while the source
+    /// player row and all world tables remain unchanged.
+    /// </summary>
+    [TestMethod]
+    public void CreateSanitizesOnlyCopiedPlayerData()
+    {
+        string sourceRoot = CreateSourceRoot();
+        string sourceSave = Path.Combine(sourceRoot, "Saves", "target.vcdbs");
+        string? isolatedRoot = null;
+        try
+        {
+            CreateRepresentativeSave(sourceSave);
+            using (RuntimeDataSandbox sandbox = RuntimeDataSandbox.Create(
+                       sourceRoot,
+                       "target",
+                       "playerdata-sanitization"))
+            {
+                isolatedRoot = sandbox.DataRoot;
+                string copiedSave = Path.Combine(
+                    isolatedRoot,
+                    "Saves",
+                    sandbox.WorldName + ".vcdbs");
+                Assert.AreEqual(0L, ExecuteScalar(copiedSave, "SELECT COUNT(*) FROM playerdata;"));
+                Assert.AreEqual(1L, ExecuteScalar(copiedSave, "SELECT COUNT(*) FROM chunk;"));
+            }
+
+            Assert.AreEqual(1L, ExecuteScalar(sourceSave, "SELECT COUNT(*) FROM playerdata;"));
+            Assert.AreEqual(1L, ExecuteScalar(sourceSave, "SELECT COUNT(*) FROM chunk;"));
+        }
+        finally
+        {
+            Assert.IsNotNull(isolatedRoot);
+            Assert.IsFalse(Directory.Exists(isolatedRoot));
+            DeleteSourceRoot(sourceRoot);
+        }
+    }
+
+    /// <summary>Creates the minimal SQLite schema needed to model a modded real-world save.</summary>
+    /// <param name="path">Disposable source save path.</param>
+    private static void CreateRepresentativeSave(string path)
+    {
+        SQLitePCL.Batteries_V2.Init();
+        using SqliteConnection connection = new($"Data Source={path};Pooling=False");
+        connection.Open();
+        using SqliteCommand command = connection.CreateCommand();
+        command.CommandText =
+            "CREATE TABLE playerdata (playerid INTEGER PRIMARY KEY AUTOINCREMENT, playeruid TEXT, data BLOB);"
+            + "CREATE TABLE chunk (position INTEGER PRIMARY KEY, data BLOB);"
+            + "INSERT INTO playerdata(playeruid, data) VALUES ('fixture-player', X'010203');"
+            + "INSERT INTO chunk(position, data) VALUES (42, X'040506');";
+        command.ExecuteNonQuery();
+    }
+
+    /// <summary>Reads one integer scalar from a disposable SQLite fixture.</summary>
+    /// <param name="path">Database path.</param>
+    /// <param name="sql">Scalar query.</param>
+    /// <returns>The converted 64-bit scalar.</returns>
+    private static long ExecuteScalar(string path, string sql)
+    {
+        SQLitePCL.Batteries_V2.Init();
+        using SqliteConnection connection = new($"Data Source={path};Mode=ReadOnly;Pooling=False");
+        connection.Open();
+        using SqliteCommand command = connection.CreateCommand();
+        command.CommandText = sql;
+        return Convert.ToInt64(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
+    }
+
     /// <summary>Creates a disposable stand-in for the user's data root.</summary>
     /// <returns>The absolute source-root path.</returns>
     private static string CreateSourceRoot()
@@ -158,6 +330,9 @@ public sealed class RuntimeDataSandboxTests
             """
             {
               "guiScale": 1.25,
+              "intSettings": {
+                "shadowMapQuality": 0
+              },
               "stringListSettings": {
                 "modPaths": ["Mods", "C:\\Users\\fixture\\VintagestoryData\\Mods"]
               }

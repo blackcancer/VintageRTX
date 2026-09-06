@@ -155,11 +155,9 @@ internal sealed class EntityMirrorSourceCaptureRenderer : IRenderer
                 0,
                 GetTextureParameter.TextureInternalFormat,
                 out int internalFormat);
-            if (internalFormat == 0)
-            {
-                throw new InvalidOperationException(
-                    $"Primary position texture {currentSourceTextureId} exposes no sized format.");
-            }
+            PixelInternalFormat sizedFormat = RequireSizedInternalFormat(
+                internalFormat,
+                currentSourceTextureId);
 
             GL.BindTexture(TextureTarget.Texture2D, positionTextureId);
             GL.TexParameter(
@@ -181,7 +179,7 @@ internal sealed class EntityMirrorSourceCaptureRenderer : IRenderer
             GL.TexImage2D(
                 TextureTarget.Texture2D,
                 0,
-                (PixelInternalFormat)internalFormat,
+                sizedFormat,
                 frameWidth,
                 frameHeight,
                 0,
@@ -203,6 +201,24 @@ internal sealed class EntityMirrorSourceCaptureRenderer : IRenderer
             "[VintageRTX] Pre-entity position snapshot resized to {0}x{1}.",
             frameWidth,
             frameHeight);
+    }
+
+    /// <summary>Validates the driver-reported source format before allocating the owned copy.</summary>
+    /// <param name="internalFormat">Raw OpenGL internal-format enumeration.</param>
+    /// <param name="sourceTextureId">Primary position texture used in diagnostics.</param>
+    /// <returns>The corresponding sized pixel format.</returns>
+    /// <exception cref="InvalidOperationException">The source exposes no allocated level-zero format.</exception>
+    internal static PixelInternalFormat RequireSizedInternalFormat(
+        int internalFormat,
+        int sourceTextureId)
+    {
+        if (internalFormat == 0)
+        {
+            throw new InvalidOperationException(
+                $"Primary position texture {sourceTextureId} exposes no sized format.");
+        }
+
+        return (PixelInternalFormat)internalFormat;
     }
 
     /// <summary>Emits one stable warning until a later successful frame resets the latch.</summary>

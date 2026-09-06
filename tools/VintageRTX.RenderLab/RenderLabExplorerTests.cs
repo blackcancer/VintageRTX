@@ -472,9 +472,9 @@ public sealed class RenderLabExplorerTests
                 });
             renderer = new FilmicDisplayRenderer(api, () => new VintageRtxConfig(), scene);
 
-            InvokePrivate(renderer, "EnsureResources", 32, 16);
-            InvokePrivate(renderer, "EnsureResources", 32, 16);
-            InvokePrivate(renderer, "EnsureResources", 17, 9);
+            InvokePrivate(renderer, "EnsureResources", 32, 16, 0);
+            InvokePrivate(renderer, "EnsureResources", 32, 16, 0);
+            InvokePrivate(renderer, "EnsureResources", 17, 9, 2);
             Assert.IsTrue(renderer.Initialized);
             Assert.IsTrue(shaderHarness.ProgramIds.Count > 0);
             Assert.IsTrue(renderer.ReloadShader());
@@ -657,7 +657,7 @@ public sealed class RenderLabExplorerTests
                 GetPrivateField<bool>(renderer, "gBufferAvailable"),
                 "AfterBlit must perform readback only and never rerun transport/G-buffer resolution.");
             TargetInvocationException incompleteFramebuffer = Assert.ThrowsException<TargetInvocationException>(
-                () => InvokePrivate(renderer, "ResizeSceneTexture", 0, 0));
+                () => InvokePrivate(renderer, "ResizeSceneTexture", 0, 0, 2));
             Assert.IsInstanceOfType<InvalidOperationException>(incompleteFramebuffer.InnerException);
             Assert.AreEqual(ErrorCode.NoError, GL.GetError());
 

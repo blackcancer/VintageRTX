@@ -882,11 +882,6 @@ internal sealed class LiquidSurfaceSimulation
         {
             ref readonly LiquidEntitySurfaceSample sample = ref samples[sampleIndex];
             int trackerIndex = FindTracker(sample.EntityId, out bool existed);
-            if (trackerIndex < 0)
-            {
-                continue;
-            }
-
             ref EntityTracker tracker = ref entityTrackers[trackerIndex];
             if (!existed)
             {
@@ -1050,6 +1045,13 @@ internal sealed class LiquidSurfaceSimulation
                     transferredEnergy,
                     in physicalProperties[cellIndex],
                     CellSize);
+            // The cavity's gravitational potential and newly-created interface area are
+            // reversible stores. At pinch-off they feed the outgoing gravity-capillary packet;
+            // only the remaining spray/jet share stays in the compact local splash. Keeping
+            // these allocations disjoint conserves the measured surface ledger while preventing
+            // the cavity energy from disappearing when the short-lived depression closes.
+            float collapseWaveEnergyJoules = energyPartition.CavityEnergyJoules
+                + energyPartition.CapillaryPacketEnergyJoules;
             float supportRadiusWorldBlocks = ResolveProjectileImpulseSupportRadius(
                 sample.SurfaceClass,
                 sample.MassKilograms,
@@ -1064,9 +1066,8 @@ internal sealed class LiquidSurfaceSimulation
                 energyPartition.SurfaceCoupledEnergyJoules,
                 energyPartition.ResolvedWaveEnergyJoules,
                 energyPartition.SubgridWaveEnergyJoules,
-                energyPartition.CapillaryPacketEnergyJoules,
-                energyPartition.CavityEnergyJoules + energyPartition.SplashEnergyJoules,
-                energyPartition.WakeEnergyJoules,
+                collapseWaveEnergyJoules,
+                energyPartition.SplashEnergyJoules,
                 energyPartition.CavityRadiusMetres,
                 ResolveProjectileSubgridWavelengthMetres(
                     energyPartition.CavityRadiusMetres,
@@ -2025,11 +2026,11 @@ internal sealed class LiquidSurfaceSimulation
     {
         TotalSubgridImpactCount++;
         lastSubgridImpactSequence = TotalSubgridImpactCount;
+        // Exact projectile contacts always construct a positive source sequence before queueing.
+        // The only source-less path is the public dropped-item QueueImpact compatibility overload.
         lastSubgridImpactSourceSequence = impulse.SubgridImpact.SourceSequence > 0
             ? impulse.SubgridImpact.SourceSequence
-            : surfaceClass == LiquidEntitySurfaceClass.DroppedItem
-                ? TotalDroppedItemImpactCount
-                : TotalProjectileImpactCount;
+            : TotalDroppedItemImpactCount;
         lastSubgridImpactEntityId = impulse.SubgridImpact.EntityId;
         lastSubgridImpactSurfaceClass = surfaceClass;
         lastSubgridImpactKind = impulse.Kind;
@@ -2055,14 +2056,9 @@ internal sealed class LiquidSurfaceSimulation
                     lastSubgridImpactSplashRadiusWorldBlocks),
                 ComputeMaximumHeight(in dynamics[centerIndex]))
             : 0.0f;
-        lastSubgridImpactSplashReleaseSeconds = projectileSplash
-            ? surfaceClass == LiquidEntitySurfaceClass.Projectile
-                ? 0.045f
-                : MathF.Sqrt(
-                    lastSubgridImpactSplashRadiusWorldBlocks
-                    * (float)LiquidPhysicalModel.MetresPerWorldBlock
-                    / (float)LiquidPhysicalModel.StandardGravityMetresPerSecondSquared)
-            : 0.0f;
+        // The thrown-stone partition is a measured rebound and assigns no local splash energy;
+        // therefore projectileSplash can only denote the authored slender-projectile cavity.
+        lastSubgridImpactSplashReleaseSeconds = projectileSplash ? 0.045f : 0.0f;
         lastSubgridImpactIncidentEnergyJoules = impulse.Energy;
         lastSubgridImpactSurfaceEnergyJoules = Math.Max(0.0f, surfaceEnergyJoules);
         lastSubgridImpactResolvedEnergyJoules = Math.Clamp(
@@ -2296,8 +2292,10 @@ internal sealed class LiquidSurfaceSimulation
     /// <summary>
     /// Partitions an exact projectile's kinetic loss without treating it all as a resolvable gravity
     /// wave. Point-first shaft entries use bounded axial drag through one resolution-depth column,
-    /// then isolate the much smaller near-interface share and a slender-body cavity; measured
-    /// stone rebounds already expose their surface-energy ceiling and use a spherical cavity balance.
+    /// then isolate the much smaller near-interface share and a slender-body cavity. The cavity's
+    /// gravitational potential plus interface energy is the reversible collapse-wave budget;
+    /// spray/jet energy remains local and the deeper drag loss remains wake. Measured stone
+    /// rebounds already expose their surface-energy ceiling and use a spherical cavity balance.
     /// The spectral projection f=1-exp(-(k_max*R_c)^2) retains only grid-resolvable energy.
     /// </summary>
     /// <param name="surfaceClass">Thrown-stone or elongated-projectile taxonomy.</param>
@@ -2970,7 +2968,6 @@ internal sealed class LiquidSurfaceSimulation
                     0.0f,
                     0.0f,
                     0.0f,
-                    0.0f,
                     0.0f)
                 : default;
             bool queued = QueueImpulseAtCell(
@@ -3059,13 +3056,10 @@ internal sealed class LiquidSurfaceSimulation
         {
             float surfaceY = surfaceWorldY[impactCellIndex] + heights[impactCellIndex];
             double crossingFraction = (previous.WorldY - surfaceY) / verticalTravel;
-            if (!double.IsFinite(crossingFraction)
-                || crossingFraction < 0.0
-                || crossingFraction > 1.0 + CellSize * 0.15f / verticalTravel)
-            {
-                return false;
-            }
-
+            // DetectEntitySurfaceEvent establishes a finite descending segment whose endpoints
+            // straddle this plane (with the authored 15% surface tolerance), so the quotient is
+            // finite and belongs to that segment. Saturation retains the exact endpoint contract
+            // across floating-point roundoff without a second, logically redundant rejection.
             crossingFraction = Math.Clamp(crossingFraction, 0.0, 1.0);
             impactWorldX = previous.WorldX
                 + (current.WorldX - previous.WorldX) * crossingFraction;
@@ -3159,7 +3153,6 @@ internal sealed class LiquidSurfaceSimulation
                 TotalDroppedItemImpactCount + 1,
                 current.EntityId,
                 current.SurfaceClass,
-                0.0f,
                 0.0f,
                 0.0f,
                 0.0f,
@@ -3507,7 +3500,6 @@ internal sealed class LiquidSurfaceSimulation
         float SubgridWaveEnergyJoules,
         float RenderedPacketEnergyJoules,
         float LocalSplashEnergyJoules,
-        float WakeEnergyJoules,
         float CavityRadiusMetres,
         float DominantWavelengthMetres);
 

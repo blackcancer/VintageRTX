@@ -31,7 +31,8 @@ internal sealed record ScenarioDefinition(
     bool RunBenchmark = true,
     string? CaptureProfile = null,
     bool RequirePbrReferenceMaterials = false,
-    VintageRtxRenderProfile? RenderProfile = null);
+    VintageRtxRenderProfile? RenderProfile = null,
+    string? WorldSeed = null);
 
 /// <summary>
 /// Identifies the shadow Validation variants used to drive deterministic renderer assertions.
@@ -61,6 +62,9 @@ internal enum ShadowValidation
 /// </summary>
 internal static class ScenarioCatalog
 {
+    /// <summary>Fixed world-generation seed shared by every isolated RenderLab profile.</summary>
+    internal const string RenderLabWorldSeed = "2090501";
+
     private static readonly ScenarioDefinition[] Scenarios =
     [
         new(
@@ -71,7 +75,10 @@ internal static class ScenarioCatalog
             "render-lab",
             [
                 "[VintageRTX.Test] Render lab built",
+                $"[VintageRTX.Test] Runtime world seed: {RenderLabWorldSeed}.",
+                "[VintageRTX.Test] Render lab fixed anchor requested: world=(512000,232,512000).",
                 "Render lab camera applied",
+                "Render lab solar aperture verified: side=+X",
                 "Render lab materials verified",
                 "Scenario render-lab injected 1 moving point light",
                 "Render lab light rig verified: sources=3",
@@ -79,6 +86,8 @@ internal static class ScenarioCatalog
                 "Lantern cage evidence game:lantern-large-up: verdict=PASS",
                 "Geometry evidence game:anvil-iron: kind=DynamicInstance, detailed non-cube=True",
                 "Geometry evidence game:tallgrass-tall-free: kind=StaticComplex, detailed non-cube=True, crossed planes=True",
+                "[VintageRTX] Native solar shadow detail active:",
+                "-native-sun-shadow-vintagertx.png",
                 "Rendering profile Quality active:",
                 "Capture profile evidence: label=final, profile=Quality, effective-tier="
             ],
@@ -91,7 +100,8 @@ internal static class ScenarioCatalog
             RunBenchmark: false,
             CaptureProfile: "render-lab",
             RequirePbrReferenceMaterials: true,
-            RenderProfile: VintageRtxRenderProfile.Quality),
+            RenderProfile: VintageRtxRenderProfile.Quality,
+            WorldSeed: RenderLabWorldSeed),
         CreateRenderLabBenchmark(
             "render-lab-performance",
             "La même micro-scène autonome avec mesure A/B/A courte des FPS, 1 % low et du coût GPU.",
@@ -126,12 +136,27 @@ internal static class ScenarioCatalog
             12.0),
         new(
             "lantern-night",
-            "Lanterne intérieure à heure nocturne fixe pour isoler ses ombres projetées.",
+            "Lanterne intérieure à heure nocturne fixe, profil Cinematic et sans seuil FPS, pour isoler sa photométrie et ses ombres projetées.",
             "foggy village world",
             true,
             null,
-            ["Deterministic environment applied", "hour=0", "daylight=", "Stabilized A/B/A result"],
-            0.0),
+            [
+                "Deterministic environment applied",
+                "hour=0",
+                "direct-sun=",
+                "Lantern night camera applied",
+                "Light-stability isolation removed",
+                "intensity=6.50 cd",
+                "source=0.030x0.080 m",
+                "basis=LBL-Lumina-clean-kerosene-lantern-48lm-6to7cd",
+                "Rendering profile Cinematic active:",
+                "Capture profile evidence: label=final, profile=Cinematic, effective-tier=",
+                "Automatic capture sequence completed: profile=light-stability, last=light-stability-shadow-c, captures=10"
+            ],
+            0.0,
+            RunBenchmark: false,
+            CaptureProfile: "light-stability",
+            RenderProfile: VintageRtxRenderProfile.Cinematic),
         new(
             "held-light",
             "Source chaude attachée au joueur, équivalente à une torche/lanterne portée.",
@@ -170,6 +195,35 @@ internal static class ScenarioCatalog
             9.0,
             MaximumGpuMilliseconds: 3.00,
             ShadowValidation: ShadowValidation.SunProjected),
+        new(
+            "vegetation-shadow-map",
+            "Cinq plantes alpha-découpées réelles, posées dans un chunk extérieur sain de foggy village et validées sans budget FPS.",
+            "foggy village world",
+            true,
+            "vegetation-shadow-map",
+            [
+                "Startup validation state applied: /gamemode 2",
+                "Deterministic environment verified: PASS",
+                "Server vegetation placement command ready: scenario=vegetation-shadow-map, plants=5",
+                "Vegetation map chunk audit: PASS",
+                "BlockFenceStackAware=",
+                "Vegetation map placement armed: count=5",
+                "Vegetation map placement requested: count=5",
+                "Server vegetation patch placed: count=5",
+                "Vegetation map camera applied:",
+                "Vegetation map geometry verified: PASS | count=5, alpha-cutout=5, crossed-planes=3, json-shapes=2",
+                "Vegetation map capture gate released",
+                "[VintageRTX] Native solar shadow detail active:",
+                "-final-vintagertx.png",
+                "-voxel-shadow-vintagertx.png",
+                "-native-sun-shadow-vintagertx.png",
+                "Automatic capture sequence completed: profile=vegetation-shadow-map"
+            ],
+            10.0,
+            ShadowValidation: ShadowValidation.SunProjected,
+            RunBenchmark: false,
+            CaptureProfile: "vegetation-shadow-map",
+            RenderProfile: VintageRtxRenderProfile.Ultra),
         new(
             "moving-camera",
             "Balayage de caméra réel avec rejet d'historique et capture pendant le mouvement.",
@@ -302,7 +356,10 @@ internal static class ScenarioCatalog
             "render-lab",
             [
                 "[VintageRTX.Test] Render lab built",
+                $"[VintageRTX.Test] Runtime world seed: {RenderLabWorldSeed}.",
+                "[VintageRTX.Test] Render lab fixed anchor requested: world=(512000,232,512000).",
                 "Render lab camera applied",
+                "Render lab solar aperture verified: side=+X",
                 "Render lab materials verified",
                 "Scenario render-lab injected 1 moving point light",
                 "Render lab light rig verified: sources=3",
@@ -310,6 +367,8 @@ internal static class ScenarioCatalog
                 "Lantern cage evidence game:lantern-large-up: verdict=PASS",
                 "Geometry evidence game:anvil-iron: kind=DynamicInstance, detailed non-cube=True",
                 "Geometry evidence game:tallgrass-tall-free: kind=StaticComplex, detailed non-cube=True, crossed planes=True",
+                "[VintageRTX] Native solar shadow detail active:",
+                "-native-sun-shadow-vintagertx.png",
                 $"Rendering profile {profile} active:",
                 $"Capture profile evidence: label=final, profile={profile}, effective-tier=",
                 "Stabilized A/B/A result"
@@ -328,7 +387,8 @@ internal static class ScenarioCatalog
             RunBenchmark: true,
             CaptureProfile: "render-lab",
             RequirePbrReferenceMaterials: true,
-            RenderProfile: profile);
+            RenderProfile: profile,
+            WorldSeed: RenderLabWorldSeed);
     }
 
     /// <summary>Creates one capture-only RenderLab row for a fixed maximum-fidelity profile.</summary>
@@ -358,7 +418,10 @@ internal static class ScenarioCatalog
             "render-lab",
             [
                 "[VintageRTX.Test] Render lab built",
+                $"[VintageRTX.Test] Runtime world seed: {RenderLabWorldSeed}.",
+                "[VintageRTX.Test] Render lab fixed anchor requested: world=(512000,232,512000).",
                 "Render lab camera applied",
+                "Render lab solar aperture verified: side=+X",
                 "Render lab materials verified",
                 "Scenario render-lab injected 1 moving point light",
                 "Render lab light rig verified: sources=3",
@@ -366,6 +429,8 @@ internal static class ScenarioCatalog
                 "Lantern cage evidence game:lantern-large-up: verdict=PASS",
                 "Geometry evidence game:anvil-iron: kind=DynamicInstance, detailed non-cube=True",
                 "Geometry evidence game:tallgrass-tall-free: kind=StaticComplex, detailed non-cube=True, crossed planes=True",
+                "[VintageRTX] Native solar shadow detail active:",
+                "-native-sun-shadow-vintagertx.png",
                 $"Rendering profile {profile} active:",
                 $"Capture profile evidence: label=final, profile={profile}, effective-tier="
             ],
@@ -378,7 +443,8 @@ internal static class ScenarioCatalog
             RunBenchmark: false,
             CaptureProfile: "render-lab",
             RequirePbrReferenceMaterials: true,
-            RenderProfile: profile);
+            RenderProfile: profile,
+            WorldSeed: RenderLabWorldSeed);
     }
 
     /// <summary>

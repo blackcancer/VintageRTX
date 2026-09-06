@@ -55,6 +55,19 @@ public sealed class DisplayColorPipelineContractTests
         Assert.AreSame(frameBuffers[(int)EnumFrameBuffer.Primary], primary);
         Assert.AreEqual(73, textureId);
 
+        Assert.IsFalse(DisplayColorPipelineContract.TryResolvePrimary(
+            frameBuffers,
+            0,
+            720,
+            out _,
+            out _));
+        Assert.IsFalse(DisplayColorPipelineContract.TryResolvePrimary(
+            frameBuffers,
+            1280,
+            0,
+            out _,
+            out _));
+
         frameBuffers[(int)EnumFrameBuffer.Primary].Width = 1279;
         Assert.IsFalse(DisplayColorPipelineContract.TryResolvePrimary(
             frameBuffers,
@@ -156,6 +169,51 @@ public sealed class DisplayColorPipelineContractTests
         liquidDepth.Width = 960;
         Assert.IsFalse(DisplayColorPipelineContract.TryResolveLiquidDepth(
             frameBuffers,
+            1920,
+            1080,
+            out _,
+            out _));
+
+        liquidDepth.Width = 1920;
+        liquidDepth.Height = 720;
+        Assert.IsFalse(DisplayColorPipelineContract.TryResolveLiquidDepth(
+            frameBuffers,
+            1920,
+            1080,
+            out _,
+            out _));
+        liquidDepth.Height = 1080;
+        liquidDepth.FboId = 0;
+        Assert.IsFalse(DisplayColorPipelineContract.TryResolveLiquidDepth(
+            frameBuffers,
+            1920,
+            1080,
+            out _,
+            out _));
+        liquidDepth.FboId = 64;
+        liquidDepth.Disposed = true;
+        Assert.IsFalse(DisplayColorPipelineContract.TryResolveLiquidDepth(
+            frameBuffers,
+            1920,
+            1080,
+            out _,
+            out _));
+        liquidDepth.Disposed = false;
+
+        Assert.IsFalse(DisplayColorPipelineContract.TryResolveLiquidDepth(
+            frameBuffers,
+            0,
+            1080,
+            out _,
+            out _));
+        Assert.IsFalse(DisplayColorPipelineContract.TryResolveLiquidDepth(
+            frameBuffers,
+            1920,
+            0,
+            out _,
+            out _));
+        Assert.IsFalse(DisplayColorPipelineContract.TryResolveLiquidDepth(
+            [],
             1920,
             1080,
             out _,

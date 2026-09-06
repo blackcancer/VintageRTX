@@ -34,6 +34,7 @@ public sealed class RendererServicesCoverageTests
 
         Assert.AreEqual("idle", service.Status);
         Assert.IsTrue(Path.IsPathFullyQualified(service.CaptureDirectory));
+        Assert.IsTrue(service.IsEventCaptureIdle);
         Assert.IsTrue(service.ReadyForBenchmark);
         Assert.IsFalse(service.TryGetCapture(10_000, out _));
         Assert.IsTrue(service.QueueCapture());
@@ -69,8 +70,10 @@ public sealed class RendererServicesCoverageTests
 
         Assert.IsTrue(service.ReadyForBenchmark);
         Assert.IsTrue(service.QueueCapture(request));
+        Assert.IsFalse(service.IsEventCaptureIdle);
         Assert.IsFalse(service.ReadyForBenchmark);
         Assert.IsTrue(service.TryBeginCaptureFrame(100, out FrameCaptureStep baseline));
+        Assert.IsFalse(service.TryGetCapture(100, out _));
         Assert.AreEqual(new FrameCaptureStep(request, FrameCapturePhase.Baseline), baseline);
         Assert.IsFalse(service.TryBeginCaptureFrame(100, out _));
         Assert.AreEqual(
@@ -252,8 +255,55 @@ public sealed class RendererServicesCoverageTests
         Assert.IsTrue(service.CancelCaptureTransaction());
         Assert.AreEqual("cancelled", service.Status);
         Assert.IsFalse(service.CancelCaptureTransaction());
+        Assert.IsFalse(service.RestartCaptureTransaction());
         Assert.IsFalse(service.TryBeginCaptureFrame(14, out _));
+        Assert.IsTrue(service.IsEventCaptureIdle);
         Assert.IsTrue(service.ReadyForBenchmark);
+    }
+
+    /// <summary>Rejects invalid final/raw payloads and preserves automatic requests after cancellation.</summary>
+    [TestMethod]
+    public void FrameCaptureInvalidPayloadAndAutomaticCancellationRemainRecoverable()
+    {
+        FrameCaptureService manual = CreateCaptureService(
+            _ => null,
+            static () => new DateTime(2026, 9, 1, 13, 0, 0, DateTimeKind.Utc),
+            out _);
+        FrameCaptureRequest reflection = new("invalid-raw", VintageRtxDebugView.ReflectionSource);
+        Assert.IsTrue(manual.QueueCapture(reflection));
+        Assert.IsTrue(manual.TryBeginCaptureFrame(1, out FrameCaptureStep baseline));
+        Assert.AreEqual(
+            FrameCaptureAdvanceResult.RestartQueued,
+            manual.SubmitPostFinalFrame(baseline, [], 0, 1));
+        Assert.IsTrue(manual.TryBeginCaptureFrame(2, out baseline));
+        Assert.AreEqual(
+            FrameCaptureAdvanceResult.RestartQueued,
+            manual.SubmitPostFinalFrame(baseline, [], int.MaxValue, int.MaxValue));
+        Assert.IsTrue(manual.TryBeginCaptureFrame(3, out baseline));
+        Assert.AreEqual(
+            FrameCaptureAdvanceResult.BaselineStored,
+            manual.SubmitPostFinalFrame(baseline, [1, 2, 3, 255], 1, 1));
+        Assert.IsTrue(manual.TryBeginCaptureFrame(4, out FrameCaptureStep effect));
+        Assert.IsFalse(manual.SubmitPreFinalDiagnostic(effect, [], 1, 1));
+        StringAssert.Contains(manual.Status, "invalid raw pre-final diagnostic payload");
+        Assert.IsTrue(manual.CancelCaptureTransaction());
+
+        Dictionary<string, string?> environment = new(StringComparer.Ordinal)
+        {
+            ["VINTAGERTX_AUTO_CAPTURE_PROFILE"] = "water-reflection",
+            ["VINTAGERTX_AUTO_CAPTURE"] = "1",
+            ["VINTAGERTX_AUTO_CAPTURE_FRAME"] = "180",
+        };
+        FrameCaptureService automatic = CreateCaptureService(
+            name => environment.GetValueOrDefault(name),
+            static () => new DateTime(2026, 9, 1, 13, 0, 0, DateTimeKind.Utc),
+            out _);
+        Assert.IsTrue(automatic.TryBeginCaptureFrame(180, out FrameCaptureStep selected));
+        Assert.AreEqual("final", selected.Request.Label);
+        Assert.IsTrue(automatic.CancelCaptureTransaction());
+        Assert.IsTrue(automatic.TryBeginCaptureFrame(181, out FrameCaptureStep repeated));
+        Assert.AreEqual(selected.Request, repeated.Request);
+        Assert.IsTrue(automatic.CancelCaptureTransaction());
     }
 
     /// <summary>
@@ -306,6 +356,14 @@ public sealed class RendererServicesCoverageTests
         Assert.IsFalse(notifications.Any(static message =>
             message.Contains("Automatic capture sequence completed", StringComparison.Ordinal)));
         service.SavePair(
+            new FrameCaptureRequest("not-terminal", VintageRtxDebugView.Final),
+            [1, 2, 3, 255],
+            [4, 5, 6, 255],
+            1,
+            1);
+        Assert.IsFalse(notifications.Any(static message =>
+            message.Contains("Automatic capture sequence completed", StringComparison.Ordinal)));
+        service.SavePair(
             terminalRequest,
             [1, 2, 3, 255],
             [4, 5, 6, 255],
@@ -317,6 +375,14 @@ public sealed class RendererServicesCoverageTests
             message.Contains("Automatic capture sequence completed", StringComparison.Ordinal));
         Assert.IsTrue(pairNotification >= 0);
         Assert.IsTrue(completionNotification > pairNotification);
+        service.SavePair(
+            terminalRequest,
+            [1, 2, 3, 255],
+            [4, 5, 6, 255],
+            1,
+            1);
+        Assert.AreEqual(1, notifications.Count(static message =>
+            message.Contains("Automatic capture sequence completed", StringComparison.Ordinal)));
         Assert.IsFalse(service.ReadyForBenchmark);
         now = now.AddSeconds(2);
         Assert.IsTrue(service.ReadyForBenchmark);
@@ -329,6 +395,82 @@ public sealed class RendererServicesCoverageTests
         Assert.IsFalse(fallback.TryGetCapture(359, out _));
         Assert.IsTrue(fallback.TryGetCapture(360, out FrameCaptureRequest fallbackRequest));
         Assert.AreEqual("final", fallbackRequest.Label);
+    }
+
+    /// <summary>Verifies the fixed-lantern profile records three temporally separated final and shadow states.</summary>
+    [TestMethod]
+    public void FrameCaptureLightStabilityProfileSeparatesFinalAndShadowTriplets()
+    {
+        Dictionary<string, string?> environment = new(StringComparer.Ordinal)
+        {
+            ["VINTAGERTX_AUTO_CAPTURE_PROFILE"] = "light-stability",
+            ["VINTAGERTX_AUTO_CAPTURE"] = "1",
+            ["VINTAGERTX_AUTO_CAPTURE_FRAME"] = "900",
+            ["VINTAGERTX_TEST_ENVIRONMENT_READY"] = "0"
+        };
+        FrameCaptureService service = CreateCaptureService(
+            name => environment.GetValueOrDefault(name),
+            static () => new DateTime(2026, 9, 5, 0, 0, 0, DateTimeKind.Utc),
+            out List<string> notifications);
+        (long Frame, string Label, VintageRtxDebugView View)[] expected =
+        [
+            (900, "final", VintageRtxDebugView.Final),
+            (920, "normal", VintageRtxDebugView.Normal),
+            (940, "position", VintageRtxDebugView.Position),
+            (960, "material", VintageRtxDebugView.Material),
+            (980, "lighting", VintageRtxDebugView.Lighting),
+            (1000, "voxel-shadow", VintageRtxDebugView.VoxelShadow),
+            (1120, "light-stability-final-b", VintageRtxDebugView.Final),
+            (1140, "light-stability-shadow-b", VintageRtxDebugView.VoxelShadow),
+            (1260, "light-stability-final-c", VintageRtxDebugView.Final),
+            (1280, "light-stability-shadow-c", VintageRtxDebugView.VoxelShadow)
+        ];
+
+        Assert.IsFalse(service.TryGetCapture(10_000, out _));
+        environment["VINTAGERTX_TEST_ENVIRONMENT_READY"] = "1";
+        FrameCaptureRequest terminal = default;
+        foreach ((long frame, string label, VintageRtxDebugView view) in expected)
+        {
+            Assert.IsTrue(service.TryGetCapture(frame, out terminal), label);
+            Assert.AreEqual(new FrameCaptureRequest(label, view), terminal);
+        }
+
+        service.SavePair(terminal, [1, 2, 3, 255], [4, 5, 6, 255], 1, 1);
+        Assert.IsTrue(notifications.Any(static message => message.Contains(
+            "profile=light-stability, last=light-stability-shadow-c, captures=10",
+            StringComparison.Ordinal)));
+    }
+
+    /// <summary>Verifies generic real-map campaigns omit an unavailable entity-only terminal target.</summary>
+    [TestMethod]
+    public void FrameCaptureDefaultAutomaticSequenceEndsOnWetnessWithoutEntityWitnesses()
+    {
+        DateTime now = new(2026, 9, 5, 0, 0, 0, DateTimeKind.Utc);
+        Dictionary<string, string?> environment = new(StringComparer.Ordinal)
+        {
+            ["VINTAGERTX_AUTO_CAPTURE"] = "1",
+            ["VINTAGERTX_AUTO_CAPTURE_FRAME"] = "180"
+        };
+        FrameCaptureService service = CreateCaptureService(
+            name => environment.GetValueOrDefault(name),
+            () => now,
+            out List<string> notifications);
+
+        FrameCaptureRequest terminal = default;
+        int captureCount = 0;
+        while (service.TryGetCapture(10_000, out FrameCaptureRequest request))
+        {
+            terminal = request;
+            captureCount++;
+        }
+
+        Assert.AreEqual(14, captureCount);
+        Assert.AreEqual("wetness", terminal.Label);
+        Assert.AreEqual(VintageRtxDebugView.Wetness, terminal.DebugViewOverride);
+        service.SavePair(terminal, [1, 2, 3, 255], [4, 5, 6, 255], 1, 1);
+        Assert.IsTrue(notifications.Any(static message => message.Contains(
+            "profile=default, last=wetness, captures=14",
+            StringComparison.Ordinal)));
     }
 
     /// <summary>
@@ -367,13 +509,13 @@ public sealed class RendererServicesCoverageTests
             "a newer generation must remain blocked while rebuild, dirty, or upload work is pending");
         service.ObserveVoxelSceneState(8, settled: true);
 
-        long[] frames = [180, 200, 215, 230, 240, 250, 260, 270];
+        long[] frames = [180, 200, 215, 230, 240, 250, 260, 270, 280];
         FrameCaptureRequest finalRequest = default;
         foreach (long frame in frames)
         {
             Assert.IsTrue(service.TryGetCapture(frame, out finalRequest), frame.ToString());
         }
-        Assert.AreEqual("voxel-shadow", finalRequest.Label);
+        Assert.AreEqual("native-sun-shadow", finalRequest.Label);
         service.SavePair(finalRequest, [1, 2, 3, 255], [4, 5, 6, 255], 1, 1);
         Assert.IsTrue(service.Status.StartsWith("saved: ", StringComparison.Ordinal));
         Assert.IsTrue(notifications.Count > 0);
@@ -482,6 +624,21 @@ public sealed class RendererServicesCoverageTests
         monitor.Dispose();
     }
 
+    /// <summary>Guards GPU sampling against phase-locking to the two-frame Performance cadence.</summary>
+    [TestMethod]
+    public void PerformanceMonitorGpuSamplingIntervalIsCoprimeWithTwoFrameCadence()
+    {
+        const int performanceCadence = 2;
+        int interval = (int)(typeof(RenderPerformanceMonitor)
+            .GetField(
+                "GpuQuerySampleInterval",
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)
+            ?.GetRawConstantValue()
+            ?? throw new AssertFailedException("GPU query cadence constant is unavailable."));
+
+        Assert.AreEqual(1, interval % performanceCadence);
+    }
+
     /// <summary>
     /// Creates capture Service with deterministic defaults suitable for isolated assertions.
     /// </summary>
@@ -504,8 +661,24 @@ public sealed class RendererServicesCoverageTests
         {
             if (method.Name is "Notification" or "Error")
             {
+                string format = arguments?[0]?.ToString() ?? string.Empty;
+                object?[] formatArguments = arguments?.Length > 1 && arguments[1] is object?[] packed
+                    ? packed
+                    : arguments?.Skip(1).ToArray() ?? [];
+                string message;
+                try
+                {
+                    message = string.Format(
+                        System.Globalization.CultureInfo.InvariantCulture,
+                        format,
+                        formatArguments);
+                }
+                catch (FormatException)
+                {
+                    message = format;
+                }
                 capturedNotifications.Add(
-                    $"{(method.Name == "Error" ? "ERROR" : "INFO")} {arguments?[0]}");
+                    $"{(method.Name == "Error" ? "ERROR" : "INFO")} {message}");
             }
             return RuntimeCoverageDispatchProxy.DefaultValue(method.ReturnType);
         });

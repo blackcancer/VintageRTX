@@ -39,7 +39,9 @@ public enum VintageRtxDebugView
     /// <summary>Signed dynamic liquid height and horizontal normal uploaded to the GPU.</summary>
     LiquidSurfaceField = 15,
     /// <summary>Raw forward-rasterized entity colour and coverage below the active liquid plane.</summary>
-    EntityMirror = 16
+    EntityMirror = 16,
+    /// <summary>Voxel/native solar occlusion and native-cascade support encoded independently.</summary>
+    NativeSunShadow = 17
 }
 
 /// <summary>
@@ -72,7 +74,7 @@ public enum VintageRtxRenderProfile
 public sealed class VintageRtxConfig
 {
     /// <summary>Latest configuration schema understood without losing unknown future fields.</summary>
-    public const int CurrentSchemaVersion = 13;
+    public const int CurrentSchemaVersion = 14;
 
     /// <summary>Gets or sets the on-disk migration version; callers must not decrement it.</summary>
     public int SchemaVersion { get; set; }
@@ -164,8 +166,11 @@ public sealed class VintageRtxConfig
     /// <summary>Gets or sets local-light influence radius in blocks, clamped to 4..32.</summary>
     public float PointLightRadius { get; set; } = 18.0f;
 
-    /// <summary>Gets or sets spherical emitter radius in blocks, clamped to 0..0.5.</summary>
-    public float PointLightSourceRadius { get; set; } = 0.10f;
+    /// <summary>
+    /// Gets or sets the fallback luminous half-size in metres for dynamic emitters without an
+    /// authored photometric profile, clamped to 0..0.5. Static flames use their own SI dimensions.
+    /// </summary>
+    public float PointLightSourceRadius { get; set; } = 0.025f;
 
     /// <summary>Gets or sets coherent area-light samples per pixel in the inclusive range 1..8.</summary>
     public int PointLightShadowSamples { get; set; } = 4;
@@ -176,7 +181,10 @@ public sealed class VintageRtxConfig
     /// <summary>Gets or sets direct solar-radiance gain in the inclusive range 0..2.5.</summary>
     public float SunLightStrength { get; set; } = 1.10f;
 
-    /// <summary>Gets or sets maximum solar shadow reach in blocks, clamped to 16..96.</summary>
+    /// <summary>
+    /// Gets or sets minimum solar shadow reach in blocks, clamped to 16..640. Runtime coverage
+    /// expands to the client/server-approved block view distance using a coarser distant LOD.
+    /// </summary>
     public float SunShadowDistance { get; set; } = 64.0f;
 
     /// <summary>Gets or sets short-range scene-space lighting distance in blocks, clamped to 0.25..8.</summary>
@@ -227,7 +235,7 @@ public sealed class VintageRtxConfig
         PointLightSourceRadius = Math.Clamp(PointLightSourceRadius, 0.0f, 0.5f);
         PointLightShadowSamples = Math.Clamp(PointLightShadowSamples, 1, 8);
         SunLightStrength = Math.Clamp(SunLightStrength, 0.0f, 2.5f);
-        SunShadowDistance = Math.Clamp(SunShadowDistance, 16.0f, 96.0f);
+        SunShadowDistance = Math.Clamp(SunShadowDistance, 16.0f, 640.0f);
         RayDistance = Math.Clamp(RayDistance, 0.25f, 8.0f);
         RayCount = Math.Clamp(RayCount, 1, 8);
         RaySteps = Math.Clamp(RaySteps, 4, 24);
@@ -414,6 +422,20 @@ public sealed class VintageRtxConfig
             // their exact v12 work budgets as Custom instead of receiving an
             // unsolicited visual/performance change during migration.
             RenderProfile = VintageRtxRenderProfile.Custom;
+            SchemaVersion = 13;
+            migrated = true;
+        }
+
+        if (SchemaVersion < 14)
+        {
+            // v14 replaces the oversized generic spherical emitter with a compact finite-source
+            // fallback. Authored static sources supply their measured flame width and height;
+            // only the untouched v5 default is migrated so user calibration remains intact.
+            if (Math.Abs(PointLightSourceRadius - 0.10f) < 0.001f)
+            {
+                PointLightSourceRadius = 0.025f;
+            }
+
             SchemaVersion = CurrentSchemaVersion;
             migrated = true;
         }
@@ -523,8 +545,6 @@ public sealed class VintageRtxConfig
                 RayCount = 8;
                 RaySteps = 24;
                 break;
-            default:
-                throw new ArgumentOutOfRangeException(nameof(profile), profile, "Unknown rendering profile.");
         }
 
         Clamp();

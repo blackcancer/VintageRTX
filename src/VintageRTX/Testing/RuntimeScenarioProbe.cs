@@ -3,6 +3,8 @@ using VintageRTX.Configuration;
 using VintageRTX.Rendering;
 using Vintagestory.API.Client;
 using Vintagestory.API.Common;
+using Vintagestory.API.Common.Entities;
+using Vintagestory.API.Config;
 using Vintagestory.API.MathTools;
 
 namespace VintageRTX.Testing;
@@ -39,6 +41,15 @@ internal sealed class RuntimeScenarioProbe : IRenderer
     private readonly Vec3d caveLightPosition = new();
     private readonly Vec3d renderLabLightPosition = new();
     private readonly Vec3d renderLabSecondaryLightPosition = new();
+    /// <summary>Stock plant layout mirrored by the isolated server-side placement command.</summary>
+    private static readonly VegetationWitness[] VegetationWitnesses =
+    [
+        new(-3, -1, "game:tallgrass-verytall-free"),
+        new(-1, 1, "game:tallgrass-tall-free"),
+        new(1, -1, "game:tallgrass-medium-free"),
+        new(3, 1, "game:flower-redtopgrass-free"),
+        new(0, 2, "game:fern-eaglefern")
+    ];
     private long tickListenerId;
     private int readyTicks;
     private bool environmentApplied;
@@ -49,6 +60,13 @@ internal sealed class RuntimeScenarioProbe : IRenderer
     private bool heldItemMaskChallengeLogged;
     private bool exteriorPositionApplied;
     private bool exteriorPositionAttempted;
+    private int lanternCameraSearchTicks;
+    private int lanternCameraSearchAttempts;
+    /// <summary>Whether the server was asked to remove moving entities from the copied lantern room.</summary>
+    private bool lightStabilityIsolationRequested;
+    /// <summary>Ticks allowed for authoritative removals to reach the client before captures begin.</summary>
+    private int lightStabilityIsolationSettleTicks;
+    private bool testCaptureReleased;
     private int exteriorCameraLockTicks;
     private float exteriorYaw;
     private float exteriorPitch;
@@ -67,8 +85,10 @@ internal sealed class RuntimeScenarioProbe : IRenderer
     private bool exteriorPositionLocked;
     private bool caveLightPositionSet;
     private bool renderLabBuilt;
+    /// <summary>Whether the real client was moved to the fixed world-centre laboratory anchor.</summary>
+    private bool renderLabAnchorRequested;
     private bool renderLabLightPositionSet;
-    private bool renderLabPauseReleaseLogged;
+    private bool runtimePauseReleaseLogged;
     private bool renderLabCaptureReleased;
     private double exteriorPositionX;
     private double exteriorPositionY;
@@ -106,12 +126,24 @@ internal sealed class RuntimeScenarioProbe : IRenderer
     private int alternateFrameHeight;
     private int movingCameraTicks;
     private float movingCameraBaseYaw;
+    private int vegetationPlacementTicks;
+    private bool vegetationPlacementArmed;
+    private bool vegetationPlacementRequested;
+    private bool vegetationPatchVerified;
+    private int vegetationCenterX;
+    private int vegetationPlantY;
+    private int vegetationCenterZ;
+    /// <summary>Authoritative per-witness plant elevations sampled before server placement.</summary>
+    private readonly int[] vegetationWitnessPlantYs = new int[VegetationWitnesses.Length];
 
     /// <summary>
     /// Gets whether the selected scenario owns and stages the synthetic render
     /// laboratory; this also controls the capture-ready environment gate.
     /// </summary>
     private bool IsRenderLab => scenario == "render-lab";
+
+    /// <summary>Gets whether this probe stages plants in a disposable copy of a real save.</summary>
+    private bool IsVegetationShadowMap => scenario == "vegetation-shadow-map";
 
     /// <summary>
     /// Installs a scenario controller into an already initialized client world.
@@ -165,12 +197,22 @@ internal sealed class RuntimeScenarioProbe : IRenderer
         this.isRenderLabChunkAvailable = isRenderLabChunkAvailable;
         this.getRenderLabBlock = getRenderLabBlock;
         this.getRenderLabRainHeight = getRenderLabRainHeight;
+        api.Logger?.Notification(
+            "[VintageRTX.Test] Runtime world seed: {0}.",
+            api.World?.Seed ?? 0);
         if (IsRenderLab)
         {
             // FrameCaptureService is constructed before this probe. Keep its
             // automatic sequence gated until the deterministic room, camera
             // and point light have all been installed.
             Environment.SetEnvironmentVariable("VINTAGERTX_RENDER_LAB_READY", "0");
+        }
+        if (IsVegetationShadowMap)
+        {
+            // FrameCaptureService already exists at this point and reads the gate dynamically.
+            // Keep its default diagnostic sequence blocked until server placement, client-side
+            // geometry verification, and the locked exterior camera all agree.
+            Environment.SetEnvironmentVariable("VINTAGERTX_VEGETATION_MAP_READY", "0");
         }
         tickListenerId = api.Event.RegisterGameTickListener(OnTick, 20);
         api.Event.RegisterRenderer(this, EnumRenderStage.Before, "vintagertx-test-camera-lock");
@@ -375,6 +417,85 @@ internal sealed class RuntimeScenarioProbe : IRenderer
                 LogHeldItemReflectionMaskChallenge();
             }
 
+            if (IsVegetationShadowMap && !exteriorPositionApplied)
+            {
+                if (!exteriorPositionAttempted)
+                {
+                    exteriorPositionAttempted = true;
+                    exteriorPositionApplied = TryApplyVegetationShadowMapCamera();
+                }
+
+                if (!exteriorPositionApplied)
+                {
+                    api.Logger.Error(
+                        "[VintageRTX.Test] Vegetation map camera failed: no loaded, flat, exposed staging patch was found.");
+                    injected = true;
+                    return;
+                }
+            }
+
+            if (scenario == "lantern-night" && !exteriorPositionApplied)
+            {
+                if (!exteriorPositionAttempted)
+                {
+                    exteriorPositionAttempted = true;
+                    // The copied authored map has one durable reference room.
+                    // Move close enough to request its chunks, then search the
+                    // actual loaded blocks rather than assuming the lantern or
+                    // its clear camera eye exists at a hard-coded final pose.
+                    api.SendChatMessage("/tp =512139.50 =115.88 =512089.50", null!);
+                    api.Logger.Notification(
+                        "[VintageRTX.Test] Lantern night staging teleport requested after /gamemode 2; waiting for authored-room chunks.");
+                    return;
+                }
+
+                lanternCameraSearchTicks++;
+                if (lanternCameraSearchTicks < 75 || lanternCameraSearchTicks % 25 != 0)
+                {
+                    return;
+                }
+
+                lanternCameraSearchAttempts++;
+                exteriorPositionApplied = TryApplyLanternNightCamera();
+                if (!exteriorPositionApplied && lanternCameraSearchAttempts >= 20)
+                {
+                    api.Logger.Error(
+                        "[VintageRTX.Test] Lantern night camera failed after {0} loaded-chunk attempts: no lit lantern with a clear nearby camera cell was found.",
+                        lanternCameraSearchAttempts);
+                    injected = true;
+                    return;
+                }
+                if (!exteriorPositionApplied)
+                {
+                    if (lanternCameraSearchAttempts == 1
+                        || lanternCameraSearchAttempts % 5 == 0)
+                    {
+                        api.Logger.Warning(
+                            "[VintageRTX.Test] Lantern night camera pending ({0}/20): authored-room chunks or clear eye not ready.",
+                            lanternCameraSearchAttempts);
+                    }
+                    return;
+                }
+            }
+
+            if (scenario == "lantern-night" && exteriorPositionApplied)
+            {
+                if (!lightStabilityIsolationRequested)
+                {
+                    lightStabilityIsolationRequested = true;
+                    api.SendChatMessage("/vintagertxtestlight isolate", null!);
+                    api.Logger.Notification(
+                        "[VintageRTX.Test] Fixed-light entity isolation requested after the lantern camera was established.");
+                    return;
+                }
+
+                if (lightStabilityIsolationSettleTicks < 50)
+                {
+                    lightStabilityIsolationSettleTicks++;
+                    return;
+                }
+            }
+
             if (scenario is "exterior-roof" or "rain-wetness" && !exteriorPositionApplied)
             {
                 if (!exteriorPositionAttempted)
@@ -523,6 +644,17 @@ internal sealed class RuntimeScenarioProbe : IRenderer
                 api.Logger.Notification(
                     "[VintageRTX.Test] Render lab capture gate released after scene, camera and light setup.");
             }
+
+            if (injected && !testCaptureReleased)
+            {
+                testCaptureReleased = true;
+                Environment.SetEnvironmentVariable(
+                    "VINTAGERTX_TEST_ENVIRONMENT_READY",
+                    "1",
+                    EnvironmentVariableTarget.Process);
+                api.Logger.Notification(
+                    "[VintageRTX.Test] Automatic capture gate released after environment and scenario setup.");
+            }
         }
 
         UpdateResizeAndReloadProbe();
@@ -530,6 +662,7 @@ internal sealed class RuntimeScenarioProbe : IRenderer
         UpdateWaterImpactProbe();
         UpdateWaterProjectileProbe();
         UpdateLocalBodyMirrorCapture();
+        UpdateVegetationShadowMapProbe();
 
         if (exteriorCameraLockTicks > 0)
         {
@@ -787,8 +920,9 @@ internal sealed class RuntimeScenarioProbe : IRenderer
             return;
         }
 
-        if (waterLocalBodyCaptureState != LocalBodyMirrorCaptureState.Capturing
-            || !isDiagnosticCaptureIdle())
+        // Complete is rejected by the method guard and Inactive always returns from the branch
+        // above, so Capturing is the only state that can reach this completion checkpoint.
+        if (!isDiagnosticCaptureIdle())
         {
             return;
         }
@@ -822,9 +956,9 @@ internal sealed class RuntimeScenarioProbe : IRenderer
 
         waterProjectileTicks++;
         // Start the second baseline as soon as the first post-impact capture transaction has had
-        // nominally two seconds to drain. At water's approximately 1.3 m/s group velocity this
-        // keeps the first ring away from the second target six metres away, without resetting the
-        // shared wind/impact field that the scenario is intended to exercise.
+        // nominally two seconds to drain. The arrow uses the verified central open-water target,
+        // three metres beyond the stone target; the three pre-impact field captures measure the
+        // remaining stone/wind evolution instead of moving the arrow into an occluded far-shore cell.
         int triggerTick = waterProjectileCommandIndex == 0 ? 1_800 : 1_900;
         if (waterProjectileTicks < triggerTick)
         {
@@ -1020,7 +1154,10 @@ internal sealed class RuntimeScenarioProbe : IRenderer
 
         for (int index = 0; index < waterProjectileLandingPositions.Length; index++)
         {
-            double distanceOffset = index == 0 ? -3.0 : 3.0;
+            // The far (+3 m) point is physically wet but hidden behind the distant witness/shore
+            // in the locked camera. Keep the stone near (-3 m) and put the arrow on the already
+            // verified central open-water column so exact image-space validation observes water.
+            double distanceOffset = index == 0 ? -3.0 : 0.0;
             double worldX = cameraX + directionX * (centralDistance + distanceOffset);
             double worldZ = cameraZ + directionZ * (centralDistance + distanceOffset);
             if (!TryGetWaterSurface(
@@ -1052,6 +1189,32 @@ internal sealed class RuntimeScenarioProbe : IRenderer
     {
         IBlockAccessor accessor = api.World.BlockAccessor;
         BlockPos playerBlock = api.World.Player.Entity.Pos.AsBlockPos.Copy();
+        int anchorX = accessor.MapSizeX / 2;
+        int anchorY = Math.Max(1, accessor.MapSizeY - 24);
+        int anchorZ = accessor.MapSizeZ / 2;
+        if (stageRenderLabBlock is null && !renderLabAnchorRequested)
+        {
+            renderLabAnchorRequested = true;
+            api.SendChatMessage(
+                $"/tp ={(anchorX + 0.5).ToString("0.00", CultureInfo.InvariantCulture)} "
+                + $"={anchorY.ToString("0.00", CultureInfo.InvariantCulture)} "
+                + $"={(anchorZ + 0.5).ToString("0.00", CultureInfo.InvariantCulture)}",
+                null!);
+            api.Logger.Notification(
+                "[VintageRTX.Test] Render lab fixed anchor requested: world=({0},{1},{2}).",
+                anchorX,
+                anchorY,
+                anchorZ);
+            return false;
+        }
+
+        // Test doubles retain their authored player position. A real generated
+        // world instead uses the centre anchor above, because Vintage Story's
+        // spawn search may choose a different valid position for the same seed.
+        if (stageRenderLabBlock is null)
+        {
+            playerBlock.Set(anchorX, anchorY, anchorZ);
+        }
         int floorY = playerBlock.Y - 1;
         bool foundFloor = false;
         for (int y = playerBlock.Y; y >= playerBlock.Y - 12; y--)
@@ -1112,6 +1275,13 @@ internal sealed class RuntimeScenarioProbe : IRenderer
             StageRenderLabBlock(bulk, block.Id, staging, null);
         }
 
+        void Clear(int localX, int localY, int localZ)
+        {
+            staging.Set(originX + localX, floorY + localY, originZ + localZ);
+            StageRenderLabBlock(bulk, 0, staging, BlockLayersAccess.Solid);
+            StageRenderLabBlock(bulk, 0, staging, BlockLayersAccess.Fluid);
+        }
+
         // Clear the room and camera corridor in both render layers. The lab is
         // elevated, and a small stage below the camera hides the normal-world
         // terrain without replacing it with the special creative environment.
@@ -1151,6 +1321,18 @@ internal sealed class RuntimeScenarioProbe : IRenderer
             {
                 Stage(bricks, 0, y, z);
                 Stage(bricks, 12, y, z);
+            }
+        }
+
+        // At the deterministic noon azimuth, rays travel strongly toward +X.
+        // Leave a real open-sky aperture beyond the crossed-plane witness so
+        // its floor shadow is not swallowed by the laboratory's side wall.
+        // The cleared corridor is outside the water and reflection targets.
+        for (int y = 1; y <= 6; y++)
+        {
+            for (int z = 5; z <= 9; z++)
+            {
+                Clear(12, y, z);
             }
         }
 
@@ -1207,13 +1389,28 @@ internal sealed class RuntimeScenarioProbe : IRenderer
         BlockPos targetBluePosition = new(originX + 7, floorY + 1, originZ + 10);
         BlockPos targetOrangePosition = new(originX + 9, floorY + 1, originZ + 10);
         BlockPos targetGreenPosition = new(originX + 11, floorY + 1, originZ + 10);
+        bool solarApertureMatches = true;
+        for (int y = 1; y <= 6; y++)
+        {
+            for (int z = 5; z <= 9; z++)
+            {
+                staging.Set(originX + 12, floorY + y, originZ + z);
+                solarApertureMatches &= accessor.GetBlock(
+                        staging,
+                        BlockLayersAccess.Solid).Id == 0
+                    && accessor.GetBlock(
+                        staging,
+                        BlockLayersAccess.Fluid).Id == 0;
+            }
+        }
         bool placementMatches = accessor.GetBlock(lanternPosition).Id == lantern.Id
             && accessor.GetBlock(anvilPosition).Id == anvil.Id
             && accessor.GetBlock(grassPosition).Id == grass.Id
             && accessor.GetBlock(waterPosition, BlockLayersAccess.Fluid).Id == water.Id
             && accessor.GetBlock(targetBluePosition).Id == targetBlue.Id
             && accessor.GetBlock(targetOrangePosition).Id == targetOrange.Id
-            && accessor.GetBlock(targetGreenPosition).Id == targetGreen.Id;
+            && accessor.GetBlock(targetGreenPosition).Id == targetGreen.Id
+            && solarApertureMatches;
         if (!placementMatches)
         {
             throw new InvalidOperationException(
@@ -1257,6 +1454,14 @@ internal sealed class RuntimeScenarioProbe : IRenderer
             originX,
             floorY,
             originZ);
+        Vec3f renderLabSun = VoxelScene.ResolveSunDirection(
+            api.World.Calendar,
+            api.World.Player.Entity.CameraPos);
+        api.Logger.Notification(
+            "[VintageRTX.Test] Render lab solar aperture verified: side=+X, local-x=12, z=5..9, height=6, sun=({0:0.000},{1:0.000},{2:0.000}).",
+            renderLabSun.X,
+            renderLabSun.Y,
+            renderLabSun.Z);
         api.Logger.Notification(
             "[VintageRTX.Test] Render lab materials verified: receiver={0}, polished={1}, lantern={2}, anvil={3}, crossed={4} draw={5} collision boxes={6}, fluid={7}; chisel omitted because no public authored instance-state constructor is safe.",
             bricks.Code,
@@ -1398,7 +1603,7 @@ internal sealed class RuntimeScenarioProbe : IRenderer
 
     /// <summary>
     /// Applies the deterministic pose before the engine camera renderer and
-    /// resumes a render-lab world opened in the paused single-player state.
+    /// resumes a runtime-test world opened in the paused single-player state.
     /// No scene mutation occurs during other render stages.
     /// </summary>
     /// <param name="deltaTime">Elapsed render time in seconds; pose locking itself is time independent.</param>
@@ -1418,20 +1623,20 @@ internal sealed class RuntimeScenarioProbe : IRenderer
             UpdateLocalBodyMirrorCapture();
         }
 
-        // A world created through --openWorld starts paused on this client.
-        // Game-tick listeners cannot build or verify the laboratory while the
-        // single-player server is suspended, so resume it through the public
-        // client API from the render callback, which remains active.
-        if (IsRenderLab
-            && api.World.Player?.Entity is not null
+        // A world opened through --openWorld can start paused when the automated
+        // client does not own foreground focus. Every scenario relies on game-tick
+        // listeners for ordered game mode, time, weather, placement, and camera
+        // commands, so resume it through the public client API from the render
+        // callback, which remains active while single-player simulation is paused.
+        if (api.World.Player?.Entity is not null
             && api.IsGamePaused)
         {
             api.PauseGame(false);
-            if (!renderLabPauseReleaseLogged)
+            if (!runtimePauseReleaseLogged)
             {
-                renderLabPauseReleaseLogged = true;
+                runtimePauseReleaseLogged = true;
                 api.Logger.Notification(
-                    "[VintageRTX.Test] Render lab automatically resumed through ICoreClientAPI.PauseGame(false).");
+                    "[VintageRTX.Test] Runtime world automatically resumed through ICoreClientAPI.PauseGame(false).");
             }
         }
 
@@ -1445,6 +1650,325 @@ internal sealed class RuntimeScenarioProbe : IRenderer
     }
 
     /// <summary>
+    /// Finds an authored, lit lantern in the loaded real map and locks a nearby unobstructed camera
+    /// on its flame. No blocks are created or replaced, so the evidence retains the building's
+    /// actual cage, walls, furniture, receivers, and occluders.
+    /// </summary>
+    /// <returns><see langword="true"/> when both a lantern and a clear camera ray were found.</returns>
+    private bool TryApplyLanternNightCamera()
+    {
+        EntityPlayer entity = api.World.Player.Entity;
+        IBlockAccessor accessor = api.World.BlockAccessor;
+        BlockPos origin = entity.Pos.AsBlockPos.Copy();
+        BlockPos? lanternPosition = null;
+        Block? lanternBlock = null;
+        int[] searchRadii = [24, 48, 96, 144];
+
+        foreach (int radius in searchRadii)
+        {
+            int minimumY = Math.Max(1, origin.Y - 32);
+            int maximumY = Math.Min(api.World.MapSizeY - 2, origin.Y + 32);
+            BlockPos minimum = new(origin.X - radius, minimumY, origin.Z - radius, origin.dimension);
+            BlockPos maximum = new(origin.X + radius, maximumY, origin.Z + radius, origin.dimension);
+            accessor.SearchBlocks(
+                minimum,
+                maximum,
+                (block, position) =>
+                {
+                    if (!IsLitLantern(block, accessor, position))
+                    {
+                        return true;
+                    }
+
+                    lanternBlock = block;
+                    lanternPosition = position.Copy();
+                    return false;
+                });
+            if (lanternPosition is not null)
+            {
+                break;
+            }
+        }
+
+        if (lanternPosition is null || lanternBlock is null)
+        {
+            return false;
+        }
+
+        Vec3d lanternCenter = new(
+            lanternPosition.X + 0.5,
+            lanternPosition.Y + 0.5,
+            lanternPosition.Z + 0.5);
+        Entity[] nearbyEntities = api.World.GetEntitiesAround(
+            lanternCenter,
+            8.0f,
+            4.0f,
+            candidate => candidate is EntityAgent
+                && candidate.EntityId != entity.EntityId
+                && candidate.Alive) ?? [];
+        LanternCameraEntityBounds[] occupiedEntityBounds = nearbyEntities
+            .Select(static candidate => LanternCameraEntityBounds.FromEntity(candidate))
+            .ToArray();
+        api.Logger.Notification(
+            "[VintageRTX.Test] Lantern camera near-field scan: entities={0}, clearance=0.75m.",
+            occupiedEntityBounds.Length);
+        foreach (Entity nearbyEntity in nearbyEntities)
+        {
+            LanternCameraEntityBounds bounds = LanternCameraEntityBounds.FromEntity(nearbyEntity);
+            api.Logger.Notification(
+                "[VintageRTX.Test] Lantern camera candidate entity: id={0}, code={1}, bounds=({2:0.00},{3:0.00},{4:0.00})-({5:0.00},{6:0.00},{7:0.00}).",
+                nearbyEntity.EntityId,
+                nearbyEntity.Code,
+                bounds.MinimumX,
+                bounds.MinimumY,
+                bounds.MinimumZ,
+                bounds.MaximumX,
+                bounds.MaximumY,
+                bounds.MaximumZ);
+        }
+        Vec3d? cameraEye = FindLanternCameraEye(
+            accessor,
+            lanternPosition,
+            occupiedEntityBounds);
+        if (cameraEye is null)
+        {
+            return false;
+        }
+
+        SelectEmptyHotbarSlot("Lantern night isolation");
+        double destinationX = cameraEye.X;
+        double destinationY = cameraEye.Y - 1.62;
+        double destinationZ = cameraEye.Z;
+        double targetX = lanternPosition.X + 0.5;
+        double targetY = lanternPosition.Y + 0.5;
+        double targetZ = lanternPosition.Z + 0.5;
+        SelectCameraOrientation(
+            targetX - destinationX,
+            targetY - cameraEye.Y,
+            targetZ - destinationZ,
+            useDirectCameraAngles: true);
+        exteriorCameraLockTicks = 36_000;
+        exteriorPositionLocked = true;
+        exteriorPositionX = destinationX;
+        exteriorPositionY = destinationY;
+        exteriorPositionZ = destinationZ;
+        api.SendChatMessage(
+            $"/tp ={destinationX.ToString("0.00", CultureInfo.InvariantCulture)} "
+            + $"={destinationY.ToString("0.00", CultureInfo.InvariantCulture)} "
+            + $"={destinationZ.ToString("0.00", CultureInfo.InvariantCulture)}",
+            null!);
+        api.Logger.Notification(
+            "[VintageRTX.Test] Lantern night camera applied: lantern={0} at ({1},{2},{3}), camera-eye=({4:0.00},{5:0.00},{6:0.00}), authored-map=true, clear-ray=true, entity-bounds={7}.",
+            lanternBlock.Code,
+            lanternPosition.X,
+            lanternPosition.Y,
+            lanternPosition.Z,
+            cameraEye.X,
+            cameraEye.Y,
+            cameraEye.Z,
+            occupiedEntityBounds.Length);
+        foreach (Entity nearbyEntity in nearbyEntities)
+        {
+            LanternCameraEntityBounds bounds = LanternCameraEntityBounds.FromEntity(nearbyEntity);
+            api.Logger.Notification(
+                "[VintageRTX.Test] Lantern camera entity witness: id={0}, code={1}, pos=({2:0.00},{3:0.00},{4:0.00}), bounds=({5:0.00},{6:0.00},{7:0.00})-({8:0.00},{9:0.00},{10:0.00}), eye-clearance={11:0.00}m.",
+                nearbyEntity.EntityId,
+                nearbyEntity.Code,
+                nearbyEntity.Pos.X,
+                nearbyEntity.Pos.Y,
+                nearbyEntity.Pos.Z,
+                bounds.MinimumX,
+                bounds.MinimumY,
+                bounds.MinimumZ,
+                bounds.MaximumX,
+                bounds.MaximumY,
+                bounds.MaximumZ,
+                Math.Sqrt(bounds.SquaredDistanceTo(cameraEye.X, cameraEye.Y, cameraEye.Z)));
+        }
+        return true;
+    }
+
+    /// <summary>Recognizes an active lantern from its authored block code and emitted HSV value.</summary>
+    /// <param name="block">Candidate solid-layer block.</param>
+    /// <param name="accessor">World accessor required by the collectible light API.</param>
+    /// <param name="position">Candidate world position.</param>
+    /// <returns><see langword="true"/> only for a lantern whose current light value is non-zero.</returns>
+    internal static bool IsLitLantern(Block block, IBlockAccessor accessor, BlockPos position)
+    {
+        if (block is null
+            || string.IsNullOrWhiteSpace(block.Code?.Path)
+            || !block.Code.Path.StartsWith("lantern", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        byte[] lightHsv = block.GetLightHsv(accessor, position, null);
+        return lightHsv is { Length: >= 3 } && lightHsv[2] > 0;
+    }
+
+    /// <summary>
+    /// Selects the most open eye cell between three and six metres from a lantern while requiring
+    /// an unobstructed half-block ray to the flame centre.
+    /// </summary>
+    /// <param name="accessor">Loaded real-map block accessor.</param>
+    /// <param name="lantern">Authored lantern position.</param>
+    /// <param name="occupiedEntityBounds">
+    /// Animated selection volumes of non-player entities that must remain outside the camera's
+    /// near-field safety envelope. This keeps a long animal mesh from covering a large part of a
+    /// nominally pixel-comparable capture even when its centre remains several metres away.
+    /// </param>
+    /// <returns>World-space camera eye, or <see langword="null"/> when the lantern is enclosed.</returns>
+    internal static Vec3d? FindLanternCameraEye(
+        IBlockAccessor accessor,
+        BlockPos lantern,
+        IReadOnlyList<LanternCameraEntityBounds>? occupiedEntityBounds = null)
+    {
+        Vec3d? best = null;
+        int bestScore = int.MinValue;
+        for (int offsetX = -6; offsetX <= 6; offsetX++)
+        {
+            for (int offsetZ = -6; offsetZ <= 6; offsetZ++)
+            {
+                int distanceSquared = offsetX * offsetX + offsetZ * offsetZ;
+                if (distanceSquared is < 9 or > 36)
+                {
+                    continue;
+                }
+
+                int eyeX = lantern.X + offsetX;
+                int eyeY = lantern.Y;
+                int eyeZ = lantern.Z + offsetZ;
+                double eyeCenterX = eyeX + 0.5;
+                double eyeCenterY = eyeY + 0.5;
+                double eyeCenterZ = eyeZ + 0.5;
+                if (!IsLanternCameraEntityClear(
+                        eyeCenterX,
+                        eyeCenterY,
+                        eyeCenterZ,
+                        occupiedEntityBounds)
+                    || !IsOpenForCamera(accessor.GetBlock(new BlockPos(
+                        eyeX,
+                        eyeY,
+                        eyeZ,
+                        lantern.dimension)))
+                    || !HasClearLanternSight(
+                        accessor,
+                        eyeCenterX,
+                        eyeCenterY,
+                        eyeCenterZ,
+                        lantern))
+                {
+                    continue;
+                }
+
+                int openness = 0;
+                for (int localX = -1; localX <= 1; localX++)
+                {
+                    for (int localY = -1; localY <= 1; localY++)
+                    {
+                        for (int localZ = -1; localZ <= 1; localZ++)
+                        {
+                            openness += IsOpenForCamera(accessor.GetBlock(new BlockPos(
+                                eyeX + localX,
+                                eyeY + localY,
+                                eyeZ + localZ,
+                                lantern.dimension))) ? 1 : 0;
+                        }
+                    }
+                }
+
+                int score = openness * 100 - Math.Abs(distanceSquared - 16);
+                if (score > bestScore)
+                {
+                    bestScore = score;
+                    best = new Vec3d(eyeCenterX, eyeCenterY, eyeCenterZ);
+                }
+            }
+        }
+
+        return best;
+    }
+
+    /// <summary>
+    /// Rejects prospective eye cells closer than 0.75 metre to an animated non-player selection
+    /// volume. Measuring from the volume rather than its centre accounts for long bodies, heads,
+    /// horns, and other posed meshes that can cross the near frustum while their origin stays clear.
+    /// </summary>
+    /// <param name="eyeX">Prospective eye X coordinate.</param>
+    /// <param name="eyeY">Prospective eye Y coordinate.</param>
+    /// <param name="eyeZ">Prospective eye Z coordinate.</param>
+    /// <param name="occupiedEntityBounds">World-space animated entity bounds, or no exclusions.</param>
+    /// <returns>Whether the nearest supplied body volume remains at least 0.75 metre away.</returns>
+    internal static bool IsLanternCameraEntityClear(
+        double eyeX,
+        double eyeY,
+        double eyeZ,
+        IReadOnlyList<LanternCameraEntityBounds>? occupiedEntityBounds)
+    {
+        if (occupiedEntityBounds is null)
+        {
+            return true;
+        }
+
+        const double minimumDistanceSquared = 0.75 * 0.75;
+        foreach (LanternCameraEntityBounds bounds in occupiedEntityBounds)
+        {
+            if (bounds.SquaredDistanceTo(eyeX, eyeY, eyeZ) < minimumDistanceSquared)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>Checks the segment from a prospective eye cell to the lantern at half-block spacing.</summary>
+    /// <param name="accessor">Map blocks used as opaque witnesses.</param>
+    /// <param name="eyeX">Eye X coordinate.</param>
+    /// <param name="eyeY">Eye Y coordinate.</param>
+    /// <param name="eyeZ">Eye Z coordinate.</param>
+    /// <param name="lantern">Terminal lantern block, which is deliberately not treated as an obstruction.</param>
+    /// <returns><see langword="true"/> when every intermediate cell is visually empty.</returns>
+    private static bool HasClearLanternSight(
+        IBlockAccessor accessor,
+        double eyeX,
+        double eyeY,
+        double eyeZ,
+        BlockPos lantern)
+    {
+        double targetX = lantern.X + 0.5;
+        double targetY = lantern.Y + 0.5;
+        double targetZ = lantern.Z + 0.5;
+        double distance = Math.Sqrt(
+            Math.Pow(targetX - eyeX, 2.0)
+            + Math.Pow(targetY - eyeY, 2.0)
+            + Math.Pow(targetZ - eyeZ, 2.0));
+        int steps = Math.Max(2, (int)Math.Ceiling(distance * 2.0));
+        for (int step = 1; step < steps; step++)
+        {
+            double amount = step / (double)steps;
+            int sampleX = (int)Math.Floor(eyeX + (targetX - eyeX) * amount);
+            int sampleY = (int)Math.Floor(eyeY + (targetY - eyeY) * amount);
+            int sampleZ = (int)Math.Floor(eyeZ + (targetZ - eyeZ) * amount);
+            if (sampleX == lantern.X && sampleY == lantern.Y && sampleZ == lantern.Z)
+            {
+                continue;
+            }
+
+            if (!IsVisuallyOpen(accessor.GetBlock(new BlockPos(
+                sampleX,
+                sampleY,
+                sampleZ,
+                lantern.dimension))))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
     /// Reasserts the captured camera position and angles through public player
     /// APIs. Motion is cleared on every application to prevent physics or camera
     /// sway from invalidating pixel-level A/B comparisons.
@@ -1453,6 +1977,14 @@ internal sealed class RuntimeScenarioProbe : IRenderer
     {
         var player = api.World.Player;
         var entity = player.Entity;
+        // The public client API exposes camera shake independently from the
+        // player's world transform. Clear both that accumulator and the
+        // EntityPlayer special-effect offset so hunger, damage, temporal
+        // instability or a prior world state cannot perturb a fixed render
+        // comparison after /gamemode 2 and teleportation.
+        api.World.SetCameraShake(0.0f);
+        entity.CameraPosOffset.Set(0.0, 0.0, 0.0);
+        entity.HeadBobbingAmplitude = 0.0f;
         if (exteriorPositionLocked)
         {
             entity.Controls.IsFlying = true;
@@ -1463,7 +1995,18 @@ internal sealed class RuntimeScenarioProbe : IRenderer
 
         api.Input.MouseYaw = exteriorYaw;
         api.Input.MousePitch = exteriorPitch;
-        entity.Pos.SetAngles(0.0f, exteriorYaw, exteriorEntityPitch);
+        float entityYaw = exteriorYaw;
+        if (useDirectPublicCameraAngles)
+        {
+            MapDirectCameraToEntityAngles(
+                exteriorYaw,
+                exteriorPitch,
+                out entityYaw,
+                out exteriorEntityPitch);
+        }
+
+        entity.Pos.SetAngles(0.0f, entityYaw, exteriorEntityPitch);
+        entity.BodyYaw = entityYaw;
         if (useDirectPublicCameraAngles)
         {
             player.CameraYaw = exteriorYaw;
@@ -1668,6 +2211,525 @@ internal sealed class RuntimeScenarioProbe : IRenderer
     }
 
     /// <summary>
+    /// Finds an exposed flat patch in the loaded real save, requests five stock plants through the
+    /// isolated public server command, and locks an elevated oblique camera on their sun receiver.
+    /// </summary>
+    /// <returns><see langword="true"/> when the placement request and camera pose were established.</returns>
+    private bool TryApplyVegetationShadowMapCamera()
+    {
+        Vec3d origin = api.World.Player.Entity.CameraPos.Clone();
+        IBlockAccessor accessor = api.World.BlockAccessor;
+        BlockPos sample = api.World.Player.Entity.Pos.AsBlockPos.Copy();
+        if (!TryFindVegetationStagingPatch(
+                accessor,
+                sample,
+                (int)Math.Floor(origin.X),
+                (int)Math.Floor(origin.Y),
+                (int)Math.Floor(origin.Z),
+                out vegetationCenterX,
+                out int surfaceY,
+                out vegetationCenterZ))
+        {
+            return false;
+        }
+
+        vegetationPlantY = surfaceY + 1;
+        for (int index = 0; index < VegetationWitnesses.Length; index++)
+        {
+            VegetationWitness witness = VegetationWitnesses[index];
+            sample.Set(
+                vegetationCenterX + witness.OffsetX,
+                0,
+                vegetationCenterZ + witness.OffsetZ);
+            vegetationWitnessPlantYs[index] = accessor.GetRainMapHeightAt(sample) + 1;
+        }
+        int fenceStackAwareBlocks = CountFenceStackAwareBlocksInChunk(
+            accessor,
+            sample,
+            vegetationCenterX,
+            vegetationPlantY,
+            vegetationCenterZ,
+            out int targetChunkX,
+            out int targetChunkY,
+            out int targetChunkZ);
+        Block receiverGround = GetBlock(
+            accessor,
+            sample,
+            vegetationCenterX,
+            surfaceY,
+            vegetationCenterZ);
+        api.Logger.Notification(
+            "[VintageRTX.Test] Vegetation map chunk audit: PASS | chunk=({0},{1},{2}), scanned={3}, BlockFenceStackAware={4}, receiver-ground={5}, material={6}.",
+            targetChunkX,
+            targetChunkY,
+            targetChunkZ,
+            GlobalConstants.ChunkSize * GlobalConstants.ChunkSize * GlobalConstants.ChunkSize,
+            fenceStackAwareBlocks,
+            receiverGround.Code,
+            receiverGround.BlockMaterial);
+        Vec3f sun = VoxelScene.ResolveSunDirection(
+            api.World.Calendar,
+            api.World.Player.Entity.CameraPos);
+        double shadowX = -sun.X;
+        double shadowZ = -sun.Z;
+        double horizontalLength = Math.Sqrt(shadowX * shadowX + shadowZ * shadowZ);
+        if (horizontalLength <= 0.001)
+        {
+            shadowX = 0.70710678118;
+            shadowZ = 0.70710678118;
+        }
+        else
+        {
+            shadowX /= horizontalLength;
+            shadowZ /= horizontalLength;
+        }
+
+        double perpendicularX = -shadowZ;
+        double perpendicularZ = shadowX;
+        double destinationX = vegetationCenterX + 0.5 - shadowX * 8.0 + perpendicularX * 4.0;
+        double destinationY = vegetationPlantY + 5.25;
+        double destinationZ = vegetationCenterZ + 0.5 - shadowZ * 8.0 + perpendicularZ * 4.0;
+        double targetX = vegetationCenterX + 0.5 + shadowX * 1.35;
+        double targetY = vegetationPlantY + 0.18;
+        double targetZ = vegetationCenterZ + 0.5 + shadowZ * 1.35;
+        SelectCameraOrientation(
+            targetX - destinationX,
+            targetY - (destinationY + 1.62),
+            targetZ - destinationZ,
+            useDirectCameraAngles: true);
+        exteriorCameraLockTicks = 36_000;
+        exteriorPositionLocked = true;
+        exteriorPositionX = destinationX;
+        exteriorPositionY = destinationY;
+        exteriorPositionZ = destinationZ;
+        api.SendChatMessage(
+            $"/tp ={destinationX.ToString("0.00", CultureInfo.InvariantCulture)} "
+            + $"={destinationY.ToString("0.00", CultureInfo.InvariantCulture)} "
+            + $"={destinationZ.ToString("0.00", CultureInfo.InvariantCulture)}",
+            null!);
+
+        vegetationPlacementArmed = true;
+        vegetationPlacementRequested = false;
+        vegetationPlacementTicks = 0;
+        Environment.SetEnvironmentVariable("VINTAGERTX_VEGETATION_MAP_READY", "staging");
+        api.Logger.Notification(
+            "[VintageRTX.Test] Vegetation map placement armed: count={0}, center=({1},{2},{3}), pre-mutation capture generation requested.",
+            VegetationWitnesses.Length,
+            vegetationCenterX,
+            vegetationPlantY,
+            vegetationCenterZ);
+        api.Logger.Notification(
+            "[VintageRTX.Test] Vegetation map camera applied: position=({0:0.00},{1:0.00},{2:0.00}), target=({3:0.00},{4:0.00},{5:0.00}), pitch={6:0.000}, sun=({7:0.000},{8:0.000},{9:0.000}), locked=true.",
+            destinationX,
+            destinationY,
+            destinationZ,
+            targetX,
+            targetY,
+            targetZ,
+            exteriorPitch,
+            sun.X,
+            sun.Y,
+            sun.Z);
+        return true;
+    }
+
+    /// <summary>
+    /// Waits for authoritative block replication, validates each real block's alpha-cut render
+    /// contract, then releases automatic capture for a fresh settled voxel generation.
+    /// </summary>
+    private void UpdateVegetationShadowMapProbe()
+    {
+        if (!IsVegetationShadowMap
+            || vegetationPatchVerified)
+        {
+            return;
+        }
+
+        vegetationPlacementTicks++;
+        if (vegetationPlacementArmed && !vegetationPlacementRequested)
+        {
+            if (vegetationPlacementTicks < 5)
+            {
+                return;
+            }
+
+            api.SendChatMessage(
+                $"/vintagertxtestvegetation place {vegetationCenterX.ToString(CultureInfo.InvariantCulture)} "
+                + $"{vegetationPlantY.ToString(CultureInfo.InvariantCulture)} "
+                + vegetationCenterZ.ToString(CultureInfo.InvariantCulture),
+                null!);
+            vegetationPlacementRequested = true;
+            vegetationPlacementTicks = 0;
+            api.Logger.Notification(
+                "[VintageRTX.Test] Vegetation map placement requested: count={0}, center=({1},{2},{3}), command=/vintagertxtestvegetation place, world=foggy village world.",
+                VegetationWitnesses.Length,
+                vegetationCenterX,
+                vegetationPlantY,
+                vegetationCenterZ);
+            return;
+        }
+
+        if (!vegetationPlacementRequested)
+        {
+            return;
+        }
+
+        if (vegetationPlacementTicks < 25)
+        {
+            return;
+        }
+
+        IBlockAccessor accessor = api.World.BlockAccessor;
+        List<(VegetationWitness Witness, BlockPos Position, Block Block)> observed = [];
+        for (int index = 0; index < VegetationWitnesses.Length; index++)
+        {
+            VegetationWitness witness = VegetationWitnesses[index];
+            BlockPos position = new(
+                vegetationCenterX + witness.OffsetX,
+                vegetationWitnessPlantYs[index],
+                vegetationCenterZ + witness.OffsetZ);
+            Block? candidate = accessor.GetBlock(position, BlockLayersAccess.MostSolid);
+            if (candidate is null
+                || !string.Equals(candidate.Code?.ToString(), witness.Code, StringComparison.Ordinal))
+            {
+                if (vegetationPlacementTicks == 750)
+                {
+                    api.Logger.Error(
+                        "[VintageRTX.Test] Vegetation map placement verification timed out: expected={0} at {1}, observed={2}.",
+                        witness.Code,
+                        position,
+                        candidate?.Code?.ToString() ?? "missing");
+                }
+                return;
+            }
+
+            Block block = candidate;
+            observed.Add((witness, position, block));
+        }
+
+        int alphaCutout = 0;
+        int crossedPlanes = 0;
+        int jsonShapes = 0;
+        for (int index = 0; index < observed.Count; index++)
+        {
+            (VegetationWitness witness, BlockPos position, Block block) = observed[index];
+            bool alpha = block.RenderPass == EnumChunkRenderPass.OpaqueNoCull;
+            bool crossed = block.DrawType == EnumDrawType.Cross;
+            bool json = block.DrawType == EnumDrawType.JSON;
+            alphaCutout += alpha ? 1 : 0;
+            crossedPlanes += crossed ? 1 : 0;
+            jsonShapes += json ? 1 : 0;
+            api.Logger.Notification(
+                "[VintageRTX.Test] Vegetation map block verified: index={0}/{1}, code={2}, position={3}, draw-type={4}, render-pass={5}, alpha-cutout={6}, crossed-planes={7}.",
+                index + 1,
+                observed.Count,
+                witness.Code,
+                position,
+                block.DrawType,
+                block.RenderPass,
+                alpha,
+                crossed);
+        }
+
+        vegetationPatchVerified = true;
+        if (observed.Count != VegetationWitnesses.Length
+            || alphaCutout != VegetationWitnesses.Length
+            || crossedPlanes != 3
+            || jsonShapes != 2)
+        {
+            api.Logger.Error(
+                "[VintageRTX.Test] Vegetation map geometry verified: FAIL | count={0}, alpha-cutout={1}, crossed-planes={2}, json-shapes={3}.",
+                observed.Count,
+                alphaCutout,
+                crossedPlanes,
+                jsonShapes);
+            return;
+        }
+
+        api.Logger.Notification(
+            "[VintageRTX.Test] Vegetation map geometry verified: PASS | count=5, alpha-cutout=5, crossed-planes=3, json-shapes=2, receiver=real-map-terrain.");
+        Environment.SetEnvironmentVariable("VINTAGERTX_VEGETATION_MAP_READY", "1");
+        api.Logger.Notification(
+            "[VintageRTX.Test] Vegetation map capture gate released after authoritative placement, client geometry verification, and camera lock.");
+    }
+
+    /// <summary>
+    /// Searches the loaded terrain around the starting player for the nearest gently sloped,
+    /// rain-exposed patch large enough for the five authored witness offsets. Existing harmless
+    /// ground plants are replaceable on the disposable save copy and must not make every natural
+    /// field ineligible.
+    /// </summary>
+    /// <param name="accessor">Real-world block and rain-map accessor.</param>
+    /// <param name="sample">Reusable mutable coordinate.</param>
+    /// <param name="originX">Player-origin X.</param>
+    /// <param name="originY">Player-origin Y.</param>
+    /// <param name="originZ">Player-origin Z.</param>
+    /// <param name="centerX">Selected patch-center X.</param>
+    /// <param name="surfaceY">Selected common ground-surface Y.</param>
+    /// <param name="centerZ">Selected patch-center Z.</param>
+    /// <returns>Whether a loaded qualifying patch was found.</returns>
+    internal static bool TryFindVegetationStagingPatch(
+        IBlockAccessor accessor,
+        BlockPos sample,
+        int originX,
+        int originY,
+        int originZ,
+        out int centerX,
+        out int surfaceY,
+        out int centerZ)
+    {
+        bool TryCandidate(int x, int z, out int candidateSurfaceY)
+        {
+            sample.Set(x, 0, z);
+            candidateSurfaceY = accessor.GetRainMapHeightAt(sample);
+            int plantY = candidateSurfaceY + 1;
+            return IsVegetationSurfaceWithinTeleportRange(originY, candidateSurfaceY)
+                && AreVegetationWitnessesInSingleChunk(x, plantY, z)
+                && HasVegetationStagingPatch(
+                    accessor,
+                    sample,
+                    x,
+                    candidateSurfaceY,
+                    z);
+        }
+
+        // Visit every integer center on expanding square rings. The former angular sampling left
+        // large holes between rounded circumference points and repeatedly missed narrow village
+        // clearings even though those cells were already loaded by the single-player view range.
+        for (int radius = 8; radius <= 72; radius++)
+        {
+            for (int xOffset = -radius; xOffset <= radius; xOffset++)
+            {
+                int x = originX + xOffset;
+                int nearZ = originZ - radius;
+                if (TryCandidate(x, nearZ, out int nearSurfaceY))
+                {
+                    centerX = x;
+                    surfaceY = nearSurfaceY;
+                    centerZ = nearZ;
+                    return true;
+                }
+
+                int farZ = originZ + radius;
+                if (TryCandidate(x, farZ, out int farSurfaceY))
+                {
+                    centerX = x;
+                    surfaceY = farSurfaceY;
+                    centerZ = farZ;
+                    return true;
+                }
+            }
+
+            for (int zOffset = -radius + 1; zOffset < radius; zOffset++)
+            {
+                int z = originZ + zOffset;
+                int nearX = originX - radius;
+                if (TryCandidate(nearX, z, out int nearSurfaceY))
+                {
+                    centerX = nearX;
+                    surfaceY = nearSurfaceY;
+                    centerZ = z;
+                    return true;
+                }
+
+                int farX = originX + radius;
+                if (TryCandidate(farX, z, out int farSurfaceY))
+                {
+                    centerX = farX;
+                    surfaceY = farSurfaceY;
+                    centerZ = z;
+                    return true;
+                }
+            }
+        }
+
+        centerX = 0;
+        surfaceY = 0;
+        centerZ = 0;
+        return false;
+    }
+
+    /// <summary>
+    /// Allows the copied save's creative/flying spawn to relocate onto nearby ground without
+    /// accepting an unrelated vertical world layer. The foggy-village save starts roughly forty
+    /// blocks above its surrounding natural receivers.
+    /// </summary>
+    /// <param name="originY">Current player/camera block elevation.</param>
+    /// <param name="surfaceY">Rain-map elevation of the candidate receiver.</param>
+    /// <returns>Whether a direct scenario teleport remains within the local 96-block column.</returns>
+    internal static bool IsVegetationSurfaceWithinTeleportRange(int originY, int surfaceY) =>
+        Math.Abs((long)surfaceY - originY) <= 96L;
+
+    /// <summary>
+    /// Counts fence-stack-aware blocks in the exact 32-cubed chunk that will own every plant.
+    /// The count is retained as evidence that the complete mesh owner was audited. The production
+    /// array guard now permits a nonzero count while the runtime validator still rejects any
+    /// correlated tessellation abort after vegetation placement.
+    /// </summary>
+    /// <param name="accessor">Loaded real-world accessor.</param>
+    /// <param name="sample">Reusable mutable coordinate.</param>
+    /// <param name="worldX">Representative world X.</param>
+    /// <param name="worldY">Representative world Y.</param>
+    /// <param name="worldZ">Representative world Z.</param>
+    /// <param name="chunkX">Receives signed chunk X.</param>
+    /// <param name="chunkY">Receives signed chunk Y.</param>
+    /// <param name="chunkZ">Receives signed chunk Z.</param>
+    /// <returns>Number of blocks whose runtime type is <c>BlockFenceStackAware</c>.</returns>
+    internal static int CountFenceStackAwareBlocksInChunk(
+        IBlockAccessor accessor,
+        BlockPos sample,
+        int worldX,
+        int worldY,
+        int worldZ,
+        out int chunkX,
+        out int chunkY,
+        out int chunkZ)
+    {
+        (chunkX, chunkY, chunkZ) = WorldToChunk(worldX, worldY, worldZ);
+        int minimumX = chunkX * GlobalConstants.ChunkSize;
+        int minimumY = chunkY * GlobalConstants.ChunkSize;
+        int minimumZ = chunkZ * GlobalConstants.ChunkSize;
+        int count = 0;
+        for (int y = minimumY; y < minimumY + GlobalConstants.ChunkSize; y++)
+        {
+            for (int z = minimumZ; z < minimumZ + GlobalConstants.ChunkSize; z++)
+            {
+                for (int x = minimumX; x < minimumX + GlobalConstants.ChunkSize; x++)
+                {
+                    Block block = GetBlock(
+                        accessor,
+                        sample,
+                        x,
+                        y,
+                        z,
+                        BlockLayersAccess.MostSolid);
+                    count += string.Equals(
+                        block?.GetType().Name,
+                        "BlockFenceStackAware",
+                        StringComparison.Ordinal)
+                            ? 1
+                            : 0;
+                }
+            }
+        }
+
+        return count;
+    }
+
+    /// <summary>Ensures the complete five-plant layout belongs to one 32-cubed mesh owner.</summary>
+    /// <param name="centerX">Patch center X.</param>
+    /// <param name="plantY">Common plant-layer Y.</param>
+    /// <param name="centerZ">Patch center Z.</param>
+    /// <returns>Whether all authored offsets share one chunk coordinate.</returns>
+    internal static bool AreVegetationWitnessesInSingleChunk(
+        int centerX,
+        int plantY,
+        int centerZ)
+    {
+        (int X, int Y, int Z) owner = WorldToChunk(centerX, plantY, centerZ);
+        return VegetationWitnesses.All(witness => WorldToChunk(
+            centerX + witness.OffsetX,
+            plantY,
+            centerZ + witness.OffsetZ) == owner);
+    }
+
+    /// <summary>Maps signed world coordinates to floor-divided chunk coordinates.</summary>
+    /// <param name="worldX">World X.</param>
+    /// <param name="worldY">World Y.</param>
+    /// <param name="worldZ">World Z.</param>
+    /// <returns>Signed owner chunk coordinates.</returns>
+    private static (int X, int Y, int Z) WorldToChunk(int worldX, int worldY, int worldZ) =>
+        ((int)Math.Floor(worldX / (double)GlobalConstants.ChunkSize),
+            (int)Math.Floor(worldY / (double)GlobalConstants.ChunkSize),
+            (int)Math.Floor(worldZ / (double)GlobalConstants.ChunkSize));
+
+    /// <summary>
+    /// Verifies every plant target stays within two blocks of the center ground, has solid natural
+    /// support and two air-or-ground-plant cells. This retains a real slope instead of requiring an
+    /// artificial platform; trees, crops, constructions, and collidable content remain rejected.
+    /// </summary>
+    /// <param name="accessor">Block accessor to inspect.</param>
+    /// <param name="sample">Reusable mutable position.</param>
+    /// <param name="centerX">Candidate center X.</param>
+    /// <param name="surfaceY">Required common surface Y.</param>
+    /// <param name="centerZ">Candidate center Z.</param>
+    /// <returns>Whether all five targets satisfy the non-destructive staging contract.</returns>
+    internal static bool HasVegetationStagingPatch(
+        IBlockAccessor accessor,
+        BlockPos sample,
+        int centerX,
+        int surfaceY,
+        int centerZ)
+    {
+        (int X, int Y, int Z) owner = WorldToChunk(
+            centerX,
+            surfaceY + 1,
+            centerZ);
+        Block centerGround = GetBlock(accessor, sample, centerX, surfaceY, centerZ);
+        if (!IsCaveSolid(centerGround)
+            || !IsVegetationReceiverGround(centerGround)
+            || !IsReplaceableVegetationCell(GetBlock(
+                accessor,
+                sample,
+                centerX,
+                surfaceY + 1,
+                centerZ)))
+        {
+            return false;
+        }
+        foreach (VegetationWitness witness in VegetationWitnesses)
+        {
+            int x = centerX + witness.OffsetX;
+            int z = centerZ + witness.OffsetZ;
+            sample.Set(x, 0, z);
+            int witnessSurfaceY = accessor.GetRainMapHeightAt(sample);
+            Block ground = GetBlock(accessor, sample, x, witnessSurfaceY, z);
+            if (Math.Abs(witnessSurfaceY - surfaceY) > 2
+                || WorldToChunk(x, witnessSurfaceY + 1, z) != owner
+                || !IsCaveSolid(ground)
+                || !IsVegetationReceiverGround(ground)
+                || !IsReplaceableVegetationCell(GetBlock(
+                    accessor,
+                    sample,
+                    x,
+                    witnessSurfaceY + 1,
+                    z))
+                || !IsReplaceableVegetationCell(GetBlock(
+                    accessor,
+                    sample,
+                    x,
+                    witnessSurfaceY + 2,
+                    z)))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>Rejects roofs and constructed floors while accepting exposed natural terrain.</summary>
+    /// <param name="block">Solid support block below one staged plant.</param>
+    /// <returns>Whether the material is a natural outdoor receiver.</returns>
+    internal static bool IsVegetationReceiverGround(Block? block) => block?.BlockMaterial is
+        EnumBlockMaterial.Soil
+        or EnumBlockMaterial.Gravel
+        or EnumBlockMaterial.Sand
+        or EnumBlockMaterial.Stone;
+
+    /// <summary>
+    /// Accepts empty cells and non-collidable ground plants that the isolated server witness may
+    /// replace. Leaves and every other material remain real scene geometry and are never cleared.
+    /// </summary>
+    /// <param name="block">Solid-layer content above a candidate receiver.</param>
+    /// <returns>Whether the disposable scenario may replace this cell with one authored plant.</returns>
+    internal static bool IsReplaceableVegetationCell(Block? block) => block is null
+        || block.Id == 0
+        || block.BlockMaterial == EnumBlockMaterial.Air
+        || (block.BlockMaterial == EnumBlockMaterial.Plant
+            && block.CollisionBoxes is not { Length: > 0 });
+
+    /// <summary>
     /// Finds an open receiver down-sun from the current roof and locks a camera
     /// that shows the complete long-distance roof shadow. Rain validation also
     /// requires a nearby exposed/sheltered pair before accepting the position.
@@ -1675,16 +2737,46 @@ internal sealed class RuntimeScenarioProbe : IRenderer
     /// <returns><see langword="true"/> when a loaded, unobstructed receiver was found and the teleport was issued.</returns>
     private bool TryApplyExteriorRoofCamera()
     {
-        Vec3d origin = api.World.Player.Entity.CameraPos.Clone();
+        Vec3d playerOrigin = api.World.Player.Entity.CameraPos.Clone();
         BlockPos sample = api.World.Player.Entity.Pos.AsBlockPos.Copy();
         IBlockAccessor accessor = api.World.BlockAccessor;
-        int originX = (int)Math.Floor(origin.X);
-        int originY = (int)Math.Floor(origin.Y);
-        int originZ = (int)Math.Floor(origin.Z);
-        sample.Set(originX, 0, originZ);
-        int originRoofY = Math.Max(originY + 2, accessor.GetRainMapHeightAt(sample));
-        IClientGameCalendar? calendar = api.World.Calendar as IClientGameCalendar;
-        Vec3f sunDirection = calendar?.SunPositionNormalized ?? new Vec3f(0.0f, 1.0f, 0.0f);
+        EntityPos? defaultSpawn = api.World.DefaultSpawnPosition;
+        int searchCenterX = defaultSpawn is null
+            ? (int)Math.Floor(playerOrigin.X)
+            : (int)Math.Floor(defaultSpawn.X);
+        int searchCenterZ = defaultSpawn is null
+            ? (int)Math.Floor(playerOrigin.Z)
+            : (int)Math.Floor(defaultSpawn.Z);
+        if (!TryFindExteriorRoofAnchor(
+                accessor,
+                sample,
+                searchCenterX,
+                searchCenterZ,
+                out int originX,
+                out int originRoofY,
+                out int originZ,
+                out Block roofBlock))
+        {
+            api.Logger.Error(
+                "[VintageRTX.Test] Exterior roof camera rejected: no physical roof anchor was found within 384 blocks of world spawn ({0},{1}).",
+                searchCenterX,
+                searchCenterZ);
+            return false;
+        }
+
+        int originY = originRoofY - 2;
+        Vec3d origin = new(originX + 0.5, originY, originZ + 0.5);
+        Vec3f sunDirection = VoxelScene.ResolveSunDirection(
+            api.World.Calendar,
+            origin);
+        api.Logger.Notification(
+            "[VintageRTX.Test] Exterior physical roof anchor selected: {0} at ({1},{2},{3}), spawn search center=({4},{5}).",
+            roofBlock.Code?.ToString() ?? $"block-{roofBlock.Id}",
+            originX,
+            originRoofY,
+            originZ,
+            searchCenterX,
+            searchCenterZ);
         if (sunDirection.Y <= 0.05f)
         {
             api.Logger.Error(
@@ -1705,8 +2797,9 @@ internal sealed class RuntimeScenarioProbe : IRenderer
         int bestX = 0;
         int bestY = 0;
         int bestZ = 0;
+        bool bestRepresentativeReceiver = false;
         double bestScore = double.MaxValue;
-        for (int radius = 14; radius <= 30; radius++)
+        for (int radius = 10; radius <= 48; radius++)
         {
             for (int direction = 0; direction < 72; direction++)
             {
@@ -1715,7 +2808,7 @@ internal sealed class RuntimeScenarioProbe : IRenderer
                 int z = originZ + (int)Math.Round(Math.Sin(angle) * radius);
                 sample.Set(x, 0, z);
                 int surfaceY = accessor.GetRainMapHeightAt(sample);
-                if (surfaceY < originY - 14 || surfaceY > originY - 2)
+                if (surfaceY < originRoofY - 20 || surfaceY > originRoofY - 2)
                 {
                     continue;
                 }
@@ -1738,6 +2831,13 @@ internal sealed class RuntimeScenarioProbe : IRenderer
                     continue;
                 }
 
+                bool representativeReceiver = HasRepresentativeExteriorReceiverPatch(
+                    accessor,
+                    sample,
+                    x,
+                    surfaceY,
+                    z);
+
                 double offsetLength = Math.Sqrt(
                     (x - originX) * (double)(x - originX)
                     + (z - originZ) * (double)(z - originZ));
@@ -1746,6 +2846,7 @@ internal sealed class RuntimeScenarioProbe : IRenderer
                     : 0.0;
                 double score = Math.Abs(radius - 24) * 1.5
                     + Math.Abs(surfaceY - (originY - 3)) * 1.75
+                    + (representativeReceiver ? 0.0 : 18.0)
                     + (1.0 - alignment) * 42.0;
                 if (score >= bestScore)
                 {
@@ -1756,6 +2857,7 @@ internal sealed class RuntimeScenarioProbe : IRenderer
                 bestX = x;
                 bestY = surfaceY + 1;
                 bestZ = z;
+                bestRepresentativeReceiver = representativeReceiver;
             }
         }
 
@@ -1801,17 +2903,39 @@ internal sealed class RuntimeScenarioProbe : IRenderer
         }
 
         double destinationX = bestX + 0.5;
-        double destinationY = bestY + 0.05;
+        // A real outdoor receiver commonly carries grass, flowers or shrubs.
+        // Keep those blocks in the scene (their shadows are part of the test),
+        // but put the creative-mode camera above their local canopy so the
+        // first-person view never starts inside an alpha-cutout plane.
+        double destinationY = bestY + 3.05;
         double destinationZ = bestZ + 0.5;
         double receiverDistance = Math.Sqrt(
             (origin.X - destinationX) * (origin.X - destinationX)
             + (origin.Z - destinationZ) * (origin.Z - destinationZ));
-        // Aim at the receiving ground between the camera and the building. The
-        // roof and its distance are known from the public height map; the image
-        // is dedicated to proving that its shadow still reaches this receiver.
-        double targetX = destinationX + (origin.X - destinationX) * 0.48;
-        double targetY = destinationY - 2.45;
-        double targetZ = destinationZ + (origin.Z - destinationZ) * 0.48;
+        // Aim at the physical intersection of a ray leaving the roof along the
+        // opposite solar direction. A fixed midpoint is not a shadow witness:
+        // at a high solar elevation it lies well beyond the geometrically
+        // possible roof shadow and makes a correct trace look artificially
+        // short. The ray must first leave every sloped roof cell; treating the
+        // roof height itself as ground collapses the result back onto the caster.
+        if (!TryFindProjectedSunShadowTarget(
+                accessor,
+                sample,
+                origin,
+                originRoofY + 1.0,
+                shadowX,
+                shadowZ,
+                sunDirection,
+                Math.Max(1.5, receiverDistance - 2.0),
+                out double targetX,
+                out double targetY,
+                out double targetZ,
+                out double physicalShadowDistance))
+        {
+            api.Logger.Error(
+                "[VintageRTX.Test] Exterior roof camera rejected: the solar ray did not reach exposed ground before the selected camera.");
+            return false;
+        }
         double dx = targetX - destinationX;
         double dy = targetY - (destinationY + 1.62);
         double dz = targetZ - destinationZ;
@@ -1833,7 +2957,8 @@ internal sealed class RuntimeScenarioProbe : IRenderer
             + $"={destinationZ.ToString("0.00", CultureInfo.InvariantCulture)}",
             null!);
         api.Logger.Notification(
-            "[VintageRTX.Test] Exterior roof camera applied: from ({0:0.00},{1:0.00},{2:0.00}) to ({3:0.00},{4:0.00},{5:0.00}), target receiver=({6:0.00},{7:0.00},{8:0.00}), roof y={9}, receiver distance={10:0.0}, pitch={11:0.000}, sun=({12:0.000},{13:0.000},{14:0.000}), sun range=64.",
+            "[VintageRTX.Test] Exterior roof camera applied: roof={0} at ({1:0.00},{2:0.00},{3:0.00}), camera=({4:0.00},{5:0.00},{6:0.00}), physical shadow target=({7:0.00},{8:0.00},{9:0.00}), receiver distance={10:0.0}, projected shadow distance={11:0.0}, pitch={12:0.000}, sun=({13:0.000},{14:0.000},{15:0.000}), representative receiver={16}, sun range=64.",
+            roofBlock.Code?.ToString() ?? $"block-{roofBlock.Id}",
             origin.X,
             origin.Y,
             origin.Z,
@@ -1843,12 +2968,13 @@ internal sealed class RuntimeScenarioProbe : IRenderer
             targetX,
             targetY,
             targetZ,
-            originRoofY,
             receiverDistance,
+            physicalShadowDistance,
             exteriorPitch,
             sunDirection.X,
             sunDirection.Y,
-            sunDirection.Z);
+            sunDirection.Z,
+            bestRepresentativeReceiver);
         return true;
     }
 
@@ -2494,12 +3620,17 @@ internal sealed class RuntimeScenarioProbe : IRenderer
 
         // EntityPos uses periodic angles, while IClientPlayer.CameraPitch uses
         // the signed camera angle exposed by the public client API.
-        float solvedEntityPitch = exteriorPitch;
-        exteriorEntityPitch = solvedEntityPitch;
+        float solvedViewPitch = exteriorPitch;
+        exteriorEntityPitch = solvedViewPitch;
         useDirectPublicCameraAngles = useDirectCameraAngles;
         if (useDirectCameraAngles)
         {
-            exteriorPitch = NormalizeSignedAngle(solvedEntityPitch);
+            exteriorPitch = NormalizeSignedAngle(solvedViewPitch);
+            MapDirectCameraToEntityAngles(
+                exteriorYaw,
+                exteriorPitch,
+                out _,
+                out exteriorEntityPitch);
         }
 
         api.Logger.Notification(
@@ -2515,7 +3646,7 @@ internal sealed class RuntimeScenarioProbe : IRenderer
             bestView.Z);
         api.Logger.Notification(
             "[VintageRTX.Test] Camera pitch mapping: entity={0:0.000}, input={1:0.000}, vertical={2:0.000}.",
-            solvedEntityPitch,
+            exteriorEntityPitch,
             exteriorPitch,
             verticalAngle);
         if (useDirectCameraAngles)
@@ -2718,6 +3849,26 @@ internal sealed class RuntimeScenarioProbe : IRenderer
     }
 
     /// <summary>
+    /// Maps signed public first-person camera angles to Vintage Story's equivalent entity-pose
+    /// representation. The renderer anchors first-person arms around <c>Pitch - pi</c>; using the
+    /// camera's zero-centred pitch directly rotates the body by roughly 180 degrees even though the
+    /// world camera still faces the correct target.
+    /// </summary>
+    /// <param name="cameraYaw">Public camera yaw in radians.</param>
+    /// <param name="cameraPitch">Signed public camera pitch in radians.</param>
+    /// <param name="entityYaw">Equivalent body/entity yaw, shifted by pi.</param>
+    /// <param name="entityPitch">Equivalent entity pitch centred on pi for a level view.</param>
+    internal static void MapDirectCameraToEntityAngles(
+        float cameraYaw,
+        float cameraPitch,
+        out float entityYaw,
+        out float entityPitch)
+    {
+        entityYaw = NormalizeSignedAngle(cameraYaw + GameMath.PI);
+        entityPitch = GameMath.PI - cameraPitch;
+    }
+
+    /// <summary>
     /// Locates a visible liquid surface within two blocks above through three
     /// blocks below the rain-map height. A fluid hidden by solid-layer ice,
     /// snow or another block is rejected because it cannot validate reflections.
@@ -2869,11 +4020,9 @@ internal sealed class RuntimeScenarioProbe : IRenderer
                 double directionZ = waterZ - z;
                 double directionLength = Math.Sqrt(
                     directionX * directionX + directionZ * directionZ);
-                if (directionLength < 0.5)
-                {
-                    continue;
-                }
-
+                // Radius starts at two blocks, so the rounded bank offset cannot be zero.
+                // Keeping an unreachable near-zero guard here only hides the actual search paths
+                // from coverage and would silently mask a future radius-contract regression.
                 directionX /= directionLength;
                 directionZ /= directionLength;
                 int minimumLookDistance = (int)Math.Ceiling(directionLength) + 8;
@@ -3082,6 +4231,332 @@ internal sealed class RuntimeScenarioProbe : IRenderer
     }
 
     /// <summary>
+    /// Projects a roof point onto a horizontal receiver using the normalized
+    /// real-world solar direction. The horizontal displacement follows similar
+    /// triangles: vertical drop multiplied by horizontal solar magnitude and
+    /// divided by its positive vertical component.
+    /// </summary>
+    /// <param name="casterY">World height of the top of the shadow caster.</param>
+    /// <param name="receiverY">World height of the receiving surface.</param>
+    /// <param name="sunDirection">Normalized direction from receiver toward the sun.</param>
+    /// <returns>Non-negative horizontal shadow distance in blocks.</returns>
+    internal static double CalculateProjectedSunShadowDistance(
+        double casterY,
+        double receiverY,
+        Vec3f sunDirection)
+    {
+        double verticalDrop = casterY - receiverY;
+        double horizontalMagnitude = Math.Sqrt(
+            sunDirection.X * (double)sunDirection.X
+            + sunDirection.Z * (double)sunDirection.Z);
+        if (!double.IsFinite(verticalDrop)
+            || verticalDrop <= 0.0
+            || !double.IsFinite(horizontalMagnitude)
+            || horizontalMagnitude <= 0.000001
+            || !float.IsFinite(sunDirection.Y)
+            || sunDirection.Y <= 0.000001f)
+        {
+            return 0.0;
+        }
+
+        return verticalDrop * horizontalMagnitude / sunDirection.Y;
+    }
+
+    /// <summary>
+    /// Searches the down-sun height profile for exposed ground whose horizontal
+    /// position agrees with the similar-triangle shadow projection. Roof and
+    /// ridge cells are explicitly skipped until the ray has left the caster.
+    /// </summary>
+    /// <param name="accessor">Loaded-world height-map accessor.</param>
+    /// <param name="sample">Reusable mutable coordinate.</param>
+    /// <param name="casterOrigin">Horizontal center of the selected roof anchor.</param>
+    /// <param name="casterTopY">World height of the casting roof point.</param>
+    /// <param name="shadowX">Normalized down-sun X direction.</param>
+    /// <param name="shadowZ">Normalized down-sun Z direction.</param>
+    /// <param name="sunDirection">Normalized direction from receiver toward the sun.</param>
+    /// <param name="maximumDistance">Farthest ground distance still visible before the camera.</param>
+    /// <param name="targetX">Receives the selected world X coordinate.</param>
+    /// <param name="targetY">Receives a point eight centimetres above the ground top.</param>
+    /// <param name="targetZ">Receives the selected world Z coordinate.</param>
+    /// <param name="shadowDistance">Receives the horizontal distance from roof anchor to target.</param>
+    /// <returns><see langword="true"/> when a below-roof receiver was found.</returns>
+    internal static bool TryFindProjectedSunShadowTarget(
+        IBlockAccessor accessor,
+        BlockPos sample,
+        Vec3d casterOrigin,
+        double casterTopY,
+        double shadowX,
+        double shadowZ,
+        Vec3f sunDirection,
+        double maximumDistance,
+        out double targetX,
+        out double targetY,
+        out double targetZ,
+        out double shadowDistance)
+    {
+        double bestScore = double.MaxValue;
+        double bestGroundTopY = 0.0;
+        shadowDistance = 0.0;
+        for (double distance = 1.5; distance <= maximumDistance; distance += 0.5)
+        {
+            double x = casterOrigin.X + shadowX * distance;
+            double z = casterOrigin.Z + shadowZ * distance;
+            int blockX = (int)Math.Floor(x);
+            int blockZ = (int)Math.Floor(z);
+            sample.Set(blockX, 0, blockZ);
+            double groundTopY = accessor.GetRainMapHeightAt(sample) + 1.0;
+            if (groundTopY >= casterTopY - 1.0)
+            {
+                continue;
+            }
+
+            double expectedDistance = CalculateProjectedSunShadowDistance(
+                casterTopY,
+                groundTopY,
+                sunDirection);
+            if (expectedDistance <= 0.0)
+            {
+                continue;
+            }
+
+            double score = Math.Abs(distance - expectedDistance);
+            if (score >= bestScore)
+            {
+                continue;
+            }
+
+            bestScore = score;
+            shadowDistance = distance;
+            bestGroundTopY = groundTopY;
+        }
+
+        if (bestScore == double.MaxValue)
+        {
+            targetX = 0.0;
+            targetY = 0.0;
+            targetZ = 0.0;
+            return false;
+        }
+
+        targetX = casterOrigin.X + shadowX * shadowDistance;
+        targetY = bestGroundTopY + 0.08;
+        targetZ = casterOrigin.Z + shadowZ * shadowDistance;
+        return true;
+    }
+
+    /// <summary>
+    /// Locates a genuine elevated roof around the deterministic world spawn.
+    /// A candidate must have a coherent 3x3 solid top and open volume directly
+    /// below it, which rejects ordinary hills as well as leaf canopies.
+    /// </summary>
+    /// <param name="accessor">Loaded-world block accessor.</param>
+    /// <param name="sample">Reusable mutable block coordinate.</param>
+    /// <param name="centerX">Deterministic search center X.</param>
+    /// <param name="centerZ">Deterministic search center Z.</param>
+    /// <param name="roofX">Receives the selected roof X coordinate.</param>
+    /// <param name="roofY">Receives the selected top-surface Y coordinate.</param>
+    /// <param name="roofZ">Receives the selected roof Z coordinate.</param>
+    /// <param name="roofBlock">Receives the solid roof material.</param>
+    /// <returns><see langword="true"/> when a physical roof footprint is found.</returns>
+    internal static bool TryFindExteriorRoofAnchor(
+        IBlockAccessor accessor,
+        BlockPos sample,
+        int centerX,
+        int centerZ,
+        out int roofX,
+        out int roofY,
+        out int roofZ,
+        out Block roofBlock)
+    {
+        for (int radius = 0; radius <= 384; radius += 2)
+        {
+            int directionCount = radius == 0 ? 1 : Math.Max(32, radius * 2);
+            for (int direction = 0; direction < directionCount; direction++)
+            {
+                double angle = direction * Math.PI * 2.0 / directionCount;
+                int x = centerX + (int)Math.Round(Math.Cos(angle) * radius);
+                int z = centerZ + (int)Math.Round(Math.Sin(angle) * radius);
+                if (!TryResolveExteriorRoofSurface(
+                        accessor,
+                        sample,
+                        x,
+                        z,
+                        out int y,
+                        out Block candidate)
+                    || (!IsOpenForCamera(GetBlock(accessor, sample, x, y - 1, z))
+                        && !IsOpenForCamera(GetBlock(accessor, sample, x, y - 2, z))))
+                {
+                    continue;
+                }
+
+                int coherentTopCells = 0;
+                for (int offsetZ = -1; offsetZ <= 1; offsetZ++)
+                {
+                    for (int offsetX = -1; offsetX <= 1; offsetX++)
+                    {
+                        int adjacentX = x + offsetX;
+                        int adjacentZ = z + offsetZ;
+                        coherentTopCells += TryResolveExteriorRoofSurface(
+                                accessor,
+                                sample,
+                                adjacentX,
+                                adjacentZ,
+                                out int adjacentY,
+                                out _)
+                            && Math.Abs(adjacentY - y) <= 1
+                                ? 1
+                                : 0;
+                    }
+                }
+
+                if (coherentTopCells < 6)
+                {
+                    continue;
+                }
+
+                roofX = x;
+                roofY = y;
+                roofZ = z;
+                roofBlock = candidate;
+                return true;
+            }
+        }
+
+        roofX = 0;
+        roofY = 0;
+        roofZ = 0;
+        roofBlock = null!;
+        return false;
+    }
+
+    /// <summary>
+    /// Resolves the solid construction surface beneath an optional thin snow
+    /// cover. Ordinary snow-covered ground is rejected later because it has no
+    /// open underside; an actual snow-covered roof retains that cavity.
+    /// </summary>
+    /// <param name="accessor">Loaded-world block accessor.</param>
+    /// <param name="sample">Reusable mutable block coordinate.</param>
+    /// <param name="x">World X coordinate.</param>
+    /// <param name="z">World Z coordinate.</param>
+    /// <param name="surfaceY">Receives the construction surface Y.</param>
+    /// <param name="surfaceBlock">Receives the construction block.</param>
+    /// <returns><see langword="true"/> when an eligible surface exists within two cells below the rain map.</returns>
+    internal static bool TryResolveExteriorRoofSurface(
+        IBlockAccessor accessor,
+        BlockPos sample,
+        int x,
+        int z,
+        out int surfaceY,
+        out Block surfaceBlock)
+    {
+        sample.Set(x, 0, z);
+        int rainY = accessor.GetRainMapHeightAt(sample);
+        for (int depth = 0; depth <= 2; depth++)
+        {
+            int y = rainY - depth;
+            Block candidate = GetBlock(accessor, sample, x, y, z);
+            if (IsExteriorRoofMaterial(candidate))
+            {
+                surfaceY = y;
+                surfaceBlock = candidate;
+                return true;
+            }
+
+            if (candidate is not null
+                && candidate.Id != 0
+                && candidate.BlockMaterial != EnumBlockMaterial.Air
+                && !(depth == 0
+                    && (candidate.Code?.Path?.Contains(
+                        "snow",
+                        StringComparison.OrdinalIgnoreCase) ?? false)))
+            {
+                break;
+            }
+        }
+
+        surfaceY = 0;
+        surfaceBlock = null!;
+        return false;
+    }
+
+    /// <summary>Rejects liquids, foliage and transparent blocks as roof anchors.</summary>
+    /// <param name="block">Candidate rain-map surface block.</param>
+    /// <returns>Whether the block is a solid opaque construction candidate.</returns>
+    internal static bool IsExteriorRoofMaterial(Block? block)
+    {
+        if (block is null
+            || !IsCaveSolid(block)
+            || block.BlockMaterial is EnumBlockMaterial.Water
+                or EnumBlockMaterial.Glass
+                or EnumBlockMaterial.Ice)
+        {
+            return false;
+        }
+
+        string path = block.Code?.Path ?? string.Empty;
+        return !path.Contains("leaves", StringComparison.OrdinalIgnoreCase)
+            && !path.Contains("foliage", StringComparison.OrdinalIgnoreCase)
+            && !path.Contains("branch", StringComparison.OrdinalIgnoreCase)
+            && !path.Contains("snow", StringComparison.OrdinalIgnoreCase)
+            && (path.Contains("roof", StringComparison.OrdinalIgnoreCase)
+                || path.Contains("shingle", StringComparison.OrdinalIgnoreCase)
+                || path.Contains("thatch", StringComparison.OrdinalIgnoreCase)
+                || path.Contains("tile", StringComparison.OrdinalIgnoreCase)
+                || path.Contains("ridge", StringComparison.OrdinalIgnoreCase)
+                || block.BlockMaterial is EnumBlockMaterial.Wood
+                    or EnumBlockMaterial.Brick
+                    or EnumBlockMaterial.Metal);
+    }
+
+    /// <summary>
+    /// Requires the exterior camera receiver to sit on a coherent patch of
+    /// opaque terrain rather than a leaf canopy. Decorative plants above the
+    /// support remain valid real-scene geometry; the caller elevates the camera
+    /// above them instead of deleting or ignoring their shadows.
+    /// </summary>
+    /// <param name="accessor">Block accessor for the solid terrain layer.</param>
+    /// <param name="sample">Reusable mutable coordinate for the nine columns.</param>
+    /// <param name="centerX">Center X coordinate of the receiver.</param>
+    /// <param name="centerSurfaceY">Reference ground Y coordinate.</param>
+    /// <param name="centerZ">Center Z coordinate of the receiver.</param>
+    /// <returns><see langword="true"/> when all supports are representative opaque terrain.</returns>
+    internal static bool HasRepresentativeExteriorReceiverPatch(
+        IBlockAccessor accessor,
+        BlockPos sample,
+        int centerX,
+        int centerSurfaceY,
+        int centerZ)
+    {
+        for (int offsetZ = -1; offsetZ <= 1; offsetZ++)
+        {
+            for (int offsetX = -1; offsetX <= 1; offsetX++)
+            {
+                int x = centerX + offsetX;
+                int z = centerZ + offsetZ;
+                sample.Set(x, 0, z);
+                int surfaceY = accessor.GetRainMapHeightAt(sample);
+                Block support = GetBlock(accessor, sample, x, surfaceY, z);
+                bool representativeSupport = support?.BlockMaterial is
+                    EnumBlockMaterial.Soil
+                    or EnumBlockMaterial.Gravel
+                    or EnumBlockMaterial.Sand
+                    or EnumBlockMaterial.Stone
+                    or EnumBlockMaterial.Brick
+                    or EnumBlockMaterial.Wood
+                    or EnumBlockMaterial.Metal;
+                if (Math.Abs(surfaceY - centerSurfaceY) > 1
+                    || !representativeSupport
+                    || !IsCaveSolid(support))
+                {
+                    return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
     /// Determines whether the camera may occupy a block cell. Non-collidable
     /// rendered planes are passable even when they are visually non-empty.
     /// </summary>
@@ -3109,22 +4584,31 @@ internal sealed class RuntimeScenarioProbe : IRenderer
     }
 
     /// <summary>
-    /// Issues public time and weather commands for the requested baseline. Night
-    /// geometry scenarios first select the local hemisphere's winter month so
-    /// polar summer cannot turn nominal midnight into daylight.
+    /// Issues public time and weather commands for the requested baseline. The
+    /// local season is selected as well as the clock: night geometry uses winter,
+    /// while daylight scenarios use summer so polar latitude cannot contradict
+    /// the intended solar condition.
     /// </summary>
     private void ApplyDeterministicEnvironment()
     {
-        if ((scenario is "lantern-night" or "nonstandard-geometry")
-            && api.World.Player?.Entity is not null)
+        bool requireNight = scenario is "lantern-night" or "nonstandard-geometry";
+        bool requireDay = !requireNight
+            && requestedWorldHour is >= 6.0f and <= 18.0f;
+        if ((requireNight || requireDay) && api.World.Player?.Entity is not null)
         {
             EnumHemisphere hemisphere = api.World.Calendar.GetHemisphere(
                 api.World.Player.Entity.Pos.AsBlockPos);
-            // Midnight can remain twilight near a pole during local summer.
-            // Select the coldest month for the measured hemisphere before
-            // fixing the clock, on the disposable test-world copy only.
-            string winterMonth = hemisphere == EnumHemisphere.South ? "jul" : "jan";
-            api.SendChatMessage($"/time setmonth {winterMonth}", null!);
+            // Select the season before fixing the clock on the disposable
+            // test-world copy. This prevents both midnight polar daylight and
+            // a nominal daytime capture whose sun remains below the horizon.
+            string month = (hemisphere, requireNight) switch
+            {
+                (EnumHemisphere.South, true) => "jul",
+                (EnumHemisphere.South, false) => "jan",
+                (_, true) => "jan",
+                _ => "jul"
+            };
+            api.SendChatMessage($"/time setmonth {month}", null!);
         }
 
         if (requestedWorldHour.HasValue)
@@ -3160,8 +4644,16 @@ internal sealed class RuntimeScenarioProbe : IRenderer
     {
         environmentVerificationAttempts++;
 
+        // The server time packet updates the shared calendar immediately, but
+        // Vintage Story 1.22.7 keeps the client-only celestial colours and
+        // normalized sun vector in ClientGameCalendar.Update(). A stopped clock
+        // can leave that cache on the previous night indefinitely, producing a
+        // starry framebuffer while GetSunPosition correctly reports daylight.
+        bool clientCalendarRefreshed = TryRefreshClientCalendar(api.World.Calendar);
         float actualHour = api.World.Calendar.HourOfDay;
         float speedOfTime = api.World.Calendar.SpeedOfTime;
+        float calendarSpeedMultiplier = api.World.Calendar.CalendarSpeedMul;
+        float calendarProgressionRate = speedOfTime * calendarSpeedMultiplier;
         BlockPos playerPosition = api.World.Player.Entity.Pos.AsBlockPos;
         ClimateCondition climate = api.World.BlockAccessor.GetClimateAt(
             playerPosition,
@@ -3172,28 +4664,57 @@ internal sealed class RuntimeScenarioProbe : IRenderer
             playerPosition.X,
             playerPosition.Z);
         float clientDaylightStrength = api.World.Calendar.DayLightStrength;
+        float directSunLightStrength = api.World.Calendar.SunLightStrength;
+        float moonLightStrength = api.World.Calendar.MoonLightStrength;
+        float cachedSunVertical = (api.World.Calendar as IClientGameCalendar)?
+            .SunPositionNormalized.Y ?? float.NaN;
+        Vec3f sunPosition = VoxelScene.ResolveSunDirection(
+            api.World.Calendar,
+            api.World.Player.Entity.CameraPos);
+        float sunVertical = sunPosition.Y;
         bool requireNight = scenario is "lantern-night" or "nonstandard-geometry";
+        bool requireDay = !requireNight
+            && requestedWorldHour is >= 6.0f and <= 18.0f;
 
-        environmentVerified = IsEnvironmentVerified(
+        bool cachedSolarConditionMatches = (!requireNight
+                || (!float.IsFinite(cachedSunVertical) || cachedSunVertical <= 0.0f))
+            && (!requireDay
+                || (!float.IsFinite(cachedSunVertical) || cachedSunVertical >= 0.05f))
+            && HasConvergedClientSolarLighting(
+                requireNight,
+                requireDay,
+                daylightStrength,
+                clientDaylightStrength,
+                directSunLightStrength,
+                moonLightStrength);
+        environmentVerified = cachedSolarConditionMatches && IsEnvironmentVerified(
             requestedWorldHour,
             clearWeather,
             actualHour,
-            speedOfTime,
+            calendarProgressionRate,
             precipitation,
             rainCloudOverlay,
             requireNight,
-            daylightStrength,
-            requestedPrecipitation);
+            sunVertical,
+            requestedPrecipitation,
+            requireDay);
 
         if (environmentVerified)
         {
             api.Logger.Notification(
-                "[VintageRTX.Test] Deterministic environment verified: PASS | requested hour={0}, actual hour={1:0.000}, daylight={2:0.000}, client-daylight={3:0.000}, speed={4:0.000}, precipitation={5:0.000}, rain-cloud overlay={6:0.000}, attempts={7}.",
+                "[VintageRTX.Test] Deterministic environment verified: PASS | requested hour={0}, actual hour={1:0.000}, daylight={2:0.000}, client-daylight={3:0.000}, direct-sun={4:0.000}, moon={5:0.000}, sun-y={6:0.000}, cached-sun-y={7:0.000}, client refresh={8}, physics-speed={9:0.000}, calendar-mul={10:0.000}, calendar-rate={11:0.000}, precipitation={12:0.000}, rain-cloud overlay={13:0.000}, attempts={14}.",
                 requestedWorldHour?.ToString("0.###", CultureInfo.InvariantCulture) ?? "unchanged",
                 actualHour,
                 daylightStrength,
                 clientDaylightStrength,
+                directSunLightStrength,
+                moonLightStrength,
+                sunVertical,
+                cachedSunVertical,
+                clientCalendarRefreshed,
                 speedOfTime,
+                calendarSpeedMultiplier,
+                calendarProgressionRate,
                 precipitation,
                 rainCloudOverlay,
                 environmentVerificationAttempts);
@@ -3201,19 +4722,29 @@ internal sealed class RuntimeScenarioProbe : IRenderer
         }
 
         api.Logger.Warning(
-            "[VintageRTX.Test] Deterministic environment verification pending ({0}/20) | requested hour={1}, actual hour={2:0.000}, daylight={3:0.000}, client-daylight={4:0.000}, speed={5:0.000}, precipitation={6:0.000}, rain-cloud overlay={7:0.000}.",
+            "[VintageRTX.Test] Deterministic environment verification pending ({0}/20) | requested hour={1}, actual hour={2:0.000}, daylight={3:0.000}, client-daylight={4:0.000}, direct-sun={5:0.000}, moon={6:0.000}, sun-y={7:0.000}, cached-sun-y={8:0.000}, client refresh={9}, physics-speed={10:0.000}, calendar-mul={11:0.000}, calendar-rate={12:0.000}, precipitation={13:0.000}, rain-cloud overlay={14:0.000}.",
             environmentVerificationAttempts,
             requestedWorldHour?.ToString("0.###", CultureInfo.InvariantCulture) ?? "unchanged",
             actualHour,
             daylightStrength,
             clientDaylightStrength,
+            directSunLightStrength,
+            moonLightStrength,
+            sunVertical,
+            cachedSunVertical,
+            clientCalendarRefreshed,
             speedOfTime,
+            calendarSpeedMultiplier,
+            calendarProgressionRate,
             precipitation,
             rainCloudOverlay);
 
-        bool clockAlreadyLocked = !requestedWorldHour.HasValue
-            || (CircularHourDistance(requestedWorldHour.Value, actualHour) <= 0.1f
-                && Math.Abs(speedOfTime) <= 0.001f);
+        bool hourMatches = !requestedWorldHour.HasValue
+            || CircularHourDistance(requestedWorldHour.Value, actualHour) <= 0.1f;
+        // The official API exposes the base/summed SpeedOfTime separately from
+        // CalendarSpeedMul. Vintage Story 1.22.7 may stop through either factor,
+        // so their product is the authoritative effective calendar rate.
+        bool clockStopped = Math.Abs(calendarProgressionRate) <= 0.001f;
         bool weatherAlreadyLocked = !clearWeather
             || (float.IsFinite(precipitation)
                 && float.IsFinite(rainCloudOverlay)
@@ -3221,13 +4752,41 @@ internal sealed class RuntimeScenarioProbe : IRenderer
                 && rainCloudOverlay <= 0.01f);
         if (environmentVerificationAttempts < 20)
         {
-            // A fresh world's daylight scalar interpolates after the calendar
-            // packet. Reissuing setmonth every verification resets that
-            // interpolation (and advances the year), leaving midnight as
-            // permanent daylight even though the hour is already correct.
-            if (!clockAlreadyLocked || !weatherAlreadyLocked)
+            // ClientGameCalendar.Update above refreshes the cached sky without
+            // advancing world time. Never resume here: on 1.22.7 that command
+            // can arrive after the original stop and leave later captures on a
+            // running clock. Re-issue only the unmet target and terminal stop.
+            if (requestedWorldHour.HasValue)
             {
-                ApplyDeterministicEnvironment();
+                string requestedHourText = requestedWorldHour.Value.ToString(
+                    "0.###",
+                    CultureInfo.InvariantCulture);
+                if (!hourMatches)
+                {
+                    api.SendChatMessage($"/time set {requestedHourText}", null!);
+                }
+                if (!clockStopped)
+                {
+                    api.SendChatMessage("/time stop", null!);
+                }
+            }
+
+            if (!weatherAlreadyLocked)
+            {
+                if (clearWeather)
+                {
+                    api.SendChatMessage("/weather setir clearsky", null!);
+                    api.SendChatMessage("/weather setprecip -1", null!);
+                }
+                else if (requestedPrecipitation.HasValue)
+                {
+                    string targetPrecipitation = requestedPrecipitation.Value.ToString(
+                        "0.###",
+                        CultureInfo.InvariantCulture);
+                    api.SendChatMessage(
+                        $"/weather setprecip {targetPrecipitation}",
+                        null!);
+                }
             }
         }
         else
@@ -3238,34 +4797,77 @@ internal sealed class RuntimeScenarioProbe : IRenderer
     }
 
     /// <summary>
+    /// Invokes Vintage Story's public concrete client-calendar refresh without
+    /// taking a compile-time dependency on the implementation assembly. The
+    /// API interface intentionally omits this render-cache operation.
+    /// </summary>
+    /// <param name="calendar">Runtime calendar instance, or a test double.</param>
+    /// <returns><see langword="true"/> when a parameterless update completed successfully.</returns>
+    internal static bool TryRefreshClientCalendar(object? calendar)
+    {
+        if (calendar is null)
+        {
+            return false;
+        }
+
+        System.Reflection.MethodInfo? update = calendar.GetType().GetMethod(
+            "Update",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public,
+            binder: null,
+            types: Type.EmptyTypes,
+            modifiers: null);
+        if (update is null || update.ReturnType != typeof(void))
+        {
+            return false;
+        }
+
+        try
+        {
+            update.Invoke(calendar, null);
+            return true;
+        }
+        catch (System.Reflection.TargetInvocationException)
+        {
+            return false;
+        }
+        catch (System.Reflection.TargetException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
     /// Evaluates deterministic environment tolerances independently from the
     /// game API. Hours use circular distance; a locked clock tolerates 0.1 hour,
-    /// precipitation tolerates 0.12, and required night daylight is at most 0.12.
+    /// precipitation tolerates 0.12, required night places the normalized sun at or below the
+    /// horizon, and required daylight keeps it above the camera-placement threshold.
     /// </summary>
     /// <param name="requestedHour">Optional target hour on the circular 24-hour clock.</param>
     /// <param name="clearWeather">Whether both rainfall and cloud overlay must be nearly zero.</param>
     /// <param name="actualHour">Observed world hour on the circular 24-hour clock.</param>
-    /// <param name="speedOfTime">Observed calendar speed; absolute values at most 0.001 count as stopped.</param>
+    /// <param name="calendarProgressionRate">Observed effective SpeedOfTime times CalendarSpeedMul; absolute values at most 0.001 count as stopped.</param>
     /// <param name="precipitation">Observed normalized rainfall signal.</param>
     /// <param name="rainCloudOverlay">Observed normalized rain-cloud overlay.</param>
     /// <param name="requireNight">Whether the daylight signal must also satisfy the night threshold.</param>
-    /// <param name="daylightStrength">Observed normalized daylight strength.</param>
+    /// <param name="sunVertical">Vertical component of the normalized sun direction; non-positive values place the solar disc below the horizon.</param>
     /// <param name="requestedPrecipitation">Optional normalized target precipitation, superseding the clear-weather predicate.</param>
+    /// <param name="requireDay">Whether the normalized sun must be at least 0.05 above the horizon.</param>
     /// <returns><see langword="true"/> when every requested finite signal is within its tolerance.</returns>
     internal static bool IsEnvironmentVerified(
         float? requestedHour,
         bool clearWeather,
         float actualHour,
-        float speedOfTime,
+        float calendarProgressionRate,
         float precipitation,
         float rainCloudOverlay,
         bool requireNight = false,
-        float daylightStrength = 0.0f,
-        float? requestedPrecipitation = null)
+        float sunVertical = -1.0f,
+        float? requestedPrecipitation = null,
+        bool requireDay = false)
     {
         bool timeMatches = !requestedHour.HasValue
             || (CircularHourDistance(requestedHour.Value, actualHour) <= 0.1f
-                && Math.Abs(speedOfTime) <= 0.001f);
+                && Math.Abs(calendarProgressionRate) <= 0.001f);
         bool weatherSignalsFinite = float.IsFinite(precipitation)
             && float.IsFinite(rainCloudOverlay);
         bool weatherMatches = requestedPrecipitation.HasValue
@@ -3275,9 +4877,62 @@ internal sealed class RuntimeScenarioProbe : IRenderer
                 || (weatherSignalsFinite
                     && precipitation <= 0.01f
                     && rainCloudOverlay <= 0.01f);
-        bool lightingMatches = !requireNight
-            || (float.IsFinite(daylightStrength) && daylightStrength <= 0.12f);
+        bool lightingMatches = (!requireNight
+                || (float.IsFinite(sunVertical) && sunVertical <= 0.0f))
+            && (!requireDay
+                || (float.IsFinite(sunVertical) && sunVertical >= 0.05f));
         return timeMatches && weatherMatches && lightingMatches;
+    }
+
+    /// <summary>
+    /// Verifies that the client-only celestial-light cache has converged to the
+    /// coordinate-aware calendar value. Comparing those public values supports
+    /// physically valid low-sun tests; fixed daytime brightness floors wrongly
+    /// reject dawn even though its long shadows are intentional.
+    /// </summary>
+    /// <param name="requireNight">Whether the requested scenario is nocturnal.</param>
+    /// <param name="requireDay">Whether the requested scenario places the sun above the horizon.</param>
+    /// <param name="spatialDaylight">Coordinate-aware daylight returned for the player position.</param>
+    /// <param name="clientDaylight">Cached client daylight used by sky and chunk rendering.</param>
+    /// <param name="directSunlight">Cached direct solar strength used by rendering.</param>
+    /// <param name="moonlight">Cached lunar strength.</param>
+    /// <returns>Whether required cached lighting is finite and agrees with the authoritative calendar.</returns>
+    internal static bool HasConvergedClientSolarLighting(
+        bool requireNight,
+        bool requireDay,
+        float spatialDaylight,
+        float clientDaylight,
+        float directSunlight,
+        float moonlight)
+    {
+        if (!requireNight && !requireDay)
+        {
+            return true;
+        }
+
+        if (!float.IsFinite(directSunlight))
+        {
+            return false;
+        }
+
+        if (requireNight)
+        {
+            // Vintage Story 1.22.7 retains a stable ~0.058 night floor in
+            // SunLightStrength even with the solar vector far below the
+            // horizon. The independent sun-position gate proves nighttime;
+            // this cache gate only rejects stale daylight-scale brightness.
+            return directSunlight <= 0.08f;
+        }
+
+        return float.IsFinite(spatialDaylight)
+            && float.IsFinite(clientDaylight)
+            && float.IsFinite(moonlight)
+            && spatialDaylight >= 0.05f
+            && clientDaylight >= 0.05f
+            && directSunlight >= 0.05f
+            && moonlight <= 0.10f
+            && Math.Abs(clientDaylight - spatialDaylight) <= 0.08f
+            && Math.Abs(directSunlight - spatialDaylight) <= 0.08f;
     }
 
     /// <summary>
@@ -3335,6 +4990,15 @@ internal sealed class RuntimeScenarioProbe : IRenderer
         public Vec3d Pos { get; } = position;
     }
 
+    /// <summary>One expected stock plant and its horizontal offset from the patch center.</summary>
+    /// <param name="OffsetX">Signed X offset in blocks.</param>
+    /// <param name="OffsetZ">Signed Z offset in blocks.</param>
+    /// <param name="Code">Fully qualified stock block code.</param>
+    private readonly record struct VegetationWitness(
+        int OffsetX,
+        int OffsetZ,
+        string Code);
+
     /// <summary>
     /// States of the asynchronous framebuffer resize, shader reload and restore
     /// transaction. Terminal states never initiate further client commands.
@@ -3390,6 +5054,64 @@ internal sealed class RuntimeScenarioProbe : IRenderer
 
         /// <summary>The raw carrier was stored and the long-range lake camera was restored.</summary>
         Complete
+    }
+}
+
+/// <summary>
+/// World-space animated entity volume used to keep deterministic real-map cameras outside large
+/// forward-rendered meshes that are intentionally absent from the terrain G-buffer.
+/// </summary>
+/// <param name="MinimumX">Minimum world X coordinate.</param>
+/// <param name="MinimumY">Minimum world Y coordinate.</param>
+/// <param name="MinimumZ">Minimum world Z coordinate.</param>
+/// <param name="MaximumX">Maximum world X coordinate.</param>
+/// <param name="MaximumY">Maximum world Y coordinate.</param>
+/// <param name="MaximumZ">Maximum world Z coordinate.</param>
+internal readonly record struct LanternCameraEntityBounds(
+    double MinimumX,
+    double MinimumY,
+    double MinimumZ,
+    double MaximumX,
+    double MaximumY,
+    double MaximumZ)
+{
+    /// <summary>
+    /// Converts Vintage Story's entity-relative animated selection box to world coordinates. The
+    /// collision box is included because a behavior may enlarge one volume but not the other; a
+    /// conservative one-block fallback protects partially initialized entities.
+    /// </summary>
+    /// <param name="entity">Live non-player entity whose rendered body must stay out of the near field.</param>
+    /// <returns>Conservative world-space union of its selection and collision boxes.</returns>
+    internal static LanternCameraEntityBounds FromEntity(Entity entity)
+    {
+        Cuboidf? selection = entity.SelectionBox;
+        Cuboidf? collision = entity.CollisionBox;
+        double minimumX = Math.Min(selection?.X1 ?? -0.5f, collision?.X1 ?? -0.5f);
+        double minimumY = Math.Min(selection?.Y1 ?? 0.0f, collision?.Y1 ?? 0.0f);
+        double minimumZ = Math.Min(selection?.Z1 ?? -0.5f, collision?.Z1 ?? -0.5f);
+        double maximumX = Math.Max(selection?.X2 ?? 0.5f, collision?.X2 ?? 0.5f);
+        double maximumY = Math.Max(selection?.Y2 ?? 2.0f, collision?.Y2 ?? 2.0f);
+        double maximumZ = Math.Max(selection?.Z2 ?? 0.5f, collision?.Z2 ?? 0.5f);
+        return new LanternCameraEntityBounds(
+            entity.Pos.X + minimumX,
+            entity.Pos.Y + minimumY,
+            entity.Pos.Z + minimumZ,
+            entity.Pos.X + maximumX,
+            entity.Pos.Y + maximumY,
+            entity.Pos.Z + maximumZ);
+    }
+
+    /// <summary>Computes the squared Euclidean distance from a point to this closed volume.</summary>
+    /// <param name="x">World X coordinate.</param>
+    /// <param name="y">World Y coordinate.</param>
+    /// <param name="z">World Z coordinate.</param>
+    /// <returns>Zero inside the volume; otherwise the sum of squared axis separations.</returns>
+    internal double SquaredDistanceTo(double x, double y, double z)
+    {
+        double deltaX = Math.Max(MinimumX - x, Math.Max(0.0, x - MaximumX));
+        double deltaY = Math.Max(MinimumY - y, Math.Max(0.0, y - MaximumY));
+        double deltaZ = Math.Max(MinimumZ - z, Math.Max(0.0, z - MaximumZ));
+        return deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ;
     }
 }
 

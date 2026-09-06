@@ -13,6 +13,12 @@ namespace VintageRTX.Rendering;
 /// </summary>
 internal sealed class PbrTerrainRenderer : IRenderer
 {
+    /// <summary>
+    /// Consecutive identical rendered revisions required before replacing an already usable PBR
+    /// atlas. This spans two seconds at 60 FPS and prevents progressive asset loading from causing
+    /// a succession of visible material and lighting changes.
+    /// </summary>
+    internal const int AtlasRevisionStabilityFrames = 120;
     /// <summary>Vintage Story asset category searched for generated/authored manifests.</summary>
     private const string ManifestAssetCategory = "config";
     /// <summary>Canonical manifest path inside each asset domain.</summary>
@@ -40,6 +46,10 @@ internal sealed class PbrTerrainRenderer : IRenderer
     private int manifestOverrideCount;
     /// <summary>Reload-sensitive fingerprint of the currently observed terrain atlas layout.</summary>
     private ulong sourceAtlasRevision;
+    /// <summary>Uncommitted terrain-atlas fingerprint currently accumulating stability evidence.</summary>
+    private ulong pendingAtlasRevision;
+    /// <summary>Consecutive rendered frames for which <see cref="pendingAtlasRevision"/> was unchanged.</summary>
+    private int pendingAtlasRevisionFrames;
     /// <summary>Last page-ownership classification, used to log only safety transitions.</summary>
     private PbrAtlasSafetyKind observedAtlasSafety = PbrAtlasSafetyKind.Waiting;
     private Dictionary<AssetLocation, TextureAtlasPosition[]>? sourceAtlasPositions;
@@ -136,6 +146,13 @@ internal sealed class PbrTerrainRenderer : IRenderer
 
         if (loaded && sourceAtlasRevision == atlasSafety.Revision)
         {
+            ResetPendingAtlasRevision();
+            return;
+        }
+
+        if (loaded && !ObserveStableAtlasRevision(atlasSafety.Revision))
+        {
+            status = $"file-backed PBR atlas retained while revision settles ({pendingAtlasRevisionFrames}/{AtlasRevisionStabilityFrames})";
             return;
         }
 
@@ -198,6 +215,39 @@ internal sealed class PbrTerrainRenderer : IRenderer
             sidecarOverrideCount,
             manifestOverrideCount,
             sourceAtlasRevision);
+    }
+
+    /// <summary>
+    /// Debounces a replacement atlas layout while continuing to render the last complete material
+    /// atlas. A changing revision restarts the evidence window; only one stable terminal layout is
+    /// committed after progressive texture loading.
+    /// </summary>
+    /// <param name="observedRevision">Current complete layout fingerprint.</param>
+    /// <returns>Whether the same replacement revision has persisted for the required frame window.</returns>
+    private bool ObserveStableAtlasRevision(ulong observedRevision)
+    {
+        if (pendingAtlasRevision != observedRevision)
+        {
+            pendingAtlasRevision = observedRevision;
+            pendingAtlasRevisionFrames = 1;
+            return false;
+        }
+
+        pendingAtlasRevisionFrames++;
+        if (pendingAtlasRevisionFrames < AtlasRevisionStabilityFrames)
+        {
+            return false;
+        }
+
+        ResetPendingAtlasRevision();
+        return true;
+    }
+
+    /// <summary>Clears uncommitted atlas-revision evidence after reuse, replacement, or disposal.</summary>
+    private void ResetPendingAtlasRevision()
+    {
+        pendingAtlasRevision = 0;
+        pendingAtlasRevisionFrames = 0;
     }
 
     /// <summary>
@@ -387,11 +437,7 @@ internal sealed class PbrTerrainRenderer : IRenderer
         int applied = 0;
         foreach (AssetLocation normalLocation in sidecarAssets.NormalLocations)
         {
-            if (!normalLocation.Path.EndsWith("_n.png", StringComparison.Ordinal))
-            {
-                continue;
-            }
-
+            // NormalLocations is an immutable, suffix-filtered view built by PbrSidecarAssetStore.
             string basePath = normalLocation.Path[..^6];
             AssetLocation sourceLocation = new(normalLocation.Domain, basePath + ".png");
             AssetLocation roughnessLocation = new(normalLocation.Domain, basePath + "_r.png");
@@ -486,7 +532,10 @@ internal sealed class PbrTerrainRenderer : IRenderer
         int checksumRejectCount = 0;
         int identityRejectCount = 0;
         int duplicateRejectCount = 0;
+        int provenanceRejectCount = 0;
         int alphaCutoutSkipCount = 0;
+        int generatedAppliedCount = 0;
+        int authoredAppliedCount = 0;
         HashSet<AssetLocation> claimedSources = [];
         foreach (IAsset manifestAsset in OrderManifestAssets(api.Assets.GetManyInCategory(
             ManifestAssetCategory,
@@ -513,7 +562,7 @@ internal sealed class PbrTerrainRenderer : IRenderer
 
             if (manifest?.Textures is not { Count: > 0 }
                 || !string.Equals(manifest.Schema, "vintagertx.pbr-manifest", StringComparison.Ordinal)
-                || manifest.SchemaVersion is < 1 or > 3)
+                || manifest.SchemaVersion is < 1 or > 4)
             {
                 continue;
             }
@@ -555,6 +604,20 @@ internal sealed class PbrTerrainRenderer : IRenderer
                     entry.Emissive.Asset,
                     entry.Emissive.Sha256,
                     fallbackHashes);
+
+                if (!PbrMaterialProvenanceContract.TryResolve(
+                    manifest.SchemaVersion,
+                    manifest.DefaultProvenance,
+                    entry.Provenance,
+                    out PbrMaterialProvenance materialProvenance))
+                {
+                    rejectedGeneratedSources.Add(sourceLocation);
+                    provenanceRejectCount++;
+                    api.Logger.Warning(
+                        "[VintageRTX] Ignoring PBR manifest entry for {0}: schema v4 requires provenance 'generated' or 'authored'.",
+                        sourceLocation);
+                    continue;
+                }
 
                 if (!MatchesManifestSource(manifest.SchemaVersion, sourceLocation, entry.Source.Sha256))
                 {
@@ -630,7 +693,8 @@ internal sealed class PbrTerrainRenderer : IRenderer
                 // PBR metadata for those sources; a real authored sidecar can still override this
                 // manifest claim during the later suffix scan.
                 IAsset? sourceAsset = api.Assets.TryGet(sourceLocation);
-                if (sourceAsset is null || !IsOpaqueGeneratedFallbackSource(sourceAsset.Data))
+                if (materialProvenance == PbrMaterialProvenance.Generated
+                    && (sourceAsset is null || !IsOpaqueGeneratedFallbackSource(sourceAsset.Data)))
                 {
                     alphaCutoutSkipCount++;
                     continue;
@@ -644,14 +708,25 @@ internal sealed class PbrTerrainRenderer : IRenderer
                         roughnessAsset?.Data,
                         metallicAsset?.Data,
                         emissiveAsset?.Data,
-                        GeneratedFallbackMaximumSlope);
+                        materialProvenance == PbrMaterialProvenance.Generated
+                            ? GeneratedFallbackMaximumSlope
+                            : null,
+                        materialProvenance);
                     applied++;
+                    if (materialProvenance == PbrMaterialProvenance.Generated)
+                    {
+                        generatedAppliedCount++;
+                    }
+                    else
+                    {
+                        authoredAppliedCount++;
+                    }
                 }
             }
         }
 
         api.Logger.Notification(
-            "[VintageRTX] PBR manifest scan: files={0}, entries={1}, atlas matches={2}, map matches={3}, checksum rejects={4}, identity rejects={5}, duplicate rejects={6}, alpha-cutout skips={7}, applied={8}.",
+            "[VintageRTX] PBR manifest scan: files={0}, entries={1}, atlas matches={2}, map matches={3}, checksum rejects={4}, identity rejects={5}, duplicate rejects={6}, alpha-cutout skips={7}, applied={8}, generated applied={9}, authored applied={10}, provenance rejects={11}.",
             manifestCount,
             entryCount,
             atlasMatchCount,
@@ -660,7 +735,10 @@ internal sealed class PbrTerrainRenderer : IRenderer
             identityRejectCount,
             duplicateRejectCount,
             alphaCutoutSkipCount,
-            applied);
+            applied,
+            generatedAppliedCount,
+            authoredAppliedCount,
+            provenanceRejectCount);
 
         return applied;
     }
@@ -1315,7 +1393,7 @@ internal sealed class PbrTerrainRenderer : IRenderer
 
         using (decoded)
         {
-            if (decoded is null || decoded.Width <= 0 || decoded.Height <= 0)
+            if (decoded is null || (long)decoded.Width * decoded.Height <= 0)
             {
                 return false;
             }
@@ -1344,13 +1422,17 @@ internal sealed class PbrTerrainRenderer : IRenderer
     /// <param name="maximumTangentSlope">
     /// Optional albedo-derived fallback calibration; <see langword="null"/> preserves authored normals exactly.
     /// </param>
+    /// <param name="materialProvenance">
+    /// Whether scalar material maps are generated fallbacks or intentional authored overrides.
+    /// </param>
     private void UploadOverride(
         TextureAtlasPosition position,
         byte[] normalPng,
         byte[]? roughnessPng,
         byte[]? metallicPng,
         byte[]? emissivePng,
-        float? maximumTangentSlope)
+        float? maximumTangentSlope,
+        PbrMaterialProvenance materialProvenance = PbrMaterialProvenance.Authored)
     {
         int targetX = (int)MathF.Round(position.x1 * sourceAtlasWidth);
         int targetY = (int)MathF.Round(position.y1 * sourceAtlasHeight);
@@ -1363,7 +1445,8 @@ internal sealed class PbrTerrainRenderer : IRenderer
             emissivePng,
             targetWidth,
             targetHeight,
-            maximumTangentSlope);
+            maximumTangentSlope,
+            materialProvenance);
 
         GL.ActiveTexture(TextureUnit.Texture0);
         GL.BindTexture(TextureTarget.Texture2D, materialAtlasTexture);
@@ -1392,6 +1475,9 @@ internal sealed class PbrTerrainRenderer : IRenderer
     /// <param name="maximumTangentSlope">
     /// Optional tangent-slope cap for generated fallbacks; omitted for authored normal maps.
     /// </param>
+    /// <param name="materialProvenance">
+    /// Whether scalar material maps are generated fallbacks or intentional authored overrides.
+    /// </param>
     /// <returns>Tightly packed row-major RGBA8 pixels.</returns>
     internal static byte[] BuildConsolidatedPbrPixels(
         byte[] normalPng,
@@ -1400,7 +1486,8 @@ internal sealed class PbrTerrainRenderer : IRenderer
         byte[]? emissivePng,
         int width,
         int height,
-        float? maximumTangentSlope = null)
+        float? maximumTangentSlope = null,
+        PbrMaterialProvenance materialProvenance = PbrMaterialProvenance.Authored)
     {
         using SKBitmap decodedNormal = DecodeUnpremultiplied(normalPng, "normal");
         using SKBitmap? decodedRoughness = roughnessPng is null
@@ -1432,7 +1519,7 @@ internal sealed class PbrTerrainRenderer : IRenderer
             throw new InvalidDataException("A file-backed PBR texture could not be resized to its atlas rectangle.");
         }
 
-        bool materialPresent = decodedMetallic is not null || decodedEmissive is not null;
+        bool materialSidecarPresent = decodedMetallic is not null || decodedEmissive is not null;
         byte[] pixels = GC.AllocateUninitializedArray<byte>(checked(width * height * 4));
         for (int y = 0; y < height; y++)
         {
@@ -1446,10 +1533,17 @@ internal sealed class PbrTerrainRenderer : IRenderer
                 pixels[offset] = normalX;
                 pixels[offset + 1] = normalY;
                 pixels[offset + 2] = roughness?.GetPixel(x, y).Red ?? NeutralRoughness;
+                byte metallicValue = metallic?.GetPixel(x, y).Red ?? 0;
+                byte emissiveValue = emissive?.GetPixel(x, y).Red ?? 0;
+                bool reliableMaterialOverride = materialSidecarPresent
+                    && (materialProvenance == PbrMaterialProvenance.Authored
+                        || QuantizeMaterialScalar(metallicValue, 3) != 0
+                        || QuantizeMaterialScalar(emissiveValue, 7) != 0);
                 pixels[offset + 3] = PackMaterialBits(
-                    metallic?.GetPixel(x, y).Red ?? 0,
-                    emissive?.GetPixel(x, y).Red ?? 0,
-                    materialPresent);
+                    metallicValue,
+                    emissiveValue,
+                    reliableMaterialOverride,
+                    pbrPayloadPresent: true);
             }
         }
 
@@ -1497,17 +1591,35 @@ internal sealed class PbrTerrainRenderer : IRenderer
     private static byte EncodeSignedNormal(float value) =>
         (byte)Math.Clamp((int)MathF.Round(((Math.Clamp(value, -1f, 1f) * 0.5f) + 0.5f) * 255f), 0, 255);
 
-    /// <summary>Packs 3-bit metallic, 3-bit emissive, and one presence flag into one byte.</summary>
+    /// <summary>Packs material scalars plus distinct PBR-presence and reliable-override flags.</summary>
     /// <param name="metallic">UNorm8 source metallic intensity.</param>
     /// <param name="emissive">UNorm8 source emissive intensity.</param>
-    /// <param name="present">Whether either material sidecar was authored.</param>
-    /// <returns>Shader-compatible bit field; bit 7 remains reserved.</returns>
-    internal static byte PackMaterialBits(byte metallic, byte emissive, bool present)
+    /// <param name="reliableMaterialOverride">Whether scalar maps may replace the voxel material class.</param>
+    /// <param name="pbrPayloadPresent">Whether a file-backed normal/roughness payload exists.</param>
+    /// <returns>
+    /// Bits 0..1 metallic, 2..4 emissive, bit 5 file-backed PBR, bit 6 reliable scalar override;
+    /// bit 7 remains reserved for terrain/entity surface flags.
+    /// </returns>
+    internal static byte PackMaterialBits(
+        byte metallic,
+        byte emissive,
+        bool reliableMaterialOverride,
+        bool pbrPayloadPresent)
     {
-        int metallicBits = (int)MathF.Round(metallic / 255.0f * 7.0f);
-        int emissiveBits = (int)MathF.Round(emissive / 255.0f * 7.0f);
-        return (byte)(metallicBits | (emissiveBits << 3) | (present ? 64 : 0));
+        int metallicBits = QuantizeMaterialScalar(metallic, 3);
+        int emissiveBits = QuantizeMaterialScalar(emissive, 7);
+        return (byte)(metallicBits
+            | (emissiveBits << 2)
+            | (pbrPayloadPresent ? 32 : 0)
+            | (reliableMaterialOverride ? 64 : 0));
     }
+
+    /// <summary>Quantizes one UNorm8 material scalar into a bounded packed code.</summary>
+    /// <param name="value">UNorm8 metallic or emissive value.</param>
+    /// <param name="maximumCode">Largest representable packed value.</param>
+    /// <returns>Nearest value in the inclusive range zero through <paramref name="maximumCode"/>.</returns>
+    private static int QuantizeMaterialScalar(byte value, int maximumCode) =>
+        (int)MathF.Round(value / 255.0f * maximumCode);
 
     /// <summary>Decodes PNG bytes to unpremultiplied RGBA so scalar channels remain numerically exact.</summary>
     /// <param name="png">Encoded map bytes.</param>
@@ -1636,6 +1748,7 @@ internal sealed class PbrTerrainRenderer : IRenderer
     {
         ReleaseMaterialAtlas();
         sourceAtlasRevision = 0;
+        ResetPendingAtlasRevision();
         observedAtlasSafety = PbrAtlasSafetyKind.Waiting;
     }
 }
@@ -1706,8 +1819,11 @@ internal sealed class PbrManifest
     /// <summary>Gets or sets the schema discriminator; must equal <c>vintagertx.pbr-manifest</c>.</summary>
     public string Schema { get; set; } = string.Empty;
 
-    /// <summary>Gets or sets the supported schema version in the inclusive range 1..3.</summary>
+    /// <summary>Gets or sets the supported schema version in the inclusive range 1..4.</summary>
     public int SchemaVersion { get; set; }
+
+    /// <summary>Gets or sets the schema-v4 provenance inherited by entries that omit an override.</summary>
+    public string DefaultProvenance { get; set; } = string.Empty;
 
     /// <summary>Gets or sets texture entries applied in manifest order.</summary>
     public List<PbrManifestTexture> Textures { get; set; } = [];
@@ -1730,6 +1846,9 @@ internal sealed class PbrManifestTexture
 
     /// <summary>Gets or sets the optional emissive-map reference.</summary>
     public PbrMapReference Emissive { get; set; } = new();
+
+    /// <summary>Gets or sets an optional schema-v4 per-entry provenance override.</summary>
+    public string Provenance { get; set; } = string.Empty;
 }
 
 /// <summary>Manifest provenance and canonical albedo identity used for atlas placement.</summary>

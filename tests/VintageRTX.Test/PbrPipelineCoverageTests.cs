@@ -107,6 +107,8 @@ public sealed class PbrPipelineCoverageTests
         });
         PbrSidecarAssetStore capturedAgain = PbrSidecarAssetStore.Capture(api);
         Assert.AreEqual(6, capturedAgain.Count);
+        PbrSidecarAssetStore legacyEntryPoint = PbrSidecarAssetStore.CaptureAndHide(api);
+        Assert.AreEqual(6, legacyEntryPoint.Count);
     }
 
     /// <summary>
@@ -714,19 +716,60 @@ public sealed class PbrPipelineCoverageTests
         byte[] emissive = Png(new SKColor(128, 0, 0, 255));
 
         byte[] neutral = PbrTerrainRenderer.BuildConsolidatedPbrPixels(normal, null, null, null, 1, 1);
-        CollectionAssert.AreEqual(new byte[] { 10, 20, 184, 0 }, neutral);
+        CollectionAssert.AreEqual(new byte[] { 10, 20, 184, 32 }, neutral);
         byte[] authored = PbrTerrainRenderer.BuildConsolidatedPbrPixels(
             normal, roughness, metallic, emissive, 2, 1);
         Assert.AreEqual(8, authored.Length);
         Assert.AreEqual(40, authored[2]);
-        Assert.AreEqual(PbrTerrainRenderer.PackMaterialBits(255, 128, true), authored[3]);
-        Assert.AreEqual(0, PbrTerrainRenderer.PackMaterialBits(0, 0, false));
-        Assert.AreEqual(127, PbrTerrainRenderer.PackMaterialBits(255, 255, true));
+        Assert.AreEqual(PbrTerrainRenderer.PackMaterialBits(255, 128, true, true), authored[3]);
+        Assert.AreEqual(0, PbrTerrainRenderer.PackMaterialBits(0, 0, false, false));
+        Assert.AreEqual(127, PbrTerrainRenderer.PackMaterialBits(255, 255, true, true));
+
+        byte[] zeroScalar = Png(new SKColor(0, 0, 0, 255));
+        byte[] generatedDielectric = PbrTerrainRenderer.BuildConsolidatedPbrPixels(
+            normal,
+            roughness,
+            zeroScalar,
+            zeroScalar,
+            1,
+            1,
+            PbrTerrainRenderer.GeneratedFallbackMaximumSlope,
+            PbrMaterialProvenance.Generated);
+        Assert.AreEqual(
+            32,
+            generatedDielectric[3],
+            "generated zero maps must retain PBR presence without replacing the fallback material class");
+
+        byte[] authoredDielectric = PbrTerrainRenderer.BuildConsolidatedPbrPixels(
+            normal,
+            roughness,
+            zeroScalar,
+            zeroScalar,
+            1,
+            1,
+            materialProvenance: PbrMaterialProvenance.Authored);
+        Assert.AreEqual(
+            PbrTerrainRenderer.PackMaterialBits(0, 0, true, true),
+            authoredDielectric[3],
+            "an authored zero map must explicitly override a false-positive metal fallback");
+
+        byte[] generatedMetal = PbrTerrainRenderer.BuildConsolidatedPbrPixels(
+            normal,
+            roughness,
+            metallic,
+            zeroScalar,
+            1,
+            1,
+            materialProvenance: PbrMaterialProvenance.Generated);
+        Assert.AreEqual(
+            PbrTerrainRenderer.PackMaterialBits(255, 0, true, true),
+            generatedMetal[3],
+            "a non-zero generated material remains a reliable profile override");
 
         byte[] steepNormal = Png(new SKColor(197, 128, 235, 255));
         byte[] untouchedAuthored = PbrTerrainRenderer.BuildConsolidatedPbrPixels(
             steepNormal, null, null, null, 1, 1);
-        CollectionAssert.AreEqual(new byte[] { 197, 128, 184, 0 }, untouchedAuthored);
+        CollectionAssert.AreEqual(new byte[] { 197, 128, 184, 32 }, untouchedAuthored);
 
         byte[] calibratedFallback = PbrTerrainRenderer.BuildConsolidatedPbrPixels(
             steepNormal,
@@ -1211,13 +1254,31 @@ public sealed class PbrPipelineCoverageTests
             [new("mod", "textures/block/emit-mismatch.png")] = Asset(new("mod", "textures/block/emit-mismatch.png"), true)
         };
         PbrManifestTexture schemaEntry = ManifestEntry("textures/block/schema.png", "textures/maps/missing.png");
+        PbrManifestTexture invalidProvenanceEntry = ManifestEntry(
+            "textures/block/provenance.png",
+            "mod:textures/block/provenance_n.png",
+            normalHash,
+            "mod:textures/block/provenance_r.png",
+            scalarHash,
+            "mod:textures/block/provenance_m.png",
+            scalarHash,
+            "mod:textures/block/provenance_e.png",
+            scalarHash);
+        invalidProvenanceEntry.Provenance = "implicit";
         List<IAsset> manifests =
         [
             ManifestAsset("null"u8.ToArray()),
             ManifestAsset(new PbrManifest { Schema = "vintagertx.pbr-manifest", SchemaVersion = 3 }),
             ManifestAsset(new PbrManifest { Schema = "wrong", SchemaVersion = 3, Textures = [schemaEntry] }),
             ManifestAsset(new PbrManifest { Schema = "vintagertx.pbr-manifest", SchemaVersion = 0, Textures = [schemaEntry] }),
-            ManifestAsset(new PbrManifest { Schema = "vintagertx.pbr-manifest", SchemaVersion = 4, Textures = [schemaEntry] })
+            ManifestAsset(new PbrManifest { Schema = "vintagertx.pbr-manifest", SchemaVersion = 5, Textures = [schemaEntry] }),
+            ManifestAsset(new PbrManifest
+            {
+                Schema = "vintagertx.pbr-manifest",
+                SchemaVersion = 4,
+                DefaultProvenance = "generated",
+                Textures = [invalidProvenanceEntry]
+            })
         ];
         PbrManifest valid = new()
         {
@@ -1270,8 +1331,8 @@ public sealed class PbrPipelineCoverageTests
         HashSet<AssetLocation> rejected = [];
         Assert.AreEqual(0, InvokeRenderer(renderer, "ApplyManifestOverrides", applied, fallbackHashes, rejected));
         Assert.AreEqual(0, applied.Count);
-        Assert.AreEqual(5, rejected.Count);
-        Assert.AreEqual(4, warnings.Count);
+        Assert.AreEqual(6, rejected.Count);
+        Assert.AreEqual(5, warnings.Count);
         Assert.IsTrue(fallbackHashes.Count > 0);
     }
 
@@ -1402,12 +1463,24 @@ public sealed class PbrPipelineCoverageTests
             new LoadedTexture(Proxy<ICoreClientAPI>((m, _) => Default(m))) { TextureId = 1, Width = 0, Height = 1 },
             new LoadedTexture(Proxy<ICoreClientAPI>((m, _) => Default(m))) { TextureId = 1, Width = 1, Height = 0 }
         };
-        foreach (LoadedTexture invalid in invalidTextures)
+        try
         {
-            PbrTerrainRenderer renderer = Renderer(Atlas([invalid], Position(0, 0), []), AssetManager([]), logger: logger);
-            renderer.OnRenderFrame(0, EnumRenderStage.Opaque);
-            Assert.AreEqual("waiting for a valid terrain atlas page", renderer.Status);
-            SetLoadedTextureDisposed(invalid);
+            foreach (LoadedTexture invalid in invalidTextures)
+            {
+                PbrTerrainRenderer renderer = Renderer(
+                    Atlas([invalid], Position(0, 0), []), AssetManager([]), logger: logger);
+                renderer.OnRenderFrame(0, EnumRenderStage.Opaque);
+                Assert.AreEqual("waiting for a valid terrain atlas page", renderer.Status);
+                SetLoadedTextureDisposed(invalid);
+            }
+        }
+        finally
+        {
+            foreach (LoadedTexture invalid in invalidTextures)
+            {
+                invalid.TextureId = 0;
+                GC.SuppressFinalize(invalid);
+            }
         }
 
         IShaderAPI shaderApi = Proxy<IShaderAPI>((method, _) =>
@@ -1463,9 +1536,16 @@ public sealed class PbrPipelineCoverageTests
             Metallic = map,
             Emissive = map
         };
-        PbrManifest manifest = new() { Schema = "schema", SchemaVersion = 3, Textures = [texture] };
+        PbrManifest manifest = new()
+        {
+            Schema = "schema",
+            SchemaVersion = 4,
+            DefaultProvenance = "generated",
+            Textures = [texture]
+        };
         Assert.AreEqual("schema", manifest.Schema);
-        Assert.AreEqual(3, manifest.SchemaVersion);
+        Assert.AreEqual(4, manifest.SchemaVersion);
+        Assert.AreEqual("generated", manifest.DefaultProvenance);
         Assert.AreSame(texture, manifest.Textures[0]);
         Assert.AreEqual("m", texture.Source.ModId);
         Assert.AreEqual("1", source.ModVersion);
@@ -1476,6 +1556,26 @@ public sealed class PbrPipelineCoverageTests
         Assert.AreEqual("b", texture.Roughness.Sha256);
         Assert.AreEqual("c", texture.Metallic.Encoding);
         Assert.AreSame(map, texture.Emissive);
+
+        Assert.IsTrue(PbrMaterialProvenanceContract.TryResolve(
+            3,
+            null,
+            null,
+            out PbrMaterialProvenance legacy));
+        Assert.AreEqual(PbrMaterialProvenance.Generated, legacy);
+        Assert.IsTrue(PbrMaterialProvenanceContract.TryResolve(
+            4,
+            "generated",
+            "AUTHORED",
+            out PbrMaterialProvenance entryOverride));
+        Assert.AreEqual(PbrMaterialProvenance.Authored, entryOverride);
+        Assert.IsTrue(PbrMaterialProvenanceContract.TryResolve(
+            4,
+            "generated",
+            null,
+            out PbrMaterialProvenance inherited));
+        Assert.AreEqual(PbrMaterialProvenance.Generated, inherited);
+        Assert.IsFalse(PbrMaterialProvenanceContract.TryResolve(4, "implicit", null, out _));
 
         PbrAtlasLookup lookup = new([], [], 1, 2, 3, 4);
         Assert.AreEqual(1, lookup.ExactPlacementCount);

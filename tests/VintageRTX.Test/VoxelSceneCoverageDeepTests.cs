@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Collections.Concurrent;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using Newtonsoft.Json.Linq;
 using SkiaSharp;
@@ -247,10 +248,16 @@ public sealed class VoxelSceneCoverageDeepTests
         fixture.Invoke<object>("UpdateReadySunOccupancy", 2, 3, 4);
         Assert.AreEqual(1, fixture.Field<List<VoxelSunOccupancyUpdate>>("pendingSunOccupancyUpdates").Count);
 
-        HashSet<(int X, int Y, int Z)> dirty = fixture.Field<HashSet<(int X, int Y, int Z)>>("dirtyBlocks");
+        ConcurrentDictionary<(int X, int Y, int Z), byte> dirty = fixture.Field<ConcurrentDictionary<(int X, int Y, int Z), byte>>("dirtyBlocks");
+        fixture.SetField("generation", 0);
+        dirty.TryAdd((63, 0, 0), 0);
+        fixture.Invoke<object>("ProcessDirtyBlocks");
+        Assert.AreEqual(1, dirty.Count);
+        dirty.Clear();
+        fixture.SetField("generation", 1);
         for (int index = 0; index < 20; index++)
         {
-            dirty.Add((index, 0, 0));
+            dirty.TryAdd((index, 0, 0), 0);
         }
         fixture.Invoke<object>("ProcessDirtyBlocks");
         Assert.AreEqual(4, dirty.Count);
@@ -278,14 +285,16 @@ public sealed class VoxelSceneCoverageDeepTests
         fixture.SetOrigins(0, 0, 0, 0, 0, 0);
         fixture.SetSolid(2, 2, 2, current);
         fixture.Invoke<object>("OnBlockChanged", new BlockPos(999, 999, 999), old);
-        Assert.AreEqual(0, fixture.Field<HashSet<(int, int, int)>>("dirtyBlocks").Count);
+        Assert.AreEqual(0, fixture.Field<ConcurrentDictionary<(int, int, int), byte>>("dirtyBlocks").Count);
 
         fixture.Invoke<object>("OnBlockChanged", new BlockPos(2, 2, 2), old);
-        Assert.AreEqual(1, fixture.Field<HashSet<(int, int, int)>>("dirtyBlocks").Count);
+        Assert.AreEqual(1, fixture.Field<ConcurrentDictionary<(int, int, int), byte>>("dirtyBlocks").Count);
+        fixture.SetFluid(2, 2, 2, current);
+        fixture.Invoke<object>("OnBlockChanged", new BlockPos(2, 2, 2), old);
         fixture.SetSolid(2, 2, 2, torch);
         fixture.Invoke<object>("OnBlockChanged", new BlockPos(2, 2, 2), current);
         Assert.IsTrue(fixture.Field<bool>("rebuildRequested"));
-        Assert.AreEqual(0, fixture.Field<HashSet<(int, int, int)>>("dirtyBlocks").Count);
+        Assert.AreEqual(0, fixture.Field<ConcurrentDictionary<(int, int, int), byte>>("dirtyBlocks").Count);
 
         Assert.IsFalse(fixture.Invoke<bool>("BlockEmitsLight", null, new BlockPos(0)));
         Assert.IsFalse(fixture.Invoke<bool>("BlockEmitsLight", Block(0, "game:air", EnumBlockMaterial.Air), new BlockPos(0)));
@@ -306,6 +315,15 @@ public sealed class VoxelSceneCoverageDeepTests
         Assert.IsTrue(fixture.Field<bool>("settleRebuildPending"));
         Assert.AreEqual(10 - VoxelScene.Width / 2, fixture.Field<int>("originX"));
 
+        fixture.Invoke<object>("BeginRebuild", 100, 100, 100, true);
+        fixture.Invoke<object>("OnGameTick", 0.02f);
+        Assert.AreEqual(
+            -VoxelScene.Width / 2,
+            fixture.Field<int>("originX"),
+            "A teleport must restart an in-flight scan before stale geometry can be published.");
+        Assert.AreEqual(-VoxelScene.Height / 2, fixture.Field<int>("originY"));
+        Assert.AreEqual(-VoxelScene.Depth / 2, fixture.Field<int>("originZ"));
+
         fixture.SetField("building", false);
         fixture.SetField("generation", 1);
         fixture.SetField("rebuildRequested", false);
@@ -322,6 +340,47 @@ public sealed class VoxelSceneCoverageDeepTests
 
         fixture.Scene.Dispose();
         fixture.Invoke<object>("OnGameTick", 0.02f);
+    }
+
+    /// <summary>Verifies runtime view distance selects a bounded LOD and distant surfaces remain editable.</summary>
+    [TestMethod]
+    public void ViewDistanceBuildUsesReducedSunSurfaceLodAndIndependentRainOrigin()
+    {
+        using SceneFixture runtime = new(
+            withPlayer: true,
+            desiredViewDistance: 384,
+            approvedViewDistance: 256,
+            configuredSunDistance: 80.0f);
+        runtime.Invoke<object>("OnGameTick", 0.02f);
+        Assert.AreEqual(256, runtime.Field<int>("sunTraceDistance"));
+        Assert.AreEqual(8, runtime.Field<int>("sunOccupancyScale"));
+        Assert.AreEqual(-VoxelScene.RainSurfaceWidth / 2, runtime.Field<int>("rainSurfaceOriginX"));
+        Assert.AreEqual(-VoxelScene.RainSurfaceDepth / 2, runtime.Field<int>("rainSurfaceOriginZ"));
+        Assert.IsTrue(runtime.Property<bool>("SunBuildComplete") is false);
+        Assert.IsTrue(runtime.Property<int>("SunBuildCompletedCellEquivalent") >= 0);
+
+        using SceneFixture surface = new(withPlayer: true, configuredSunDistance: 128.0f);
+        surface.SetField("sunOccupancyScale", 4);
+        surface.SetField("sunTraceDistance", 128);
+        surface.SetOrigins(0, 0, 0, 0, 0, 0);
+        surface.RainHeight = 2;
+        surface.SetSolid(0, 2, 0, Block(78, "game:distantroof", EnumBlockMaterial.Stone));
+        surface.Invoke<object>("SampleDistantSunSurface", 0);
+        ulong[] build = surface.Field<ulong[]>("buildSunOccupancy");
+        Assert.AreEqual(1UL << 8, build[0]);
+
+        surface.Invoke<object>("UpdateReadyDistantSunColumn", 0, 0);
+        ulong[] ready = surface.Field<ulong[]>("readySunOccupancy");
+        Assert.AreEqual(1UL << 8, ready[0]);
+        Assert.AreEqual(
+            1,
+            surface.Field<List<VoxelSunOccupancyUpdate>>("pendingSunOccupancyUpdates").Count);
+
+        surface.SetSolid(0, 2, 0, null);
+        surface.SetSolid(0, 1, 0, Block(79, "game:distantlowerroof", EnumBlockMaterial.Stone));
+        Assert.AreEqual(1, surface.Invoke<int>("ResolveDistantSurfaceCasterY", 0, 2, 0));
+        surface.SetSolid(0, 1, 0, null);
+        Assert.AreEqual(int.MinValue, surface.Invoke<int>("ResolveDistantSurfaceCasterY", 0, 2, 0));
     }
 
     /// <summary>
@@ -414,8 +473,12 @@ public sealed class VoxelSceneCoverageDeepTests
         using SceneFixture liquid = new();
         liquid.SetOrigins(0, 0, 0, 0, 0, 0);
         liquid.SetFluid(0, 0, 0, fluid);
+        liquid.SetFluid(-32, 0, -32, fluid);
+        liquid.Invoke<object>("SampleFluidSurfaceColumn", 0);
         liquid.Invoke<object>("UpdateReadyVoxel", 0, 0, 0);
         liquid.Invoke<object>("UpdateReadyFluidSurface", 0, 0);
+        liquid.Invoke<object>("UpdateReadyFluidSurface", 0, 0);
+        liquid.Invoke<object>("UpdateReadyFluidSurface", 999, 999);
         int centeredFluidSurfaceOffset = (32 * VoxelScene.FluidSurfaceWidth + 32)
             * VoxelScene.FluidSurfaceChannels;
         Assert.AreEqual((byte)64, liquid.Field<byte[]>("readyVoxels")[3]);
@@ -443,6 +506,108 @@ public sealed class VoxelSceneCoverageDeepTests
         nonOptical.Invoke<object>("UpdateReadyVoxel", 0, 2, 0);
         Assert.AreEqual((byte)64, nonOptical.Field<byte[]>("readyVoxels")[3]);
         Assert.AreEqual((byte)0, nonOptical.Field<byte[]>("readyLiquidMetadata")[1]);
+    }
+
+    /// <summary>
+    /// Verifies that the runtime multiblock path reads the proxy owner, tessellates the distinct
+    /// principal, and preserves the principal replacement contract used for projected occupancy.
+    /// </summary>
+    [TestMethod]
+    public void MultiblockProxyCapturesDistinctPrincipalMeshAndRejectsInvalidOwners()
+    {
+        BlockPos proxyPosition = new(10, 20, 30, 2);
+        BlockPos principalPosition = new(10, 19, 30, 2);
+        FixtureMultiblockProxyEntity proxy = new(principalPosition)
+        {
+            Pos = proxyPosition
+        };
+        MeshData principalMesh = CubeMesh();
+        for (int index = 1; index < principalMesh.xyz.Length; index += 3)
+        {
+            principalMesh.xyz[index] *= 2.0f;
+        }
+        FixtureBlockEntity principal = new(principalMesh, skipsDefault: true)
+        {
+            Pos = principalPosition
+        };
+        using SceneFixture fixture = new(blockEntity: proxy);
+        fixture.SetBlockEntityAt(principalPosition, principal);
+        Assert.IsTrue(fixture.Invoke<bool>("NeedsFluidSurfaceRecentering", 10, 30));
+
+        object?[] args = [proxy, proxyPosition, null, null, null];
+        Assert.IsTrue((bool)fixture.InvokeRaw("TryGetMultiblockPrincipalMeshes", args)!);
+        Assert.AreEqual(principalPosition, (BlockPos)args[2]!);
+        Assert.AreEqual(1, ((InstanceTerrainMeshCollector)args[3]!).Meshes.Count);
+        Assert.AreEqual(true, args[4]);
+
+        FixtureBlock proxyBlock = Block(196, "game:coverage-multiblock-proxy", EnumBlockMaterial.Metal);
+        proxyBlock.EntityClass = "BEMPMultiblock";
+        proxy.Block = proxyBlock;
+        principal.Block = proxyBlock;
+        object?[] occupancyArgs = [proxyBlock, proxyPosition, null];
+        string? previousRunId = Environment.GetEnvironmentVariable("VINTAGERTX_TEST_RUN_ID");
+        try
+        {
+            Environment.SetEnvironmentVariable("VINTAGERTX_TEST_RUN_ID", "voxel-multiblock");
+            Assert.IsTrue((bool)fixture.InvokeRaw("TryGetInstanceMeshOccupancy", occupancyArgs)!);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("VINTAGERTX_TEST_RUN_ID", previousRunId);
+        }
+        InstanceMeshOccupancy projected = (InstanceMeshOccupancy)occupancyArgs[2]!;
+        Assert.AreEqual(1, projected.CapturedMeshCount);
+        Assert.IsTrue(projected.SkipsDefaultMesh);
+        Assert.AreNotEqual(0UL, projected.Mask);
+        fixture.Field<Dictionary<(int X, int Y, int Z, int Dimension), InstanceMeshOccupancy>>(
+            "instanceMeshOccupancyByPosition").Clear();
+        proxyBlock.Code = null;
+        object?[] anonymousOccupancyArgs = [proxyBlock, proxyPosition, null];
+        try
+        {
+            Environment.SetEnvironmentVariable("VINTAGERTX_TEST_RUN_ID", "voxel-multiblock-anonymous");
+            Assert.IsTrue((bool)fixture.InvokeRaw(
+                "TryGetInstanceMeshOccupancy", anonymousOccupancyArgs)!);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("VINTAGERTX_TEST_RUN_ID", previousRunId);
+        }
+
+        FixtureMultiblockProxyEntity self = new(proxyPosition) { Pos = proxyPosition };
+        object?[] selfArgs = [self, proxyPosition, null, null, null];
+        Assert.IsFalse((bool)fixture.InvokeRaw("TryGetMultiblockPrincipalMeshes", selfArgs)!);
+
+        BlockPos absentPosition = new(11, 19, 30, 2);
+        FixtureMultiblockProxyEntity absent = new(absentPosition) { Pos = proxyPosition };
+        object?[] absentArgs = [absent, proxyPosition, null, null, null];
+        Assert.IsFalse((bool)fixture.InvokeRaw("TryGetMultiblockPrincipalMeshes", absentArgs)!);
+
+        using SceneFixture missingPrincipal = new();
+        object?[] missingArgs = [proxy, proxyPosition, null, null, null];
+        Assert.IsFalse((bool)missingPrincipal.InvokeRaw("TryGetMultiblockPrincipalMeshes", missingArgs)!);
+        using SceneFixture selfPrincipal = new(blockEntity: proxy);
+        object?[] principalSelfArgs = [proxy, proxyPosition, null, null, null];
+        Assert.IsFalse((bool)selfPrincipal.InvokeRaw(
+            "TryGetMultiblockPrincipalMeshes", principalSelfArgs)!);
+        FixtureBlockEntity ordinaryEntity = new(QuadMesh(0.5f), false);
+        object?[] ordinaryArgs = [ordinaryEntity, proxyPosition, null, null, null];
+        Assert.IsFalse((bool)fixture.InvokeRaw(
+            "TryGetMultiblockPrincipalMeshes", ordinaryArgs)!);
+
+        Assert.IsFalse(VoxelScene.TryResolveMultiblockPrincipal(
+            null, new TreeAttribute(), 0, out _));
+        Assert.IsFalse(VoxelScene.TryResolveMultiblockPrincipal(
+            "FixtureMultiblock", new TreeAttribute(), 0, out _));
+        TreeAttribute missingY = new();
+        missingY.SetInt("cx", 1);
+        Assert.IsFalse(VoxelScene.TryResolveMultiblockPrincipal(
+            "FixtureMultiblock", missingY, 0, out _));
+        TreeAttribute missingZ = new();
+        missingZ.SetInt("cx", 1);
+        missingZ.SetInt("cy", 2);
+        Assert.IsFalse(VoxelScene.TryResolveMultiblockPrincipal(
+            "FixtureMultiblock", missingZ, 0, out _));
     }
 
     /// <summary>
@@ -487,11 +652,24 @@ public sealed class VoxelSceneCoverageDeepTests
         transparent.RenderPassesAndExtraBits = [(short)EnumChunkRenderPass.Transparent];
         transparent.RenderPassCount = 1;
         FixtureBlock lantern = Block(42, "game:coverage-lantern", EnumBlockMaterial.Metal);
+        FixtureBlock lowerLantern = Block(201, "game:coverage-lantern-lower", EnumBlockMaterial.Metal);
+        FixtureBlock middleLantern = Block(204, "game:coverage-lantern-middle", EnumBlockMaterial.Metal);
+        FixtureBlock opaqueLantern = Block(202, "game:coverage-lantern-opaque", EnumBlockMaterial.Metal);
+        FixtureBlock completeLantern = Block(203, "game:coverage-lantern-complete", EnumBlockMaterial.Metal);
         FixtureBlock anvil = Block(48, "game:coverage-anvil", EnumBlockMaterial.Metal);
         FixtureBlock ordinary = Block(49, "game:coverage-ordinary", EnumBlockMaterial.Stone);
+        MeshData middleLanternMesh = CubeMesh();
+        for (int index = 1; index < middleLanternMesh.xyz.Length; index += 3)
+        {
+            middleLanternMesh.xyz[index] *= 0.55f;
+        }
         using SceneFixture fixture = new(meshes: new Dictionary<int, MeshData?>
         {
             [42] = transparent,
+            [201] = QuadMesh(0.1f),
+            [204] = middleLanternMesh,
+            [202] = CubeMesh(),
+            [203] = CubeMesh(),
             [48] = transparent,
             [49] = transparent
         });
@@ -511,8 +689,33 @@ public sealed class VoxelSceneCoverageDeepTests
         }
 
         CachedBlockOccupancy casterOccupancy = new(1, true, 1, 0, 0, BlockGeometryKind.StaticComplex);
-        CachedLightCaster firstCaster = fixture.Invoke<CachedLightCaster>(
-            "GetLightCaster", lantern, casterOccupancy);
+        CachedLightCaster firstCaster;
+        try
+        {
+            Environment.SetEnvironmentVariable("VINTAGERTX_TEST_RUN_ID", "voxel-lantern-caster");
+            firstCaster = fixture.Invoke<CachedLightCaster>(
+                "GetLightCaster", lantern, casterOccupancy);
+            fixture.Invoke<CachedLightCaster>(
+                "GetLightCaster",
+                lowerLantern,
+                new CachedBlockOccupancy(1, true, 2, 1, 0, BlockGeometryKind.StaticComplex));
+            fixture.Invoke<CachedLightCaster>(
+                "GetLightCaster",
+                middleLantern,
+                new CachedBlockOccupancy(1, true, 12, 1, 0, BlockGeometryKind.StaticComplex));
+            fixture.Invoke<CachedLightCaster>(
+                "GetLightCaster",
+                opaqueLantern,
+                new CachedBlockOccupancy(1, true, 12, 0, 0, BlockGeometryKind.StaticComplex));
+            fixture.Invoke<CachedLightCaster>(
+                "GetLightCaster",
+                completeLantern,
+                new CachedBlockOccupancy(1, true, 12, 1, 0, BlockGeometryKind.StaticComplex));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("VINTAGERTX_TEST_RUN_ID", previous);
+        }
         Assert.AreEqual(firstCaster, fixture.Invoke<CachedLightCaster>(
             "GetLightCaster", lantern, casterOccupancy));
         Assert.AreEqual(0, fixture.Invoke<CachedLightCaster>(
@@ -547,18 +750,29 @@ public sealed class VoxelSceneCoverageDeepTests
             Assert.AreEqual(default(CachedBlockOccupancy), fixture.Invoke<CachedBlockOccupancy>(
                 "BuildMeshMask", lantern, invalid));
         }
-        MeshData invalidTriangle = new(false)
+        foreach (int[] invalidIndices in new[]
         {
-            xyz = [0, 0, 0, 1, 0, 0, 0, 1, 0],
-            Indices = [0, 1, 9],
-            VerticesCount = 3,
-            IndicesCount = 3,
-            IndicesPerFace = 3
-        };
-        Assert.AreEqual(0UL, fixture.Invoke<CachedBlockOccupancy>(
-            "BuildMeshMask", lantern, invalidTriangle).Mask);
-        Assert.IsFalse(fixture.Invoke<byte[]>(
-            "BuildLightCasterMask", lantern, invalidTriangle).Any(value => value != 0));
+            new[] { 9, 1, 2 },
+            new[] { 0, 9, 2 },
+            new[] { 0, 1, 9 }
+        })
+        {
+            MeshData invalidTriangle = new(false)
+            {
+                xyz = [0, 0, 0, 1, 0, 0, 0, 1, 0],
+                Indices = invalidIndices,
+                VerticesCount = 3,
+                IndicesCount = 3,
+                IndicesPerFace = 3
+            };
+            Assert.AreEqual(0UL, fixture.Invoke<CachedBlockOccupancy>(
+                "BuildMeshMask", lantern, invalidTriangle).Mask);
+            Assert.IsFalse(fixture.Invoke<byte[]>(
+                "BuildLightCasterMask", lantern, invalidTriangle).Any(value => value != 0));
+            Assert.AreEqual(0UL, VoxelScene.RasterizeOpaqueMeshMask(invalidTriangle));
+            Assert.AreEqual(1, VoxelScene.InspectInstanceMeshes(
+                [invalidTriangle], 0, 0, 0, 0).InvalidTriangles);
+        }
 
         FixtureBlock broken = Block(43, "game:broken-caster", EnumBlockMaterial.Metal);
         broken.Code = null;
@@ -668,6 +882,18 @@ public sealed class VoxelSceneCoverageDeepTests
             object?[] anonymousArgs = [chisel, new BlockPos(9, 6, 7), null];
             Assert.IsTrue((bool)fixture.InvokeRaw("TryGetInstanceMeshOccupancy", anonymousArgs)!);
             Assert.AreEqual(0UL, ((InstanceMeshOccupancy)anonymousArgs[2]!).Mask);
+
+            FixtureBlock opaqueBlock = Block(205, "game:coverage-opaque-instance", EnumBlockMaterial.Stone);
+            opaqueBlock.EntityClass = "BlockEntityFixture";
+            FixtureBlockEntity opaqueEntity = new(QuadMesh(0.5f), false)
+            {
+                Block = opaqueBlock,
+                Pos = new BlockPos(10, 6, 7)
+            };
+            fixture.SetBlockEntity(opaqueEntity);
+            object?[] opaqueArgs = [opaqueBlock, opaqueEntity.Pos, null];
+            Assert.IsTrue((bool)fixture.InvokeRaw("TryGetInstanceMeshOccupancy", opaqueArgs)!);
+            Assert.AreNotEqual(0UL, ((InstanceMeshOccupancy)opaqueArgs[2]!).Mask);
         }
         finally
         {
@@ -700,20 +926,51 @@ public sealed class VoxelSceneCoverageDeepTests
         {
             [50] = QuadMesh(0.5f),
             [51] = QuadMesh(0.5f),
-            [52] = QuadMesh(0.5f)
+            [52] = QuadMesh(0.5f),
+            [53] = QuadMesh(0.5f)
         });
-        byte[] destination = new byte[12];
+        byte[] destination = new byte[16];
         FixtureBlock glass = Block(50, "game:glass", EnumBlockMaterial.Glass);
         FixtureBlock metal = Block(51, "game:metal", EnumBlockMaterial.Metal);
         FixtureBlock soil = Block(52, "game:soil", EnumBlockMaterial.Soil);
+        FixtureBlock plant = Block(53, "game:plant", EnumBlockMaterial.Plant);
         fixture.Invoke<object>("WriteBlockMaterial", destination, glass, 0, 0, 0, 0, (byte)0, false);
         fixture.Invoke<object>("WriteBlockMaterial", destination, metal, 4, 0, 0, 0, (byte)0, false);
         fixture.Invoke<object>("WriteBlockMaterial", destination, soil, 8, 0, 0, 0, (byte)222, false);
+        fixture.Invoke<object>("WriteBlockMaterial", destination, plant, 12, 0, 0, 0, (byte)0, true);
         Assert.AreEqual(64, destination[3]);
         Assert.AreEqual(192, destination[7]);
         Assert.AreEqual(222, destination[11]);
+        Assert.AreEqual(
+            (byte)(128 | VoxelScene.VegetationMaterialFlag | VoxelScene.PartialGeometryMaterialFlag),
+            destination[15]);
+        Assert.AreEqual((byte)128, VoxelScene.EncodeMaterialGeometryClass(128, false));
+        Assert.AreEqual(
+            (byte)(128 | VoxelScene.PartialGeometryMaterialFlag),
+            VoxelScene.EncodeMaterialGeometryClass(128, true));
 
+        FixtureBlock dynamicGeometry = Block(197, "game:dynamic-geometry", EnumBlockMaterial.Stone);
+        FixtureBlock partialGeometry = Block(198, "game:partial-geometry", EnumBlockMaterial.Stone);
+        FixtureBlock emptyGeometry = Block(199, "game:empty-geometry", EnumBlockMaterial.Stone);
+        Dictionary<int, CachedBlockOccupancy> geometryCache =
+            fixture.Field<Dictionary<int, CachedBlockOccupancy>>("cachedBlockOccupancy");
+        geometryCache[dynamicGeometry.Id] = new CachedBlockOccupancy(
+            0, false, 0, 0, 0, BlockGeometryKind.DynamicInstance);
+        geometryCache[partialGeometry.Id] = new CachedBlockOccupancy(
+            1, true, 1, 0, 0, BlockGeometryKind.StaticComplex);
+        geometryCache[emptyGeometry.Id] = new CachedBlockOccupancy(
+            0, false, 0, 0, 0, BlockGeometryKind.Unknown);
+        Assert.IsTrue(fixture.Invoke<bool>("HasPotentialPartialGeometry", dynamicGeometry));
+        Assert.IsTrue(fixture.Invoke<bool>("HasPotentialPartialGeometry", partialGeometry));
+        Assert.IsFalse(fixture.Invoke<bool>("HasPotentialPartialGeometry", emptyGeometry));
+
+        fixture.Invoke<object>("CollectLight", (object?)null, 0, 0, 0);
         fixture.Invoke<object>("CollectLight", Block(0, "game:air", EnumBlockMaterial.Air), 0, 0, 0);
+        FixtureBlock shortEmitter = Block(200, "game:short-emitter", EnumBlockMaterial.Stone);
+        shortEmitter.Light = [1, 2];
+        fixture.Invoke<object>("CollectLight", shortEmitter, 0, 0, 0);
+        shortEmitter.Light = null!;
+        fixture.Invoke<object>("CollectLight", shortEmitter, 0, 0, 0);
         soil.Light = [0, 0, 0];
         fixture.Invoke<object>("CollectLight", soil, 0, 0, 0);
         foreach (string family in new[] { "lantern", "torch", "candle", "fire", "flame", "ember", "forge", "bloomery" })
@@ -883,6 +1140,47 @@ public sealed class VoxelSceneCoverageDeepTests
         Assert.AreEqual(-1, InvokeStatic<int>("UnitCubeFaceCorner", 0, new Vec3f(0, 0.5f, 0)));
         Assert.AreEqual(-1, InvokeStatic<int>("UnitCubeFaceCorner", 0, new Vec3f(0, 0, 0.5f)));
         Assert.AreEqual(105.0f, InvokeStatic<float>("InstanceMeshAxisOffset", 100.0f, 110.0f, 0));
+        Assert.AreEqual(0.0f, InvokeStatic<float>(
+            "InstanceMeshOwnerAxisOffset", float.NaN, 1.0f, 0));
+        Assert.AreEqual(0.0f, InvokeStatic<float>(
+            "InstanceMeshOwnerAxisOffset", -0.5f, 1.0f, 100));
+        Assert.AreEqual(100.0f, InvokeStatic<float>(
+            "InstanceMeshOwnerAxisOffset", 100.5f, 101.5f, 100));
+        Assert.AreEqual(3.0f, InvokeStatic<float>(
+            "InstanceMeshOwnerAxisOffset", 3.5f, 4.5f, 35));
+        Assert.AreEqual(0.0f, InvokeStatic<float>(
+            "InstanceMeshOwnerAxisOffset", 0.5f, 1.5f, 100));
+        Assert.AreEqual(105.0f, InvokeStatic<float>(
+            "InstanceMeshOwnerAxisOffset", 100.0f, 110.0f, 0));
+        Assert.AreEqual(-1.0f, InvokeStatic<float>(
+            "InstanceMeshOwnerAxisOffset", -3.0f, 2.0f, 100));
+        Assert.AreEqual(2.0f, InvokeStatic<float>(
+            "InstanceMeshOwnerAxisOffset", 2.0f, 2.0f, 100));
+        Assert.AreEqual(0UL, VoxelScene.RasterizeInstanceMeshesAtRelativeBlock(
+            [], 0, 0, 0, 0, 0, 0));
+        Assert.AreNotEqual(0UL, VoxelScene.RasterizeInstanceMeshesAtRelativeBlock(
+            [QuadMesh(0.5f), null!, new MeshData(false) { xyz = null!, VerticesCount = 1 }],
+            0,
+            0,
+            0,
+            0,
+            0,
+            0));
+        Assert.IsTrue(VoxelScene.MeasureCasterGeometry(
+            new CachedBlockOccupancy(1, true, 1, 0, 0, BlockGeometryKind.DynamicInstance),
+            false,
+            null).DetailedNonCube);
+        Assert.IsFalse(VoxelScene.MeasureCasterGeometry(
+            new CachedBlockOccupancy(1, true, 1, 0, 0, BlockGeometryKind.FullCubeStatic),
+            false,
+            null).DetailedNonCube);
+        Assert.AreEqual(0UL, VoxelScene.RasterizeOpaqueMeshMask(new MeshData(false)
+        {
+            xyz = [0, 0, 0, 1, 0, 0, 0, 1, 0],
+            Indices = null!,
+            VerticesCount = 3,
+            IndicesCount = 3
+        }));
 
         object?[] outsideUv =
         [
@@ -964,6 +1262,21 @@ public sealed class VoxelSceneCoverageDeepTests
             new CachedBlockOccupancy(0, false, 0, 0, 0, BlockGeometryKind.DynamicInstance);
         Assert.IsTrue(fallback.Invoke<ulong>(
             "ResolveSunShadowMask", dynamic, new BlockPos(0)) is > 0 and < ulong.MaxValue);
+
+        FixtureBlock staticFallback = Block(195, "game:sun-static-fallback", EnumBlockMaterial.Stone);
+        staticFallback.Collision = [new Cuboidf(0, 0, 0, 0.5f, 1, 1)];
+        staticFallback.Selection = null;
+        fallback.Field<Dictionary<int, CachedBlockOccupancy>>("cachedBlockOccupancy")[staticFallback.Id] =
+            new CachedBlockOccupancy(0, false, 0, 0, 0, BlockGeometryKind.Unknown);
+        Assert.IsTrue(fallback.Invoke<ulong>(
+            "ResolveSunShadowMask", staticFallback, new BlockPos(0)) is > 0 and < ulong.MaxValue);
+        staticFallback.Collision = null;
+        staticFallback.LightAbsorption = 1;
+        Assert.AreEqual(ulong.MaxValue, fallback.Invoke<ulong>(
+            "ResolveSunShadowMask", staticFallback, new BlockPos(0)));
+        staticFallback.LightAbsorption = 0;
+        Assert.AreEqual(0UL, fallback.Invoke<ulong>(
+            "ResolveSunShadowMask", staticFallback, new BlockPos(0)));
 
         FixtureBlock appendedReplacement = Block(192, "game:sun-appended-replacement", EnumBlockMaterial.Stone);
         appendedReplacement.EntityClass = "BlockEntityFixture";
@@ -1406,6 +1719,14 @@ public sealed class VoxelSceneCoverageDeepTests
         mapped.TextureIndices = [0];
         mapped.TextureIds = [91];
         Assert.IsNotNull(fixture.Invoke<object?>("ResolveTextureAlphaSampler", mapped, 0, 0, 1, 2, candidates));
+        List<TextureAlphaCandidate> missingCandidates =
+        [
+            new TextureAlphaCandidate(
+                position,
+                new AssetLocation("game", "textures/block/not-present.png"))
+        ];
+        Assert.IsNull(fixture.Invoke<object?>(
+            "ResolveTextureAlphaSampler", mapped, 0, 0, 1, 2, missingCandidates));
         TextureAlphaData? decoded = fixture.Invoke<TextureAlphaData?>("GetTextureAlpha", candidates[0].Source);
         Assert.IsNotNull(decoded);
         CollectionAssert.AreEqual(new byte[] { 255, 0 }, decoded.Alpha);
@@ -1499,6 +1820,18 @@ public sealed class VoxelSceneCoverageDeepTests
         object?[] neighborArgs = [seeds, voxels, 2, 1, 1, 0, 0.0f, 0.0f, 0];
         InvokeStatic<object>("AccumulateIrradianceNeighbor", neighborArgs);
         Assert.AreEqual(0, neighborArgs[8]);
+
+        byte[] boundaryVoxels = new byte[cellCount * 4];
+        boundaryVoxels[3] = 128;
+        boundaryVoxels[7] = 128;
+        VoxelRadianceField boundaryField = VoxelScene.BuildRadianceField(
+            boundaryVoxels,
+            [new VoxelLight(2.5f, 0.5f, 0.5f, 1, 1, 1, 2, "boundary", [])],
+            0,
+            0,
+            0,
+            new Vec3f());
+        Assert.AreEqual(cellCount * 3, boundaryField.Irradiance.Length);
     }
 
     /// <summary>
@@ -1842,6 +2175,13 @@ public sealed class VoxelSceneCoverageDeepTests
     /// </summary>
     private sealed class FixtureBlockEntity(MeshData mesh, bool skipsDefault) : BlockEntity
     {
+        /// <summary>Writes no persistent state for the geometry-only fixture entity.</summary>
+        /// <param name="tree">Destination state ignored by this fixture.</param>
+        public override void ToTreeAttributes(ITreeAttribute tree)
+        {
+            _ = tree;
+        }
+
         /// <summary>
         /// Handles tesselation for the test double and records only the state required by later assertions.
         /// </summary>
@@ -1852,6 +2192,19 @@ public sealed class VoxelSceneCoverageDeepTests
         {
             mesher.AddMeshData(mesh);
             return skipsDefault;
+        }
+    }
+
+    /// <summary>Multiblock proxy that serializes the public principal coordinates used by the game.</summary>
+    private sealed class FixtureMultiblockProxyEntity(BlockPos principalPosition) : BlockEntity
+    {
+        /// <summary>Writes the principal coordinates consumed by the production proxy resolver.</summary>
+        /// <param name="tree">Destination public block-entity state.</param>
+        public override void ToTreeAttributes(ITreeAttribute tree)
+        {
+            tree.SetInt("cx", principalPosition.X);
+            tree.SetInt("cy", principalPosition.Y);
+            tree.SetInt("cz", principalPosition.Z);
         }
     }
 
@@ -1922,6 +2275,7 @@ public sealed class VoxelSceneCoverageDeepTests
     {
         private readonly Dictionary<(int X, int Y, int Z), Block> solids = [];
         private readonly Dictionary<(int X, int Y, int Z), Block> fluids = [];
+        private readonly Dictionary<(int X, int Y, int Z, int Dimension), BlockEntity> blockEntities = [];
         private readonly Dictionary<int, MeshData?> meshes;
         private readonly int throwMeshForBlockId;
         private BlockEntity? blockEntity;
@@ -1937,6 +2291,9 @@ public sealed class VoxelSceneCoverageDeepTests
         /// <param name="assets">The assets input used to configure this deterministic test path.</param>
         /// <param name="daylight">The daylight input used to configure this deterministic test path.</param>
         /// <param name="sunDirection">The sun Direction input used to configure this deterministic test path.</param>
+        /// <param name="desiredViewDistance">Client-requested visible block distance.</param>
+        /// <param name="approvedViewDistance">Server-approved visible block distance.</param>
+        /// <param name="configuredSunDistance">Optional VintageRTX minimum trace distance.</param>
         internal SceneFixture(
             Dictionary<int, MeshData?>? meshes = null,
             int throwMeshForBlockId = -1,
@@ -1945,7 +2302,10 @@ public sealed class VoxelSceneCoverageDeepTests
             TextureAtlasPosition[]? atlasPositions = null,
             Dictionary<AssetLocation, IAsset>? assets = null,
             float? daylight = null,
-            Vec3f? sunDirection = null)
+            Vec3f? sunDirection = null,
+            int desiredViewDistance = 0,
+            int approvedViewDistance = 0,
+            float? configuredSunDistance = null)
         {
             this.meshes = meshes ?? [];
             this.throwMeshForBlockId = throwMeshForBlockId;
@@ -1956,10 +2316,19 @@ public sealed class VoxelSceneCoverageDeepTests
             EntityPlayer? playerEntity = withPlayer
                 ? new EntityPlayer { CameraPos = new Vec3d(0, 0, 0) }
                 : null;
+            IWorldPlayerData? worldData = withPlayer
+                ? RuntimeCoverageDispatchProxy.Create<IWorldPlayerData>((method, _) => method.Name switch
+                {
+                    "get_DesiredViewDistance" => desiredViewDistance,
+                    "get_LastApprovedViewDistance" => approvedViewDistance,
+                    _ => RuntimeCoverageDispatchProxy.DefaultValue(method.ReturnType)
+                })
+                : null;
             IClientPlayer? player = withPlayer
                 ? RuntimeCoverageDispatchProxy.Create<IClientPlayer>((method, _) => method.Name switch
                 {
                     "get_Entity" => playerEntity,
+                    "get_WorldData" => worldData,
                     _ => RuntimeCoverageDispatchProxy.DefaultValue(method.ReturnType)
                 })
                 : null;
@@ -1968,6 +2337,7 @@ public sealed class VoxelSceneCoverageDeepTests
                 {
                     "GetDayLightStrength" => daylight ?? 0.0f,
                     "get_SunPositionNormalized" => sunDirection,
+                    "GetSunPosition" => sunDirection,
                     _ => RuntimeCoverageDispatchProxy.DefaultValue(method.ReturnType)
                 })
                 : null;
@@ -2029,7 +2399,9 @@ public sealed class VoxelSceneCoverageDeepTests
                     "get_Assets" => assetManager,
                     _ => RuntimeCoverageDispatchProxy.DefaultValue(method.ReturnType)
                 });
-            Scene = new VoxelScene(api);
+            Scene = new VoxelScene(api, configuredSunDistance.HasValue
+                ? () => configuredSunDistance.Value
+                : null);
 
             object? AccessBlock(MethodInfo method, object?[]? args)
             {
@@ -2039,6 +2411,13 @@ public sealed class VoxelSceneCoverageDeepTests
                 }
                 if (method.Name == "GetBlockEntity")
                 {
+                    if (args is { Length: > 0 } && args[0] is BlockPos entityPosition
+                        && blockEntities.TryGetValue(
+                            (entityPosition.X, entityPosition.Y, entityPosition.Z, entityPosition.dimension),
+                            out BlockEntity? positionedEntity))
+                    {
+                        return positionedEntity;
+                    }
                     return this.blockEntity;
                 }
                 if (method.Name == "GetBlock" && args is { Length: > 0 } && args[0] is BlockPos pos)
@@ -2068,8 +2447,18 @@ public sealed class VoxelSceneCoverageDeepTests
         /// <param name="x">Coordinate component in the space defined by the tested API.</param>
         /// <param name="y">Coordinate component in the space defined by the tested API.</param>
         /// <param name="z">Coordinate component in the space defined by the tested API.</param>
-        /// <param name="block">The block input used to configure this deterministic test path.</param>
-        internal void SetSolid(int x, int y, int z, Block block) => solids[(x, y, z)] = block;
+        /// <param name="block">Block to store, or null to remove the fixture cell.</param>
+        internal void SetSolid(int x, int y, int z, Block? block)
+        {
+            if (block is null)
+            {
+                solids.Remove((x, y, z));
+            }
+            else
+            {
+                solids[(x, y, z)] = block;
+            }
+        }
         /// <summary>
         /// Sets fluid on the test double without invoking unrelated production side effects.
         /// </summary>
@@ -2083,6 +2472,11 @@ public sealed class VoxelSceneCoverageDeepTests
         /// </summary>
         /// <param name="value">The value input used to configure this deterministic test path.</param>
         internal void SetBlockEntity(BlockEntity? value) => blockEntity = value;
+        /// <summary>Associates a block entity with one exact world position.</summary>
+        /// <param name="position">Exact block-entity position.</param>
+        /// <param name="value">Entity returned for that position.</param>
+        internal void SetBlockEntityAt(BlockPos position, BlockEntity value) =>
+            blockEntities[(position.X, position.Y, position.Z, position.dimension)] = value;
 
         /// <summary>
         /// Sets origins on the test double without invoking unrelated production side effects.
@@ -2141,6 +2535,14 @@ public sealed class VoxelSceneCoverageDeepTests
         internal T Field<T>(string name) => (T)(typeof(VoxelScene).GetField(
             name, BindingFlags.Instance | BindingFlags.NonPublic)?.GetValue(Scene)
             ?? throw new MissingFieldException(typeof(VoxelScene).FullName, name));
+
+        /// <summary>Reads a private or public scene property for lifecycle coverage assertions.</summary>
+        /// <param name="name">Property name.</param>
+        /// <typeparam name="T">Expected property value type.</typeparam>
+        /// <returns>Current property value.</returns>
+        internal T Property<T>(string name) => (T)(typeof(VoxelScene).GetProperty(
+            name, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)?.GetValue(Scene)
+            ?? throw new MissingMemberException(typeof(VoxelScene).FullName, name));
 
         /// <summary>
         /// Sets field on the test double without invoking unrelated production side effects.

@@ -64,6 +64,10 @@ public sealed class LumaBridgeShaderAssetTests
     [TestMethod]
     public void InvalidBridgeAssetsProduceSpecificFailures()
     {
+        Assert.ThrowsException<ArgumentNullException>(() => LumaBridgeShaderSource.Load(null!));
+        Assert.ThrowsException<ArgumentException>(() =>
+            LumaBridgeShaderSource.LoadFromFileSystem("   "));
+
         IAssetManager missing = AssetManager(null, null);
         FileNotFoundException absent = Assert.ThrowsException<FileNotFoundException>(
             () => LumaBridgeShaderSource.Load(missing));
@@ -79,12 +83,51 @@ public sealed class LumaBridgeShaderAssetTests
                 TextAsset("#version 330 core\n"))));
         StringAssert.Contains(version.Message, "must begin with '#version 330 core'");
 
+        IAsset unreadable = RuntimeCoverageDispatchProxy.Create<IAsset>((method, _) =>
+        {
+            if (method.Name == "ToText")
+            {
+                throw new IOException("fixture decode failure");
+            }
+
+            return RuntimeCoverageDispatchProxy.DefaultValue(method.ReturnType);
+        });
+        InvalidDataException decode = Assert.ThrowsException<InvalidDataException>(() =>
+            LumaBridgeShaderSource.Load(AssetManager(unreadable, TextAsset("#version 330 core\n"))));
+        Assert.IsInstanceOfType<IOException>(decode.InnerException);
+
         string missingRoot = Path.Combine(
             Path.GetTempPath(),
             $"vintagertx-luma-bridge-missing-{Guid.NewGuid():N}");
         FileNotFoundException missingFile = Assert.ThrowsException<FileNotFoundException>(() =>
             LumaBridgeShaderSource.LoadFromFileSystem(missingRoot));
         StringAssert.Contains(missingFile.Message, "vertex shader file is missing");
+
+        string lockedRoot = Path.Combine(
+            Path.GetTempPath(),
+            $"vintagertx-luma-bridge-locked-{Guid.NewGuid():N}");
+        string shaderDirectory = Path.Combine(lockedRoot, "assets", "vintagertx", "shaders");
+        Directory.CreateDirectory(shaderDirectory);
+        string vertexPath = Path.Combine(shaderDirectory, "display.vert");
+        File.WriteAllText(vertexPath, "#version 330 core\nvoid main() {}\n");
+        File.WriteAllText(
+            Path.Combine(shaderDirectory, "lumarepack.frag"),
+            "#version 330 core\nvoid main() {}\n");
+        try
+        {
+            using FileStream locked = new(
+                vertexPath,
+                FileMode.Open,
+                FileAccess.ReadWrite,
+                FileShare.None);
+            InvalidDataException read = Assert.ThrowsException<InvalidDataException>(() =>
+                LumaBridgeShaderSource.LoadFromFileSystem(lockedRoot));
+            Assert.IsInstanceOfType<IOException>(read.InnerException);
+        }
+        finally
+        {
+            Directory.Delete(lockedRoot, recursive: true);
+        }
     }
 
     /// <summary>Creates a deterministic asset-manager double for two shader assets.</summary>

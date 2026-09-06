@@ -31,7 +31,9 @@ public sealed class RuntimeCoverageConfigAndGBufferTests
         Assert.AreEqual(VintageRtxConfig.CurrentSchemaVersion, store.Current.SchemaVersion);
         Assert.AreEqual(1, writes.Count);
         Assert.AreSame(store.Current, writes[0]);
-        Assert.IsTrue(notifications.Any(static message => message.Contains("schema 13", StringComparison.Ordinal)));
+        Assert.IsTrue(notifications.Any(message => message.Contains(
+            $"schema {VintageRtxConfig.CurrentSchemaVersion}",
+            StringComparison.Ordinal)));
     }
 
     /// <summary>

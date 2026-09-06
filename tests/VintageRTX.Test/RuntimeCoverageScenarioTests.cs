@@ -2,6 +2,7 @@ using Microsoft.VisualStudio.TestTools.UnitTesting;
 using VintageRTX.Testing;
 using Vintagestory.API.Client;
 using Vintagestory.API.Common;
+using Vintagestory.API.Common.Entities;
 using Vintagestory.API.MathTools;
 
 namespace VintageRTX.Test;
@@ -186,10 +187,10 @@ public sealed class RuntimeCoverageScenarioTests
     }
 
     /// <summary>
-    /// Verifies the environment Verification Covers Time Weather Precipitation And Night Rules regression contract against deterministic fixture data.
+    /// Verifies time, weather, precipitation, night, and daylight environment rules.
     /// </summary>
     [TestMethod]
-    public void EnvironmentVerificationCoversTimeWeatherPrecipitationAndNightRules()
+    public void EnvironmentVerificationCoversTimeWeatherPrecipitationAndSolarRules()
     {
         Assert.IsTrue(RuntimeScenarioProbe.IsEnvironmentVerified(
             null, false, float.NaN, float.NaN, float.NaN, float.NaN));
@@ -215,11 +216,21 @@ public sealed class RuntimeCoverageScenarioTests
             null, false, 0.0f, 1.0f, float.NaN, 1.0f, requestedPrecipitation: 0.5f));
 
         Assert.IsTrue(RuntimeScenarioProbe.IsEnvironmentVerified(
-            null, false, 0.0f, 1.0f, 0.0f, 0.0f, requireNight: true, daylightStrength: 0.12f));
+            null, false, 0.0f, 1.0f, 0.0f, 0.0f, requireNight: true, sunVertical: 0.0f));
         Assert.IsFalse(RuntimeScenarioProbe.IsEnvironmentVerified(
-            null, false, 0.0f, 1.0f, 0.0f, 0.0f, requireNight: true, daylightStrength: 0.13f));
+            null, false, 0.0f, 1.0f, 0.0f, 0.0f, requireNight: true, sunVertical: 0.01f));
         Assert.IsFalse(RuntimeScenarioProbe.IsEnvironmentVerified(
-            null, false, 0.0f, 1.0f, 0.0f, 0.0f, requireNight: true, daylightStrength: float.NaN));
+            null, false, 0.0f, 1.0f, 0.0f, 0.0f, requireNight: true, sunVertical: float.NaN));
+
+        Assert.IsTrue(RuntimeScenarioProbe.IsEnvironmentVerified(
+            null, false, 0.0f, 1.0f, 0.0f, 0.0f, sunVertical: 0.05f, requireDay: true));
+        Assert.IsFalse(RuntimeScenarioProbe.IsEnvironmentVerified(
+            null, false, 0.0f, 1.0f, 0.0f, 0.0f, sunVertical: 0.049f, requireDay: true));
+        Assert.IsFalse(RuntimeScenarioProbe.IsEnvironmentVerified(
+            null, false, 0.0f, 1.0f, 0.0f, 0.0f, sunVertical: float.NaN, requireDay: true));
+        Assert.IsFalse(RuntimeScenarioProbe.IsEnvironmentVerified(
+            null, false, 0.0f, 1.0f, 0.0f, 0.0f,
+            requireNight: true, sunVertical: 0.0f, requireDay: true));
     }
 
     /// <summary>
@@ -237,6 +248,18 @@ public sealed class RuntimeCoverageScenarioTests
             GameMath.PI - 0.25f,
             RuntimeScenarioProbe.NormalizeSignedAngle(-GameMath.PI - 0.25f),
             0.0001f);
+        RuntimeScenarioProbe.MapDirectCameraToEntityAngles(
+            1.816f,
+            0.0f,
+            out float entityYaw,
+            out float entityPitch);
+        Assert.AreEqual(-1.3256f, entityYaw, 0.001f);
+        Assert.AreEqual(GameMath.PI, entityPitch, 0.0001f);
+        Vec3f cameraView = EntityPos.GetViewVector(0.0f, 1.816f);
+        Vec3f entityView = EntityPos.GetViewVector(entityPitch, entityYaw);
+        Assert.AreEqual(cameraView.X, entityView.X, 0.0001f);
+        Assert.AreEqual(cameraView.Y, entityView.Y, 0.0001f);
+        Assert.AreEqual(cameraView.Z, entityView.Z, 0.0001f);
         Assert.AreEqual(2.0f, RuntimeScenarioProbe.CircularHourDistance(4.0f, 6.0f));
         Assert.AreEqual(1.0f, RuntimeScenarioProbe.CircularHourDistance(23.5f, 0.5f));
     }
@@ -456,11 +479,245 @@ public sealed class RuntimeCoverageScenarioTests
             static (_, _) => 10);
         Assert.IsFalse(RuntimeScenarioProbe.HasOpenGroundPatch(blockedGround, sample, 0, 10, 0));
 
+        IBlockAccessor representative = CreateBlockAccessor(
+            (_, y, _, _) => y == 10 ? solid : air,
+            static (_, _) => 10);
+        Assert.IsTrue(RuntimeScenarioProbe.HasRepresentativeExteriorReceiverPatch(
+            representative, sample, 0, 10, 0));
+
+        Block plant = new()
+        {
+            BlockId = 93,
+            BlockMaterial = EnumBlockMaterial.Plant,
+            CollisionBoxes = null
+        };
+        IBlockAccessor plantCanopy = CreateBlockAccessor(
+            (_, y, _, _) => y == 10 ? plant : air,
+            static (_, _) => 10);
+        Assert.IsFalse(RuntimeScenarioProbe.HasRepresentativeExteriorReceiverPatch(
+            plantCanopy, sample, 0, 10, 0));
+
+        IBlockAccessor foliageInView = CreateBlockAccessor(
+            (x, y, z, _) => y == 10
+                ? solid
+                : x == 0 && y == 11 && z == 0 ? plant : air,
+            static (_, _) => 10);
+        Assert.IsTrue(RuntimeScenarioProbe.HasRepresentativeExteriorReceiverPatch(
+            foliageInView, sample, 0, 10, 0));
+
         IBlockAccessor blockedSight = CreateBlockAccessor(
             (_, _, _, _) => air,
             static (x, _) => x == 1 ? 30 : 10);
         Assert.IsFalse(RuntimeScenarioProbe.HasRoofLineOfSight(
             blockedSight, sample, 0, 10, 0, 10, 18, 0));
+    }
+
+    /// <summary>Verifies that the roof witness uses the solar elevation and vertical drop rather than an arbitrary camera fraction.</summary>
+    [TestMethod]
+    public void ProjectedRoofShadowDistanceUsesSolarSimilarTriangles()
+    {
+        Assert.AreEqual(
+            3.0,
+            RuntimeScenarioProbe.CalculateProjectedSunShadowDistance(
+                15.0,
+                11.0,
+                new Vec3f(0.6f, 0.8f, 0.0f)),
+            0.000001);
+        Assert.AreEqual(
+            0.0,
+            RuntimeScenarioProbe.CalculateProjectedSunShadowDistance(
+                15.0,
+                11.0,
+                new Vec3f(0.0f, 1.0f, 0.0f)));
+        Assert.AreEqual(
+            0.0,
+            RuntimeScenarioProbe.CalculateProjectedSunShadowDistance(
+                11.0,
+                15.0,
+                new Vec3f(0.6f, 0.8f, 0.0f)));
+        Assert.AreEqual(
+            0.0,
+            RuntimeScenarioProbe.CalculateProjectedSunShadowDistance(
+                15.0,
+                11.0,
+                new Vec3f(0.6f, -0.1f, 0.0f)));
+        Assert.AreEqual(
+            0.0,
+            RuntimeScenarioProbe.CalculateProjectedSunShadowDistance(
+                double.NaN,
+                11.0,
+                new Vec3f(0.6f, 0.8f, 0.0f)));
+    }
+
+    /// <summary>Ensures a sloped roof is skipped before selecting the physically projected ground intersection.</summary>
+    [TestMethod]
+    public void ProjectedRoofShadowTargetLeavesCasterBeforeSelectingGround()
+    {
+        Block air = CreateAir();
+        BlockPos sample = new(0);
+        IBlockAccessor roofThenGround = CreateBlockAccessor(
+            (_, _, _, _) => air,
+            static (x, _) => x <= 2 ? 15 : 9);
+        Assert.IsTrue(RuntimeScenarioProbe.TryFindProjectedSunShadowTarget(
+            roofThenGround,
+            sample,
+            new Vec3d(0.5, 14.0, 0.5),
+            casterTopY: 16.0,
+            shadowX: 1.0,
+            shadowZ: 0.0,
+            sunDirection: new Vec3f(0.6f, 0.8f, 0.0f),
+            maximumDistance: 10.0,
+            out double targetX,
+            out double targetY,
+            out double targetZ,
+            out double shadowDistance));
+        Assert.AreEqual(4.5, shadowDistance, 0.000001);
+        Assert.AreEqual(5.0, targetX, 0.000001);
+        Assert.AreEqual(10.08, targetY, 0.000001);
+        Assert.AreEqual(0.5, targetZ, 0.000001);
+
+        IBlockAccessor roofOnly = CreateBlockAccessor(
+            (_, _, _, _) => air,
+            static (_, _) => 15);
+        Assert.IsFalse(RuntimeScenarioProbe.TryFindProjectedSunShadowTarget(
+            roofOnly,
+            sample,
+            new Vec3d(0.5, 14.0, 0.5),
+            casterTopY: 16.0,
+            shadowX: 1.0,
+            shadowZ: 0.0,
+            sunDirection: new Vec3f(0.6f, 0.8f, 0.0f),
+            maximumDistance: 10.0,
+            out _,
+            out _,
+            out _,
+            out _));
+    }
+
+    /// <summary>Exercises the optional concrete client-calendar cache refresh boundary.</summary>
+    [TestMethod]
+    public void ClientCalendarRefreshIsOptionalAndFailureSafe()
+    {
+        RefreshableCalendar refreshable = new();
+        Assert.IsTrue(RuntimeScenarioProbe.TryRefreshClientCalendar(refreshable));
+        Assert.AreEqual(1, refreshable.UpdateCount);
+        Assert.IsFalse(RuntimeScenarioProbe.TryRefreshClientCalendar(null));
+        Assert.IsFalse(RuntimeScenarioProbe.TryRefreshClientCalendar(new MissingCalendarUpdate()));
+        Assert.IsFalse(RuntimeScenarioProbe.TryRefreshClientCalendar(new NonVoidCalendarUpdate()));
+        Assert.IsFalse(RuntimeScenarioProbe.TryRefreshClientCalendar(new ThrowingCalendarUpdate()));
+    }
+
+    /// <summary>Ensures dawn can converge without accepting a stale night-to-day brightness cache.</summary>
+    [TestMethod]
+    public void ClientSolarLightingConvergenceComparesAuthoritativeBrightness()
+    {
+        Assert.IsTrue(RuntimeScenarioProbe.HasConvergedClientSolarLighting(
+            requireNight: false,
+            requireDay: true,
+            spatialDaylight: 0.31f,
+            clientDaylight: 0.30f,
+            directSunlight: 0.32f,
+            moonlight: 0.0f));
+        Assert.IsFalse(RuntimeScenarioProbe.HasConvergedClientSolarLighting(
+            requireNight: false,
+            requireDay: true,
+            spatialDaylight: 1.0f,
+            clientDaylight: 0.12f,
+            directSunlight: 0.12f,
+            moonlight: 0.0f));
+        Assert.IsFalse(RuntimeScenarioProbe.HasConvergedClientSolarLighting(
+            requireNight: false,
+            requireDay: true,
+            spatialDaylight: 0.31f,
+            clientDaylight: 0.30f,
+            directSunlight: 0.32f,
+            moonlight: 0.2f));
+        Assert.IsTrue(RuntimeScenarioProbe.HasConvergedClientSolarLighting(
+            requireNight: true,
+            requireDay: false,
+            spatialDaylight: 0.0f,
+            clientDaylight: 0.12f,
+            directSunlight: 0.02f,
+            moonlight: 0.4f));
+        Assert.IsTrue(RuntimeScenarioProbe.HasConvergedClientSolarLighting(
+            requireNight: true,
+            requireDay: false,
+            spatialDaylight: 0.058f,
+            clientDaylight: 0.058f,
+            directSunlight: 0.058f,
+            moonlight: 0.0f));
+        Assert.IsFalse(RuntimeScenarioProbe.HasConvergedClientSolarLighting(
+            requireNight: true,
+            requireDay: false,
+            spatialDaylight: 0.081f,
+            clientDaylight: 0.081f,
+            directSunlight: 0.081f,
+            moonlight: 0.0f));
+        Assert.IsFalse(RuntimeScenarioProbe.HasConvergedClientSolarLighting(
+            requireNight: true,
+            requireDay: false,
+            spatialDaylight: 0.0f,
+            clientDaylight: 1.0f,
+            directSunlight: 1.0f,
+            moonlight: 0.0f));
+        Assert.IsTrue(RuntimeScenarioProbe.HasConvergedClientSolarLighting(
+            requireNight: false,
+            requireDay: false,
+            spatialDaylight: float.NaN,
+            clientDaylight: float.NaN,
+            directSunlight: float.NaN,
+            moonlight: float.NaN));
+    }
+
+    /// <summary>Separates constructed roof spans from hills and foliage canopies.</summary>
+    [TestMethod]
+    public void ExteriorRoofAnchorRequiresSolidTopAndOpenUnderside()
+    {
+        Block air = CreateAir();
+        Block solid = CreateSolid();
+        Block constructedRoof = CreateSolid();
+        constructedRoof.BlockMaterial = EnumBlockMaterial.Wood;
+        constructedRoof.Code = new AssetLocation("game:slantedroofing-oak");
+        BlockPos sample = new(0);
+        IBlockAccessor roof = CreateBlockAccessor(
+            (_, y, _, _) => y == 12 ? constructedRoof : air,
+            static (_, _) => 12);
+        Assert.IsTrue(RuntimeScenarioProbe.TryFindExteriorRoofAnchor(
+            roof, sample, 0, 0, out int roofX, out int roofY, out int roofZ, out Block roofBlock));
+        Assert.AreEqual(0, roofX);
+        Assert.AreEqual(12, roofY);
+        Assert.AreEqual(0, roofZ);
+        Assert.AreSame(constructedRoof, roofBlock);
+
+        IBlockAccessor hill = CreateBlockAccessor(
+            (_, y, _, _) => y <= 12 ? solid : air,
+            static (_, _) => 12);
+        Assert.IsFalse(RuntimeScenarioProbe.TryFindExteriorRoofAnchor(
+            hill, sample, 0, 0, out _, out _, out _, out _));
+
+        Block foliage = new()
+        {
+            BlockId = 94,
+            BlockMaterial = EnumBlockMaterial.Plant,
+            CollisionBoxes = [new Cuboidf(0, 0, 0, 1, 1, 1)]
+        };
+        Assert.IsFalse(RuntimeScenarioProbe.IsExteriorRoofMaterial(foliage));
+
+        Block snow = new()
+        {
+            BlockId = 95,
+            Code = new AssetLocation("game:snowlayer-3"),
+            BlockMaterial = EnumBlockMaterial.Soil,
+            CollisionBoxes = [new Cuboidf(0, 0, 0, 1, 0.25f, 1)]
+        };
+        IBlockAccessor snowCoveredRoof = CreateBlockAccessor(
+            (_, y, _, _) => y == 13 ? snow : y == 12 ? constructedRoof : air,
+            static (_, _) => 13);
+        Assert.IsTrue(RuntimeScenarioProbe.TryResolveExteriorRoofSurface(
+            snowCoveredRoof, sample, 0, 0, out int coveredY, out Block coveredBlock));
+        Assert.AreEqual(12, coveredY);
+        Assert.AreSame(constructedRoof, coveredBlock);
+        Assert.IsFalse(RuntimeScenarioProbe.IsExteriorRoofMaterial(snow));
     }
 
     /// <summary>
@@ -563,5 +820,32 @@ public sealed class RuntimeCoverageScenarioTests
             LiquidCode = "water",
             CollisionBoxes = null!
         };
+    }
+
+    /// <summary>Small concrete calendar-shaped object exposing the engine refresh signature.</summary>
+    private sealed class RefreshableCalendar
+    {
+        /// <summary>Gets the number of completed refreshes.</summary>
+        public int UpdateCount { get; private set; }
+
+        /// <summary>Records one successful client-cache refresh.</summary>
+        public void Update() => UpdateCount++;
+    }
+
+    /// <summary>Represents a calendar implementation that exposes no render-cache refresh.</summary>
+    private sealed class MissingCalendarUpdate;
+
+    /// <summary>Exposes an incompatible update return type that must be rejected.</summary>
+    private sealed class NonVoidCalendarUpdate
+    {
+        /// <summary>Returns an incompatible value instead of refreshing a cache.</summary>
+        public bool Update() => true;
+    }
+
+    /// <summary>Exposes a failing engine refresh so reflection failures remain contained.</summary>
+    private sealed class ThrowingCalendarUpdate
+    {
+        /// <summary>Simulates a concrete calendar implementation failure.</summary>
+        public void Update() => throw new InvalidOperationException("synthetic refresh failure");
     }
 }

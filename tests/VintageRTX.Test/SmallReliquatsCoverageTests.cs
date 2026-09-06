@@ -45,6 +45,7 @@ public sealed class SmallReliquatsCoverageTests
         Assert.AreEqual(1.0f, legacyTransport.Saturation);
         Assert.AreEqual(0.0f, legacyTransport.Vibrance);
         Assert.AreEqual(0.04f, legacyTransport.Vignette);
+        Assert.AreEqual(0.025f, legacyTransport.PointLightSourceRadius);
         Assert.AreEqual(VintageRtxRenderProfile.Custom, legacyTransport.RenderProfile);
 
         VintageRtxConfig schemaTenBudget = new()
@@ -65,6 +66,14 @@ public sealed class SmallReliquatsCoverageTests
         Assert.AreEqual(VintageRtxConfig.CurrentSchemaVersion, schemaTwelve.SchemaVersion);
         Assert.AreEqual(VintageRtxRenderProfile.Custom, schemaTwelve.RenderProfile);
         Assert.AreEqual(2, schemaTwelve.RayCount);
+
+        VintageRtxConfig customSourceSize = new()
+        {
+            SchemaVersion = 13,
+            PointLightSourceRadius = 0.04f
+        };
+        Assert.IsTrue(customSourceSize.Migrate());
+        Assert.AreEqual(0.04f, customSourceSize.PointLightSourceRadius);
 
         VintageRtxConfig invalidDebugView = new()
         {

@@ -1,6 +1,7 @@
 using System.Reflection;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using OpenTK.Graphics.OpenGL4;
+using Vintagestory.API.Datastructures;
 
 namespace VintageRTX.Test;
 
@@ -30,6 +31,10 @@ public sealed class EntityMirrorProjectionContractTests
         StringAssert.Contains(source, "beforeTerrain!.Invoke(terrainRenderSystem");
         StringAssert.Contains(source, "terrainPass!.Invoke(terrainRenderSystem");
         StringAssert.Contains(source, "pass.Invoke(renderSystem");
+        StringAssert.Contains(
+            source,
+            "|| replayInProgress",
+            "A nested official callback must not overwrite the outer replay's camera snapshots.");
 
         Type patch = typeof(VintageRTX.Rendering.EntityMirrorGeometryReplayPatch);
         MethodInfo terrainCapture = patch.GetMethod(
@@ -89,7 +94,10 @@ public sealed class EntityMirrorProjectionContractTests
             TestPaths.FindRepositoryRoot(),
             "src", "VintageRTX", "Rendering", "FilmicDisplayRenderer.cs"));
         int start = renderer.IndexOf("shader!.Use();", StringComparison.Ordinal);
-        int end = renderer.IndexOf("bool temporalCameraStable", start, StringComparison.Ordinal);
+        int end = renderer.IndexOf(
+            "shader.UniformMatrix(\"projection\"",
+            start,
+            StringComparison.Ordinal);
         Assert.IsTrue(start >= 0 && end > start, "The display binding block must remain discoverable.");
         string bindings = renderer[start..end];
 
@@ -179,6 +187,211 @@ public sealed class EntityMirrorProjectionContractTests
             FrontFaceDirection.Ccw,
             VintageRTX.Rendering.EntityMirrorGeometryReplayPatch.ReflectedFrontFace(
                 FrontFaceDirection.Cw));
+    }
+
+    /// <summary>
+    /// Proves the reflected replay's OpenGL near plane accepts geometry above the liquid interface
+    /// and rejects submerged geometry before either point can participate in depth testing.
+    /// </summary>
+    [TestMethod]
+    [TestCategory("Rendering")]
+    [TestCategory("Reflection")]
+    public void ObliqueMirrorProjectionClipsSubmergedGeometryForSeveralCameraPitches()
+    {
+        const double surfaceY = 0.35;
+        const double clipBias = 0.015;
+        double[] projection = CreatePerspectiveProjection(
+            62.0 * Math.PI / 180.0,
+            16.0 / 9.0,
+            0.05,
+            160.0);
+
+        foreach (double pitch in new[] { -0.31, 0.0, 0.27 })
+        {
+            double[] ordinaryView = CreatePitchedView(pitch, cameraY: 2.4);
+            double[] mirroredView = new double[16];
+            double[] obliqueProjection = new double[16];
+            VintageRTX.Rendering.EntityMirrorProjection.BuildReflectedViewMatrix(
+                ordinaryView,
+                surfaceY,
+                mirroredView);
+
+            Assert.IsTrue(
+                VintageRTX.Rendering.EntityMirrorProjection.BuildObliqueMirrorProjection(
+                    projection,
+                    mirroredView,
+                    surfaceY,
+                    clipBias,
+                    obliqueProjection),
+                $"The oblique projection must remain finite at pitch {pitch:0.000}.");
+
+            double retainedNearDistance = EvaluateOpenGlNearPlane(
+                obliqueProjection,
+                mirroredView,
+                [0.0, surfaceY + clipBias + 0.20, -8.0, 1.0]);
+            double submergedNearDistance = EvaluateOpenGlNearPlane(
+                obliqueProjection,
+                mirroredView,
+                [0.0, surfaceY + clipBias - 0.20, -8.0, 1.0]);
+
+            Assert.IsTrue(
+                retainedNearDistance > 1e-6,
+                $"Above-water geometry was clipped at pitch {pitch:0.000}: {retainedNearDistance}.");
+            Assert.IsTrue(
+                submergedNearDistance < -1e-6,
+                $"Submerged geometry survived at pitch {pitch:0.000}: {submergedNearDistance}.");
+            CollectionAssert.AreEqual(
+                new[]
+                {
+                    projection[0], projection[1], projection[3],
+                    projection[4], projection[5], projection[7],
+                    projection[8], projection[9], projection[11],
+                    projection[12], projection[13], projection[15]
+                },
+                new[]
+                {
+                    obliqueProjection[0], obliqueProjection[1], obliqueProjection[3],
+                    obliqueProjection[4], obliqueProjection[5], obliqueProjection[7],
+                    obliqueProjection[8], obliqueProjection[9], obliqueProjection[11],
+                    obliqueProjection[12], obliqueProjection[13], obliqueProjection[15]
+                },
+                "Only the projection's third row may be replaced by the clip plane.");
+        }
+    }
+
+    /// <summary>Ensures invalid projection inputs suppress official replay instead of exposing stale depth.</summary>
+    [TestMethod]
+    [TestCategory("Rendering")]
+    [TestCategory("Reflection")]
+    public void ObliqueMirrorProjectionFailsClosedForSingularOrNonFiniteInputs()
+    {
+        double[] identity =
+        [
+            1, 0, 0, 0,
+            0, 1, 0, 0,
+            0, 0, 1, 0,
+            0, 0, 0, 1
+        ];
+        double[] destination = Enumerable.Repeat(7.0, 16).ToArray();
+
+        Assert.IsFalse(
+            VintageRTX.Rendering.EntityMirrorProjection.BuildObliqueMirrorProjection(
+                new double[16],
+                identity,
+                0.0,
+                0.015,
+                destination));
+        CollectionAssert.AreEqual(new double[16], destination);
+
+        double[] projection = CreatePerspectiveProjection(
+            60.0 * Math.PI / 180.0,
+            1.0,
+            0.1,
+            64.0);
+        identity[0] = double.NaN;
+        Array.Fill(destination, 3.0);
+        Assert.IsFalse(
+            VintageRTX.Rendering.EntityMirrorProjection.BuildObliqueMirrorProjection(
+                projection,
+                identity,
+                0.0,
+                0.015,
+                destination));
+        CollectionAssert.AreEqual(new double[16], destination);
+
+        double[] underwaterView = CreatePitchedView(0.0, cameraY: -1.0);
+        double[] reflectedUnderwaterView = new double[16];
+        VintageRTX.Rendering.EntityMirrorProjection.BuildReflectedViewMatrix(
+            underwaterView,
+            0.0,
+            reflectedUnderwaterView);
+        Array.Fill(destination, 5.0);
+        Assert.IsFalse(
+            VintageRTX.Rendering.EntityMirrorProjection.BuildObliqueMirrorProjection(
+                projection,
+                reflectedUnderwaterView,
+                0.0,
+                0.015,
+                destination),
+            "An underwater source camera needs an internal-reflection model, not a reversed above-water clip plane.");
+        CollectionAssert.AreEqual(new double[16], destination);
+    }
+
+    /// <summary>Proves the scoped replay removes its pushed projection and restores the exact top.</summary>
+    [TestMethod]
+    [TestCategory("Rendering")]
+    [TestCategory("Reflection")]
+    public void ProjectionStackRestorationIsExactAndRepairsUnexpectedUnderflow()
+    {
+        double[] savedTop =
+        [
+            2, 0, 0, 0,
+            0, 3, 0, 0,
+            0, 0, -1, -1,
+            0, 0, -0.2, 0
+        ];
+        double[] mirror = (double[])savedTop.Clone();
+        mirror[2] = 0.25;
+        mirror[6] = -0.5;
+
+        StackMatrix4 ordinary = new(4);
+        ordinary.Push(savedTop);
+        ordinary.Push(mirror);
+        VintageRTX.Rendering.EntityMirrorGeometryReplayPatch.RestoreProjectionStack(
+            ordinary,
+            savedCount: 1,
+            projectionPushed: true,
+            savedTop: savedTop);
+        Assert.AreEqual(1, ordinary.Count);
+        CollectionAssert.AreEqual(savedTop, ordinary.Top);
+
+        StackMatrix4 underflow = new(4);
+        VintageRTX.Rendering.EntityMirrorGeometryReplayPatch.RestoreProjectionStack(
+            underflow,
+            savedCount: 1,
+            projectionPushed: false,
+            savedTop: savedTop);
+        Assert.AreEqual(1, underflow.Count);
+        CollectionAssert.AreEqual(savedTop, underflow.Top);
+    }
+
+    /// <summary>Proves the outer replay guard restores all engine-visible camera carriers together.</summary>
+    [TestMethod]
+    [TestCategory("Rendering")]
+    [TestCategory("Reflection")]
+    public void MutableCameraCarrierRestorationRepairsViewProjectionAndStackTogether()
+    {
+        double[] savedCamera = Enumerable.Range(1, 16).Select(static value => (double)value).ToArray();
+        float[] savedCameraFloat = savedCamera.Select(static value => (float)value).ToArray();
+        double[] savedProjection = Enumerable.Range(21, 16).Select(static value => (double)value).ToArray();
+        float[] savedCurrentProjection = savedProjection.Select(static value => (float)value).ToArray();
+        double[] camera = Enumerable.Repeat(-1.0, 16).ToArray();
+        float[] cameraFloat = Enumerable.Repeat(-2.0f, 16).ToArray();
+        double[] projection = Enumerable.Repeat(-3.0, 16).ToArray();
+        float[] currentProjection = Enumerable.Repeat(-4.0f, 16).ToArray();
+        StackMatrix4 stack = new(4);
+        stack.Push(savedProjection);
+        stack.Push(Enumerable.Repeat(99.0, 16).ToArray());
+
+        VintageRTX.Rendering.EntityMirrorGeometryReplayPatch.RestoreMutableCameraCarriers(
+            camera,
+            savedCamera,
+            cameraFloat,
+            savedCameraFloat,
+            projection,
+            savedProjection,
+            currentProjection,
+            savedCurrentProjection,
+            stack,
+            savedProjectionStackCount: 1,
+            savedProjectionStackTop: savedProjection);
+
+        CollectionAssert.AreEqual(savedCamera, camera);
+        CollectionAssert.AreEqual(savedCameraFloat, cameraFloat);
+        CollectionAssert.AreEqual(savedProjection, projection);
+        CollectionAssert.AreEqual(savedCurrentProjection, currentProjection);
+        Assert.AreEqual(1, stack.Count);
+        CollectionAssert.AreEqual(savedProjection, stack.Top);
     }
 
     /// <summary>
@@ -283,4 +496,55 @@ public sealed class EntityMirrorProjectionContractTests
         Assert.IsFalse(vertex.Contains("cameraWorldPosition", StringComparison.Ordinal));
         Assert.IsFalse(vertex.Contains("transpose(mat3(inverseViewMatrix))", StringComparison.Ordinal));
     }
+
+    /// <summary>Builds a conventional column-major OpenGL perspective matrix.</summary>
+    private static double[] CreatePerspectiveProjection(
+        double verticalFieldOfView,
+        double aspectRatio,
+        double near,
+        double far)
+    {
+        double focal = 1.0 / Math.Tan(verticalFieldOfView * 0.5);
+        return
+        [
+            focal / aspectRatio, 0, 0, 0,
+            0, focal, 0, 0,
+            0, 0, (far + near) / (near - far), -1,
+            0, 0, (2.0 * far * near) / (near - far), 0
+        ];
+    }
+
+    /// <summary>Builds a pitched view for a camera translated above the local origin.</summary>
+    private static double[] CreatePitchedView(double pitch, double cameraY)
+    {
+        double cosine = Math.Cos(pitch);
+        double sine = Math.Sin(pitch);
+        return
+        [
+            1, 0, 0, 0,
+            0, cosine, sine, 0,
+            0, -sine, cosine, 0,
+            0, -cameraY * cosine, -cameraY * sine, 1
+        ];
+    }
+
+    /// <summary>Evaluates z plus w after reflected view and oblique projection.</summary>
+    private static double EvaluateOpenGlNearPlane(
+        double[] projection,
+        double[] view,
+        double[] worldPoint)
+    {
+        double[] viewPoint = Multiply(view, worldPoint);
+        double[] clipPoint = Multiply(projection, viewPoint);
+        return clipPoint[2] + clipPoint[3];
+    }
+
+    /// <summary>Multiplies one column-major matrix by a homogeneous column vector.</summary>
+    private static double[] Multiply(double[] matrix, double[] point) =>
+    [
+        matrix[0] * point[0] + matrix[4] * point[1] + matrix[8] * point[2] + matrix[12] * point[3],
+        matrix[1] * point[0] + matrix[5] * point[1] + matrix[9] * point[2] + matrix[13] * point[3],
+        matrix[2] * point[0] + matrix[6] * point[1] + matrix[10] * point[2] + matrix[14] * point[3],
+        matrix[3] * point[0] + matrix[7] * point[1] + matrix[11] * point[2] + matrix[15] * point[3]
+    ];
 }

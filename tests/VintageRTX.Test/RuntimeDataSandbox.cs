@@ -1,3 +1,4 @@
+using Microsoft.Data.Sqlite;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using VintageRTX.Configuration;
@@ -86,6 +87,8 @@ internal sealed class RuntimeDataSandbox : IDisposable
             {
                 CopyLockedFile(stream, destinationSave + suffix);
             }
+
+            SanitizeCopiedPlayerData(destinationSave);
 
             return CreateFixture(testWorldName, dataRoot);
         }
@@ -372,6 +375,9 @@ internal sealed class RuntimeDataSandbox : IDisposable
         JObject stringLists = settings["stringListSettings"] as JObject ?? new JObject();
         stringLists["modPaths"] = new JArray("Mods");
         settings["stringListSettings"] = stringLists;
+        JObject intSettings = settings["intSettings"] as JObject ?? new JObject();
+        intSettings["shadowMapQuality"] = 2;
+        settings["intSettings"] = intSettings;
         settings.Remove("modPaths");
         File.WriteAllText(destination, settings.ToString(Formatting.Indented));
     }
@@ -405,5 +411,55 @@ internal sealed class RuntimeDataSandbox : IDisposable
             1024 * 1024,
             FileOptions.SequentialScan);
         input.CopyTo(output);
+    }
+
+    /// <summary>
+    /// Removes player-specific state from a copied Vintage Story database so inventories owned by
+    /// unavailable third-party mods cannot abort an otherwise base-only runtime fixture. The source
+    /// save remains read-only and untouched; chunks, map regions, and game data stay intact.
+    /// </summary>
+    /// <param name="destinationSave">Sandbox-owned SQLite save copied from the reference world.</param>
+    private static void SanitizeCopiedPlayerData(string destinationSave)
+    {
+        // A few filesystem-isolation unit fixtures intentionally use plain-text stand-ins. Only a
+        // real SQLite save has state that can or should be sanitized.
+        Span<byte> header = stackalloc byte[16];
+        using (FileStream input = new(
+                   destinationSave,
+                   FileMode.Open,
+                   FileAccess.Read,
+                   FileShare.Read,
+                   header.Length,
+                   FileOptions.SequentialScan))
+        {
+            if (input.Read(header) != header.Length
+                || !header.SequenceEqual("SQLite format 3\0"u8))
+            {
+                return;
+            }
+        }
+
+        SQLitePCL.Batteries_V2.Init();
+        SqliteConnectionStringBuilder connectionString = new()
+        {
+            DataSource = destinationSave,
+            Mode = SqliteOpenMode.ReadWrite,
+            Cache = SqliteCacheMode.Private,
+            Pooling = false
+        };
+        using SqliteConnection connection = new(connectionString.ToString());
+        connection.Open();
+        using (SqliteTransaction transaction = connection.BeginTransaction())
+        using (SqliteCommand command = connection.CreateCommand())
+        {
+            command.Transaction = transaction;
+            command.CommandText = "DELETE FROM playerdata;";
+            command.ExecuteNonQuery();
+            transaction.Commit();
+        }
+
+        using SqliteCommand checkpoint = connection.CreateCommand();
+        checkpoint.CommandText = "PRAGMA wal_checkpoint(TRUNCATE);";
+        checkpoint.ExecuteNonQuery();
     }
 }

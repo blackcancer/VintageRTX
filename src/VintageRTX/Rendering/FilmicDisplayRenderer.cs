@@ -35,6 +35,11 @@ internal sealed class FilmicDisplayRenderer : IRenderer
     private const long BenchmarkWorldWarmupMilliseconds = 45_000;
     /// <summary>Budget fraction below which an adaptive quality promotion may accumulate credit.</summary>
     private const double AdaptiveUpgradeHeadroom = 0.55;
+    /// <summary>
+    /// Budget ratio above which an initial high tier is known to need Performance rather than an
+    /// intermediate Balanced probe. One direct transition avoids two visible transport changes.
+    /// </summary>
+    private const double AdaptiveSevereOverBudgetRatio = 1.20;
     /// <summary>Consecutive over-budget frames required before reducing ray work.</summary>
     private const int AdaptiveDowngradeFrames = 120;
     // A promotion changes several full-screen ray budgets at once. Require a
@@ -52,6 +57,23 @@ internal sealed class FilmicDisplayRenderer : IRenderer
     private const double CameraMatrixStabilityEpsilon = 0.0005;
     /// <summary>Number of separately accumulated CPU-wall stages in the effect benchmark.</summary>
     private const int BenchmarkCpuStageCount = 6;
+    /// <summary>Texture unit carrying point-light slots 0..3 during final/filter shadow passes.</summary>
+    private const int ShadowPointATextureUnit = 15;
+    /// <summary>Texture unit carrying point-light slots 4..7 during final/filter shadow passes.</summary>
+    private const int ShadowPointBTextureUnit = 24;
+    /// <summary>Texture unit carrying the independent solar visibility during final/filter passes.</summary>
+    private const int ShadowSunTextureUnit = 25;
+    /// <summary>Texture unit borrowing Vintage Story's alpha-tested far solar depth map.</summary>
+    private const int NativeShadowFarTextureUnit = 26;
+    /// <summary>Texture unit borrowing Vintage Story's alpha-tested near solar depth map.</summary>
+    private const int NativeShadowNearTextureUnit = 27;
+    /// <summary>Three independent MRT banks written by both raw and temporal shadow passes.</summary>
+    private static readonly DrawBuffersEnum[] ShadowDrawBuffers =
+    [
+        DrawBuffersEnum.ColorAttachment0,
+        DrawBuffersEnum.ColorAttachment1,
+        DrawBuffersEnum.ColorAttachment2
+    ];
 
     private readonly ICoreClientAPI api;
     private readonly Func<VintageRtxConfig> getConfig;
@@ -62,6 +84,16 @@ internal sealed class FilmicDisplayRenderer : IRenderer
     private readonly ReflectionSourceCaptureRenderer reflectionSourceCapture;
     private readonly EntityMirrorSourceCaptureRenderer entityMirrorSourceCapture;
     private readonly EntityMirrorProjection entityMirrorProjection;
+    /// <summary>Whether this renderer is registered to snapshot the per-frame floating origin.</summary>
+    private bool cameraOriginCaptureRegistered;
+    /// <summary>Whether the current frame owns a player origin captured before world rendering.</summary>
+    private bool renderFloatingOriginReady;
+    /// <summary>World X origin paired with the current frame's camera matrices.</summary>
+    private double renderFloatingOriginX;
+    /// <summary>World Y origin paired with the current frame's camera matrices.</summary>
+    private double renderFloatingOriginY;
+    /// <summary>World Z origin paired with the current frame's camera matrices.</summary>
+    private double renderFloatingOriginZ;
     private readonly RenderPerformanceMonitor performanceMonitor = new();
     private readonly bool automaticBenchmark;
     private readonly bool automatedCameraLock;
@@ -74,9 +106,13 @@ internal sealed class FilmicDisplayRenderer : IRenderer
     private readonly int[] temporalHistoryTextures = new int[2];
     private readonly int[] temporalFramebuffers = new int[2];
     private int temporalHistoryIndex;
-    private int shadowCurrentTexture;
+    private int shadowCurrentPointATexture;
+    private int shadowCurrentPointBTexture;
+    private int shadowCurrentSunTexture;
     private int shadowCurrentFramebuffer;
-    private readonly int[] shadowHistoryTextures = new int[2];
+    private readonly int[] shadowHistoryPointATextures = new int[2];
+    private readonly int[] shadowHistoryPointBTextures = new int[2];
+    private readonly int[] shadowHistorySunTextures = new int[2];
     private readonly int[] shadowHistoryFramebuffers = new int[2];
     private int shadowHistoryIndex;
     private int voxelTexture;
@@ -92,6 +128,10 @@ internal sealed class FilmicDisplayRenderer : IRenderer
     private int fullscreenVertexArray;
     private int textureWidth;
     private int textureHeight;
+    /// <summary>Allocated independent-shadow carrier width for the active quality tier.</summary>
+    private int shadowTextureWidth;
+    /// <summary>Allocated independent-shadow carrier height for the active quality tier.</summary>
+    private int shadowTextureHeight;
     private bool initialized;
     private bool faulted;
     private bool gBufferAvailable;
@@ -100,19 +140,53 @@ internal sealed class FilmicDisplayRenderer : IRenderer
     private bool displaySourceBorrowLogged;
     /// <summary>Whether the auxiliary pre-final stage registration still belongs to this renderer.</summary>
     private bool preFinalDiagnosticRegistered;
+    /// <summary>Whether both native solar-matrix capture stage registrations still belong to this renderer.</summary>
+    private bool nativeSunShadowCaptureRegistered;
     /// <summary>Whether the pre-final Primary/Luma GL colour contract was reported.</summary>
     private bool preFinalColorContractLogged;
     /// <summary>Whether the post-blit Primary/default GL colour contract was reported.</summary>
     private bool postBlitColorContractLogged;
+    /// <summary>Whether successful borrowing of native alpha/wind solar cascades was reported.</summary>
+    private bool nativeSunShadowContractLogged;
     private string gBufferStatus = "not inspected";
     private string? failureReason;
     private readonly float[] projectionMatrix = new float[16];
     private readonly float[] inverseProjectionMatrix = new float[16];
     private readonly float[] viewMatrix = new float[16];
     private readonly float[] inverseViewMatrix = new float[16];
+    /// <summary>Latest world-relative matrix used by Vintage Story's far alpha-tested shadow pass.</summary>
+    private readonly float[] nativeShadowMatrixFar = new float[16];
+    /// <summary>Latest world-relative matrix used by Vintage Story's near alpha-tested shadow pass.</summary>
+    private readonly float[] nativeShadowMatrixNear = new float[16];
+    /// <summary>Absolute player-reference origin paired with the captured far receiver matrix.</summary>
+    private readonly Vec3d nativeShadowReferenceFar = new();
+    /// <summary>Absolute player-reference origin paired with the captured near receiver matrix.</summary>
+    private readonly Vec3d nativeShadowReferenceNear = new();
+    /// <summary>World-space receiver range paired with the captured far cascade.</summary>
+    private float nativeShadowRangeFar;
+    /// <summary>World-space receiver range paired with the captured near cascade.</summary>
+    private float nativeShadowRangeNear;
+    /// <summary>Whether <see cref="nativeShadowMatrixFar"/> contains one complete finite render-stage capture.</summary>
+    private bool nativeShadowMatrixFarReady;
+    /// <summary>Whether <see cref="nativeShadowMatrixNear"/> contains one complete finite render-stage capture.</summary>
+    private bool nativeShadowMatrixNearReady;
     private readonly double[] inverseProjectionMatrixDouble = new double[16];
     private readonly double[] inverseViewMatrixDouble = new double[16];
+    /// <summary>Outer-scope snapshot protecting the primary view from official mirror callbacks.</summary>
+    private readonly double[] mirrorGuardCameraMatrix = new double[16];
+    /// <summary>Single-precision companion of <see cref="mirrorGuardCameraMatrix"/>.</summary>
+    private readonly float[] mirrorGuardCameraMatrixFloat = new float[16];
+    /// <summary>Outer-scope snapshot of the primary perspective projection.</summary>
+    private readonly double[] mirrorGuardPerspectiveProjection = new double[16];
+    /// <summary>Outer-scope snapshot of the engine's current float projection.</summary>
+    private readonly float[] mirrorGuardCurrentProjection = new float[16];
+    /// <summary>Outer-scope snapshot of the original projection-stack top.</summary>
+    private readonly double[] mirrorGuardProjectionStackTop = new double[16];
     private VoxelSceneSnapshot voxelSnapshot;
+    /// <summary>Newest complete CPU snapshot retained until all settle/edit queues are quiet.</summary>
+    private VoxelSceneSnapshot pendingVoxelSnapshot;
+    /// <summary>Whether <see cref="pendingVoxelSnapshot"/> is waiting for one atomic GPU publication.</summary>
+    private bool pendingVoxelSnapshotAvailable;
     private LiquidSurfaceGpuBinding dynamicLiquidSurfaceBinding;
     private bool voxelTextureReady;
     private int voxelSamplerLocation = -1;
@@ -128,6 +202,7 @@ internal sealed class FilmicDisplayRenderer : IRenderer
     private int voxelRainSurfaceSamplerLocation = -1;
     private int voxelLightPositionLocation = -1;
     private int voxelLightColorLocation = -1;
+    private int voxelLightPhotometryLocation = -1;
     private int voxelLightCasterLayerLocation = -1;
     private int liquidImpactOriginLocation = -1;
     private int liquidImpactMaterialLocation = -1;
@@ -136,10 +211,17 @@ internal sealed class FilmicDisplayRenderer : IRenderer
     private int liquidImpactSplashLocation = -1;
     private readonly float[] voxelLightPositions = new float[VoxelScene.MaximumLightCount * 4];
     private readonly float[] voxelLightColors = new float[VoxelScene.MaximumLightCount * 4];
+    private readonly float[] voxelLightPhotometry = new float[VoxelScene.MaximumLightCount * 4];
     private readonly float[] voxelLightCasterLayers = new float[VoxelScene.MaximumLightCount];
     private readonly float[] voxelLightSelectionScores = new float[VoxelScene.MaximumLightCount];
     private readonly DynamicLightCandidate[] dynamicLightCandidates = new DynamicLightCandidate[64];
     private readonly float[] selectedDynamicLightViewPositions = new float[VoxelScene.MaximumLightCount * 3];
+    private readonly long[] currentShadowLightSlotKeys = new long[VoxelScene.MaximumLightCount];
+    private readonly long[] previousShadowLightSlotKeys = new long[VoxelScene.MaximumLightCount];
+    private readonly float[] previousShadowLightPositions = new float[VoxelScene.MaximumLightCount * 3];
+    private bool shadowLightSlotsInitialized;
+    private int previousShadowLightSlotCount;
+    private int currentVoxelLightCount;
     private readonly int[] lastSelectedDynamicSourceIndices = new int[VoxelScene.MaximumLightCount];
     private int lastSelectedDynamicSourceCount;
     private int lastDynamicLightCount = -1;
@@ -302,9 +384,23 @@ internal sealed class FilmicDisplayRenderer : IRenderer
             StringComparison.Ordinal);
         api.Event.RegisterRenderer(
             this,
+            EnumRenderStage.Before,
+            "vintagertx-camera-origin");
+        cameraOriginCaptureRegistered = true;
+        api.Event.RegisterRenderer(
+            this,
             EnumRenderStage.AfterPostProcessing,
             "vintagertx-color-contract");
         preFinalDiagnosticRegistered = true;
+        api.Event.RegisterRenderer(
+            this,
+            EnumRenderStage.ShadowFar,
+            "vintagertx-native-shadow-far");
+        api.Event.RegisterRenderer(
+            this,
+            EnumRenderStage.ShadowNear,
+            "vintagertx-native-shadow-near");
+        nativeSunShadowCaptureRegistered = true;
     }
 
     /// <summary>Reads and clamps an integer benchmark environment override.</summary>
@@ -371,6 +467,11 @@ internal sealed class FilmicDisplayRenderer : IRenderer
             api,
             liquidSurfaceRuntime.ObserveProjectileLiquidCollision);
 
+    /// <summary>Installs the narrowly scoped Vintage Story 1.22.7 fence boundary guard.</summary>
+    /// <returns>Whether the exact survival-mod tessellation method was patched.</returns>
+    internal bool InstallFenceStackAwareTessellationGuard() =>
+        FenceStackAwareTessellationGuardPatch.Install(api);
+
     /// <summary>Gets whether shader, frame textures, and full-screen vertex array are allocated.</summary>
     public bool Initialized => initialized;
 
@@ -411,6 +512,16 @@ internal sealed class FilmicDisplayRenderer : IRenderer
     /// <param name="stage">Vintage Story render stage invoking this renderer.</param>
     public void OnRenderFrame(float deltaTime, EnumRenderStage stage)
     {
+        if (stage == EnumRenderStage.Before)
+        {
+            CaptureRenderFloatingOrigin();
+            return;
+        }
+        if (stage is EnumRenderStage.ShadowFar or EnumRenderStage.ShadowNear)
+        {
+            CaptureNativeSunShadowMatrix(stage);
+            return;
+        }
         if (stage == EnumRenderStage.AfterPostProcessing)
         {
             RenderPreFinalFrame(deltaTime);
@@ -456,9 +567,9 @@ internal sealed class FilmicDisplayRenderer : IRenderer
         captureService.ObserveVoxelSceneState(
             voxelTextureReady ? voxelSnapshot.Generation : 0,
             voxelScene.IsSettled);
-        bool captureFrame = config.Enabled
-            && !faulted
-            && captureService.TryBeginCaptureFrame(
+        bool captureFrame = !config.Enabled || faulted
+            ? false
+            : captureService.TryBeginCaptureFrame(
                 ++renderedFrameCount,
                 out captureStep);
         if (captureFrame)
@@ -492,7 +603,7 @@ internal sealed class FilmicDisplayRenderer : IRenderer
         try
         {
             UpdateWeatherWetness(deltaTime);
-            EnsureResources(width, height);
+            EnsureResources(width, height, adaptiveQualityLevel);
             preparationTicks = ReadStageTicks(collectCpuDiagnostics, ref stageMarker);
             UpdateVoxelTexture();
             voxelTicks = ReadStageTicks(collectCpuDiagnostics, ref stageMarker);
@@ -525,6 +636,36 @@ internal sealed class FilmicDisplayRenderer : IRenderer
                     captureStep.Request.Label,
                     config.RenderProfile,
                     QualityLevelName(adaptiveQualityLevel));
+                double[] captureCameraMatrix = api.Render.CameraMatrixOrigin;
+                var captureEntityPosition = api.World.Player.Entity.Pos;
+                Vec3d captureCameraPosition = api.World.Player.Entity.CameraPos;
+                if (captureCameraMatrix.Length >= 16)
+                {
+                    api.Logger.Notification(
+                        "[VintageRTX.Test] Capture camera evidence: label={0}, entity=({1:0.000000},{2:0.000000},{3:0.000000}), camera=({4:0.000000},{5:0.000000},{6:0.000000}), frame-origin=({7:0.000000},{8:0.000000},{9:0.000000}), basis=({10:0.000000000},{11:0.000000000},{12:0.000000000};{13:0.000000000},{14:0.000000000},{15:0.000000000};{16:0.000000000},{17:0.000000000},{18:0.000000000}), translation=({19:0.000000000},{20:0.000000000},{21:0.000000000}).",
+                        captureStep.Request.Label,
+                        captureEntityPosition.X,
+                        captureEntityPosition.Y,
+                        captureEntityPosition.Z,
+                        captureCameraPosition.X,
+                        captureCameraPosition.Y,
+                        captureCameraPosition.Z,
+                        renderFloatingOriginX,
+                        renderFloatingOriginY,
+                        renderFloatingOriginZ,
+                        captureCameraMatrix[0],
+                        captureCameraMatrix[1],
+                        captureCameraMatrix[2],
+                        captureCameraMatrix[4],
+                        captureCameraMatrix[5],
+                        captureCameraMatrix[6],
+                        captureCameraMatrix[8],
+                        captureCameraMatrix[9],
+                        captureCameraMatrix[10],
+                        captureCameraMatrix[12],
+                        captureCameraMatrix[13],
+                        captureCameraMatrix[14]);
+                }
             }
             displayTicks = ReadStageTicks(collectCpuDiagnostics, ref stageMarker);
             if (collectCpuDiagnostics)
@@ -736,6 +877,147 @@ internal sealed class FilmicDisplayRenderer : IRenderer
                 lastConsumedSubgridImpactSequence,
                 candidate.Sequence);
         }
+    }
+
+    /// <summary>
+    /// Captures the player-relative world origin before opaque rendering. Reading <see cref="Entity.Pos"/>
+    /// again after post-processing can observe the following physics interpolation step while
+    /// <see cref="IRenderAPI.CameraMatrixOrigin"/> still describes the rendered frame, shifting every
+    /// reconstructed voxel ray by several centimetres.
+    /// </summary>
+    private void CaptureRenderFloatingOrigin()
+    {
+        EntityPlayer? player = api.World.Player?.Entity;
+        if (player is null)
+        {
+            renderFloatingOriginReady = false;
+            return;
+        }
+
+        renderFloatingOriginX = player.Pos.X;
+        renderFloatingOriginY = player.Pos.Y;
+        renderFloatingOriginZ = player.Pos.Z;
+        renderFloatingOriginReady = true;
+    }
+
+    /// <summary>Returns the origin captured with this frame, with a startup-only live fallback.</summary>
+    /// <param name="x">Resolved world X origin.</param>
+    /// <param name="y">Resolved world Y origin.</param>
+    /// <param name="z">Resolved world Z origin.</param>
+    private void ResolveRenderFloatingOrigin(out double x, out double y, out double z)
+    {
+        if (renderFloatingOriginReady)
+        {
+            x = renderFloatingOriginX;
+            y = renderFloatingOriginY;
+            z = renderFloatingOriginZ;
+            return;
+        }
+
+        var liveOrigin = api.World.Player.Entity.Pos;
+        x = liveOrigin.X;
+        y = liveOrigin.Y;
+        z = liveOrigin.Z;
+    }
+
+    /// <summary>
+    /// Retains the exact matrices used by Vintage Story's wind-deformed, alpha-tested terrain
+    /// shadow passes. The borrowed depth maps are sampled later; no native GL ownership moves here.
+    /// </summary>
+    /// <param name="stage">Near or far solar shadow stage currently rendering.</param>
+    private void CaptureNativeSunShadowMatrix(EnumRenderStage stage)
+    {
+        DefaultShaderUniforms uniforms = api.Render.ShaderUniforms;
+        float[] source = stage == EnumRenderStage.ShadowNear
+            ? uniforms.ToShadowMapSpaceMatrixNear
+            : uniforms.ToShadowMapSpaceMatrixFar;
+        float[] destination = stage == EnumRenderStage.ShadowNear
+            ? nativeShadowMatrixNear
+            : nativeShadowMatrixFar;
+        Vec3d? sourceReference = uniforms.playerReferencePos;
+        float sourceRange = stage == EnumRenderStage.ShadowNear
+            ? uniforms.ShadowRangeNear
+            : uniforms.ShadowRangeFar;
+        bool complete = source is { Length: >= 16 }
+            && sourceReference is not null
+            && double.IsFinite(sourceReference.X)
+            && double.IsFinite(sourceReference.Y)
+            && double.IsFinite(sourceReference.Z)
+            && float.IsFinite(sourceRange)
+            && sourceRange > 0.0f;
+        for (int index = 0; complete && index < destination.Length; index++)
+        {
+            float value = source[index];
+            if (!float.IsFinite(value))
+            {
+                complete = false;
+                break;
+            }
+            destination[index] = value;
+        }
+
+        if (stage == EnumRenderStage.ShadowNear)
+        {
+            if (complete)
+            {
+                nativeShadowReferenceNear.Set(
+                    sourceReference!.X,
+                    sourceReference.Y,
+                    sourceReference.Z);
+                nativeShadowRangeNear = sourceRange;
+            }
+            nativeShadowMatrixNearReady = complete;
+        }
+        else
+        {
+            if (complete)
+            {
+                nativeShadowReferenceFar.Set(
+                    sourceReference!.X,
+                    sourceReference.Y,
+                    sourceReference.Z);
+                nativeShadowRangeFar = sourceRange;
+            }
+            nativeShadowMatrixFarReady = complete;
+        }
+    }
+
+    /// <summary>
+    /// Resolves only borrowed, complete native solar depth attachments. VintageRTX never deletes,
+    /// resizes, or changes the comparison state of these engine-owned textures.
+    /// </summary>
+    /// <param name="frameBuffers">Current public Vintage Story framebuffer registry.</param>
+    /// <returns>Available far/near depth texture identifiers; zero denotes an unavailable map.</returns>
+    internal static NativeSunShadowDepthMaps ResolveNativeSunShadowDepthMaps(
+        IReadOnlyList<FrameBufferRef>? frameBuffers)
+    {
+        return new NativeSunShadowDepthMaps(
+            ResolveNativeShadowDepthTexture(frameBuffers, EnumFrameBuffer.ShadowmapFar),
+            ResolveNativeShadowDepthTexture(frameBuffers, EnumFrameBuffer.ShadowmapNear));
+    }
+
+    /// <summary>Validates one engine-owned shadow framebuffer before its depth texture is borrowed.</summary>
+    /// <param name="frameBuffers">Public framebuffer registry, possibly unavailable during startup.</param>
+    /// <param name="kind">Near or far native solar framebuffer slot.</param>
+    /// <returns>Positive depth texture identifier or zero.</returns>
+    private static int ResolveNativeShadowDepthTexture(
+        IReadOnlyList<FrameBufferRef>? frameBuffers,
+        EnumFrameBuffer kind)
+    {
+        int index = (int)kind;
+        if (frameBuffers is null || index < 0 || index >= frameBuffers.Count)
+        {
+            return 0;
+        }
+
+        FrameBufferRef? frameBuffer = frameBuffers[index];
+        return frameBuffer is not null
+            && !frameBuffer.Disposed
+            && frameBuffer.Width > 0
+            && frameBuffer.Height > 0
+            && frameBuffer.DepthTextureId > 0
+                ? frameBuffer.DepthTextureId
+                : 0;
     }
 
     /// <summary>Checks globally sequenced packet identity without conflating source-local counters.</summary>
@@ -1231,7 +1513,7 @@ internal sealed class FilmicDisplayRenderer : IRenderer
 
         screenX = (normalizedX * 0.5 + 0.5) * width;
         screenY = (0.5 - normalizedY * 0.5) * height;
-        return double.IsFinite(screenX) && double.IsFinite(screenY);
+        return true;
     }
 
     /// <summary>Begins one retained projectile's named final/surface-field capture pair.</summary>
@@ -1298,6 +1580,19 @@ internal sealed class FilmicDisplayRenderer : IRenderer
             smoothedRainWetness,
             rainWetnessTarget,
             seconds);
+        if (ShouldSnapDeterministicClearWeather(
+                Environment.GetEnvironmentVariable("VINTAGERTX_TEST_RUN_ID"),
+                Environment.GetEnvironmentVariable("VINTAGERTX_TEST_CLEAR_WEATHER"),
+                Environment.GetEnvironmentVariable("VINTAGERTX_TEST_ENVIRONMENT_READY"),
+                rainWetnessTarget))
+        {
+            // Runtime tests request an explicit dry baseline rather than a
+            // simulation of a formerly wet world. Once the game climate and
+            // authored scene are both verified, discard only that test copy's
+            // startup deposition so the first capture shares the same physical
+            // surface state as the following captures.
+            smoothedRainWetness = 0.0f;
+        }
         if (!string.IsNullOrWhiteSpace(
                 Environment.GetEnvironmentVariable("VINTAGERTX_TEST_RUN_ID"))
             && benchmarkPhase == BenchmarkPhase.Waiting
@@ -1761,10 +2056,11 @@ internal sealed class FilmicDisplayRenderer : IRenderer
         gBufferAvailabilityLogged = true;
     }
 
-    /// <summary>Creates thread-bound GL resources and reallocates size-dependent textures on viewport changes.</summary>
+    /// <summary>Creates thread-bound GL resources and reallocates size-dependent textures on viewport or tier changes.</summary>
     /// <param name="width">Current framebuffer width in pixels.</param>
     /// <param name="height">Current framebuffer height in pixels.</param>
-    private void EnsureResources(int width, int height)
+    /// <param name="qualityLevel">Current adaptive tier controlling shadow carrier resolution.</param>
+    private void EnsureResources(int width, int height, int qualityLevel)
     {
         if (shader is null || shader.Disposed)
         {
@@ -1788,20 +2084,30 @@ internal sealed class FilmicDisplayRenderer : IRenderer
                 temporalFramebuffers[index] = GL.GenFramebuffer();
             }
         }
-        if (shadowCurrentTexture == 0)
+        if (shadowCurrentPointATexture == 0)
         {
-            shadowCurrentTexture = GL.GenTexture();
+            shadowCurrentPointATexture = GL.GenTexture();
+            shadowCurrentPointBTexture = GL.GenTexture();
+            shadowCurrentSunTexture = GL.GenTexture();
             shadowCurrentFramebuffer = GL.GenFramebuffer();
-            for (int index = 0; index < shadowHistoryTextures.Length; index++)
+            for (int index = 0; index < shadowHistoryPointATextures.Length; index++)
             {
-                shadowHistoryTextures[index] = GL.GenTexture();
+                shadowHistoryPointATextures[index] = GL.GenTexture();
+                shadowHistoryPointBTextures[index] = GL.GenTexture();
+                shadowHistorySunTextures[index] = GL.GenTexture();
                 shadowHistoryFramebuffers[index] = GL.GenFramebuffer();
             }
         }
 
-        if (textureWidth != width || textureHeight != height)
+        int shadowDivisor = ShadowResolutionDivisor(qualityLevel);
+        int expectedShadowWidth = Math.Max(1, (width + shadowDivisor - 1) / shadowDivisor);
+        int expectedShadowHeight = Math.Max(1, (height + shadowDivisor - 1) / shadowDivisor);
+        if (textureWidth != width
+            || textureHeight != height
+            || shadowTextureWidth != expectedShadowWidth
+            || shadowTextureHeight != expectedShadowHeight)
         {
-            ResizeSceneTexture(width, height);
+            ResizeSceneTexture(width, height, shadowDivisor);
         }
 
         if (!initialized)
@@ -1874,6 +2180,9 @@ internal sealed class FilmicDisplayRenderer : IRenderer
         voxelLightColorLocation = GL.GetUniformLocation(
             program.ProgramId,
             "voxelLightColorRadius[0]");
+        voxelLightPhotometryLocation = GL.GetUniformLocation(
+            program.ProgramId,
+            "voxelLightPhotometry[0]");
         voxelLightCasterLayerLocation = GL.GetUniformLocation(
             program.ProgramId,
             "voxelLightCasterLayer[0]");
@@ -1904,6 +2213,7 @@ internal sealed class FilmicDisplayRenderer : IRenderer
             dynamicLiquidSurfaceSamplerLocation,
             voxelLightPositionLocation,
             voxelLightColorLocation,
+            voxelLightPhotometryLocation,
             voxelLightCasterLayerLocation);
         ValidateImpactUniformLocations(
             liquidImpactOriginLocation,
@@ -1928,6 +2238,23 @@ internal sealed class FilmicDisplayRenderer : IRenderer
         }
     }
 
+    /// <summary>Recognizes a verified runtime-test request for an immediately dry reference surface.</summary>
+    /// <param name="runId">Non-empty isolated runtime run identifier.</param>
+    /// <param name="clearWeather">One when the scenario explicitly requires clear weather.</param>
+    /// <param name="environmentReady">One after time, weather, camera and scene setup have converged.</param>
+    /// <param name="wetnessTarget">Current physical precipitation-derived equilibrium.</param>
+    /// <returns><see langword="true"/> only for a ready, clear and actually dry test world.</returns>
+    internal static bool ShouldSnapDeterministicClearWeather(
+        string? runId,
+        string? clearWeather,
+        string? environmentReady,
+        float wetnessTarget) =>
+        !string.IsNullOrWhiteSpace(runId)
+        && string.Equals(clearWeather, "1", StringComparison.Ordinal)
+        && string.Equals(environmentReady, "1", StringComparison.Ordinal)
+        && float.IsFinite(wetnessTarget)
+        && wetnessTarget <= 0.01f;
+
     /// <summary>Rejects a linked display program when a required impact-array uniform was optimized away.</summary>
     /// <param name="locations">Impact-array locations returned by the active OpenGL program.</param>
     internal static void ValidateImpactUniformLocations(params int[] locations)
@@ -1941,10 +2268,11 @@ internal sealed class FilmicDisplayRenderer : IRenderer
         }
     }
 
-    /// <summary>Reallocates full-resolution color and half-resolution shadow textures and invalidates temporal data.</summary>
+    /// <summary>Reallocates full-resolution color and tier-scaled shadow textures and invalidates temporal data.</summary>
     /// <param name="width">New width in pixels.</param>
     /// <param name="height">New height in pixels.</param>
-    private void ResizeSceneTexture(int width, int height)
+    /// <param name="shadowDivisor">Full-frame divisor used by point and sun visibility carriers.</param>
+    private void ResizeSceneTexture(int width, int height, int shadowDivisor)
     {
         int previousWidth = textureWidth;
         int previousHeight = textureHeight;
@@ -1968,19 +2296,27 @@ internal sealed class FilmicDisplayRenderer : IRenderer
                 throw new InvalidOperationException("The temporal accumulation framebuffer is incomplete.");
             }
         }
-        int shadowWidth = Math.Max(1, (width + 1) / 2);
-        int shadowHeight = Math.Max(1, (height + 1) / 2);
-        AllocateShadowTexture(shadowCurrentTexture, shadowWidth, shadowHeight);
+        int shadowWidth = Math.Max(1, (width + shadowDivisor - 1) / shadowDivisor);
+        int shadowHeight = Math.Max(1, (height + shadowDivisor - 1) / shadowDivisor);
+        AllocateShadowPointTexture(shadowCurrentPointATexture, shadowWidth, shadowHeight);
+        AllocateShadowPointTexture(shadowCurrentPointBTexture, shadowWidth, shadowHeight);
+        AllocateShadowSunTexture(shadowCurrentSunTexture, shadowWidth, shadowHeight);
         AttachShadowFramebuffer(
             shadowCurrentFramebuffer,
-            shadowCurrentTexture,
+            shadowCurrentPointATexture,
+            shadowCurrentPointBTexture,
+            shadowCurrentSunTexture,
             "The current shadow framebuffer is incomplete.");
-        for (int index = 0; index < shadowHistoryTextures.Length; index++)
+        for (int index = 0; index < shadowHistoryPointATextures.Length; index++)
         {
-            AllocateShadowTexture(shadowHistoryTextures[index], shadowWidth, shadowHeight);
+            AllocateShadowPointTexture(shadowHistoryPointATextures[index], shadowWidth, shadowHeight);
+            AllocateShadowPointTexture(shadowHistoryPointBTextures[index], shadowWidth, shadowHeight);
+            AllocateShadowSunTexture(shadowHistorySunTextures[index], shadowWidth, shadowHeight);
             AttachShadowFramebuffer(
                 shadowHistoryFramebuffers[index],
-                shadowHistoryTextures[index],
+                shadowHistoryPointATextures[index],
+                shadowHistoryPointBTextures[index],
+                shadowHistorySunTextures[index],
                 "A shadow history framebuffer is incomplete.");
         }
         GL.BindFramebuffer(FramebufferTarget.ReadFramebuffer, previousReadFramebuffer);
@@ -1989,13 +2325,15 @@ internal sealed class FilmicDisplayRenderer : IRenderer
 
         textureWidth = width;
         textureHeight = height;
+        shadowTextureWidth = shadowWidth;
+        shadowTextureHeight = shadowHeight;
         temporalHistoryIndex = 0;
         temporalHistoryValid = false;
         shadowHistoryIndex = 0;
         shadowHistoryValid = false;
         temporalCameraInitialized = false;
         api.Logger.Notification(
-            "[VintageRTX] Size-dependent GPU resources resized: {0}x{1} -> {2}x{3}; RG shadow visibility={4}x{5}; color and shadow history reset.",
+            "[VintageRTX] Size-dependent GPU resources resized: {0}x{1} -> {2}x{3}; 8-channel point plus solar shadow visibility={4}x{5}; color and shadow history reset.",
             previousWidth,
             previousHeight,
             width,
@@ -2027,11 +2365,11 @@ internal sealed class FilmicDisplayRenderer : IRenderer
             IntPtr.Zero);
     }
 
-    /// <summary>Defines a linearly sampled RG16F point/sun visibility texture.</summary>
+    /// <summary>Defines one linearly sampled RGBA16F bank carrying four independent point sources.</summary>
     /// <param name="texture">Existing owned OpenGL texture handle.</param>
     /// <param name="width">Half-resolution allocation width in shadow pixels.</param>
     /// <param name="height">Half-resolution allocation height in shadow pixels.</param>
-    private static void AllocateShadowTexture(int texture, int width, int height)
+    private static void AllocateShadowPointTexture(int texture, int width, int height)
     {
         GL.BindTexture(TextureTarget.Texture2D, texture);
         GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Linear);
@@ -2041,29 +2379,81 @@ internal sealed class FilmicDisplayRenderer : IRenderer
         GL.TexImage2D(
             TextureTarget.Texture2D,
             0,
-            PixelInternalFormat.Rg16f,
+            PixelInternalFormat.Rgba16f,
             width,
             height,
             0,
-            PixelFormat.Rg,
+            PixelFormat.Rgba,
             PixelType.HalfFloat,
             IntPtr.Zero);
     }
 
-    /// <summary>Attaches an RG16F point/sun visibility texture and rejects an incomplete framebuffer.</summary>
+    /// <summary>
+    /// Returns the coherent spatial divisor used for independent shadow visibility carriers.
+    /// Performance resolves all sources together at one-third linear resolution; higher tiers keep
+    /// one-half resolution. A tier change performs one explicit history reset instead of alternating
+    /// pixel phases, so the resulting shadow field remains temporally uniform.
+    /// </summary>
+    /// <param name="qualityLevel">Current adaptive tier retained for the renderer contract.</param>
+    /// <returns>Three for Performance (tier two), otherwise two.</returns>
+    internal static int ShadowResolutionDivisor(int qualityLevel) => qualityLevel == 2 ? 3 : 2;
+
+    /// <summary>Defines one linearly sampled R16F solar-visibility texture.</summary>
+    /// <param name="texture">Existing owned OpenGL texture handle.</param>
+    /// <param name="width">Half-resolution allocation width in shadow pixels.</param>
+    /// <param name="height">Half-resolution allocation height in shadow pixels.</param>
+    private static void AllocateShadowSunTexture(int texture, int width, int height)
+    {
+        GL.BindTexture(TextureTarget.Texture2D, texture);
+        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMinFilter, (int)TextureMinFilter.Linear);
+        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Linear);
+        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
+        GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
+        GL.TexImage2D(
+            TextureTarget.Texture2D,
+            0,
+            PixelInternalFormat.R16f,
+            width,
+            height,
+            0,
+            PixelFormat.Red,
+            PixelType.HalfFloat,
+            IntPtr.Zero);
+    }
+
+    /// <summary>Attaches two four-source visibility banks and one independent solar bank.</summary>
     /// <param name="framebuffer">Owned framebuffer receiving the attachment.</param>
-    /// <param name="texture">Owned RG16F visibility texture: point lights in R and sun in G.</param>
+    /// <param name="pointA">Owned RGBA16F slots 0..3.</param>
+    /// <param name="pointB">Owned RGBA16F slots 4..7.</param>
+    /// <param name="sun">Owned R16F direct-sun visibility.</param>
     /// <param name="failureMessage">Diagnostic used if the driver rejects the framebuffer.</param>
-    private static void AttachShadowFramebuffer(int framebuffer, int texture, string failureMessage)
+    private static void AttachShadowFramebuffer(
+        int framebuffer,
+        int pointA,
+        int pointB,
+        int sun,
+        string failureMessage)
     {
         GL.BindFramebuffer(FramebufferTarget.Framebuffer, framebuffer);
         GL.FramebufferTexture2D(
             FramebufferTarget.Framebuffer,
             FramebufferAttachment.ColorAttachment0,
             TextureTarget.Texture2D,
-            texture,
+            pointA,
             0);
-        GL.DrawBuffer(DrawBufferMode.ColorAttachment0);
+        GL.FramebufferTexture2D(
+            FramebufferTarget.Framebuffer,
+            FramebufferAttachment.ColorAttachment1,
+            TextureTarget.Texture2D,
+            pointB,
+            0);
+        GL.FramebufferTexture2D(
+            FramebufferTarget.Framebuffer,
+            FramebufferAttachment.ColorAttachment2,
+            TextureTarget.Texture2D,
+            sun,
+            0);
+        GL.DrawBuffers(ShadowDrawBuffers.Length, ShadowDrawBuffers);
         if (GL.CheckFramebufferStatus(FramebufferTarget.Framebuffer)
             != FramebufferErrorCode.FramebufferComplete)
         {
@@ -2077,9 +2467,29 @@ internal sealed class FilmicDisplayRenderer : IRenderer
     /// </summary>
     private void UpdateVoxelTexture()
     {
-        if (!voxelScene.TryConsumeUpload(out VoxelSceneSnapshot snapshot))
+        if (voxelScene.TryConsumeUpload(out VoxelSceneSnapshot newestSnapshot))
         {
-            UpdateVoxelBlockTextures();
+            // A later generation supersedes an earlier deferred one without
+            // mutating its arrays. VoxelScene swaps immutable ready buffers.
+            pendingVoxelSnapshot = newestSnapshot;
+            pendingVoxelSnapshotAvailable = true;
+        }
+
+        if (!TrySelectSettledVoxelSnapshot(
+                ref pendingVoxelSnapshot,
+                ref pendingVoxelSnapshotAvailable,
+                voxelScene.CanPublishRetainedSnapshot,
+                out VoxelSceneSnapshot snapshot))
+        {
+            // A recenter publishes one provisional CPU snapshot while nearby
+            // chunks are still arriving, followed by a delayed confirmation
+            // scan. Retain rather than discard it: if an incremental edit was
+            // queued on the consume frame, the same snapshot becomes publishable
+            // as soon as that queue drains even when no fourth generation follows.
+            if (!pendingVoxelSnapshotAvailable)
+            {
+                UpdateVoxelBlockTextures();
+            }
             return;
         }
 
@@ -2347,6 +2757,33 @@ internal sealed class FilmicDisplayRenderer : IRenderer
         api.Render.CheckGlError("VintageRTX voxel scene upload");
     }
 
+    /// <summary>
+    /// Selects a retained complete voxel snapshot only after all asynchronous
+    /// replacement scene queues have settled. A provisional snapshot remains pending rather
+    /// than being lost when no newer generation follows it.
+    /// </summary>
+    /// <param name="pendingSnapshot">Newest immutable CPU snapshot.</param>
+    /// <param name="pendingAvailable">Whether a snapshot is retained.</param>
+    /// <param name="generationStable">Whether no rebuild or unprocessed edit can replace it.</param>
+    /// <param name="selectedSnapshot">Snapshot selected for one GPU upload.</param>
+    /// <returns><see langword="true"/> when an upload may proceed.</returns>
+    internal static bool TrySelectSettledVoxelSnapshot(
+        ref VoxelSceneSnapshot pendingSnapshot,
+        ref bool pendingAvailable,
+        bool generationStable,
+        out VoxelSceneSnapshot selectedSnapshot)
+    {
+        if (!pendingAvailable || !generationStable)
+        {
+            selectedSnapshot = default;
+            return false;
+        }
+
+        selectedSnapshot = pendingSnapshot;
+        pendingAvailable = false;
+        return true;
+    }
+
     /// <summary>Applies bounded dirty-region subuploads after the initial full voxel snapshot.</summary>
     private void UpdateVoxelBlockTextures()
     {
@@ -2524,6 +2961,7 @@ internal sealed class FilmicDisplayRenderer : IRenderer
             }
 
             CopyCameraMatrices();
+            bool temporalCameraStable = UpdateTemporalCameraStability();
             bool entityMirrorReady = RenderEntityMirror(
                 config,
                 width,
@@ -2556,6 +2994,48 @@ internal sealed class FilmicDisplayRenderer : IRenderer
             shader!.Use();
             shaderActive = true;
             shader.BindTexture2D("sourceColor", sourceColorTexture, 0);
+            NativeSunShadowDepthMaps nativeShadowMaps = ResolveNativeSunShadowDepthMaps(
+                api.Render.FrameBuffers);
+            bool nativeShadowFarReady = nativeShadowMatrixFarReady
+                && nativeShadowMaps.FarTextureId > 0;
+            bool nativeShadowNearReady = nativeShadowMatrixNearReady
+                && nativeShadowMaps.NearTextureId > 0;
+            if (!nativeSunShadowContractLogged && nativeShadowFarReady)
+            {
+                nativeSunShadowContractLogged = true;
+                api.Logger.Notification(
+                    "[VintageRTX] Native solar shadow detail active: far-depth={0}, near-depth={1}; alpha-tested and wind-deformed casters refine the independent 96 m voxel trace.",
+                    nativeShadowMaps.FarTextureId,
+                    nativeShadowNearReady ? nativeShadowMaps.NearTextureId : 0);
+            }
+            shader.BindTexture2D(
+                "nativeShadowMapFar",
+                nativeShadowFarReady ? nativeShadowMaps.FarTextureId : 0,
+                NativeShadowFarTextureUnit);
+            shader.BindTexture2D(
+                "nativeShadowMapNear",
+                nativeShadowNearReady ? nativeShadowMaps.NearTextureId : 0,
+                NativeShadowNearTextureUnit);
+            shader.Uniform("nativeShadowFarEnabled", nativeShadowFarReady ? 1 : 0);
+            shader.Uniform("nativeShadowNearEnabled", nativeShadowNearReady ? 1 : 0);
+            shader.UniformMatrix("nativeShadowMatrixFar", nativeShadowMatrixFar);
+            shader.UniformMatrix("nativeShadowMatrixNear", nativeShadowMatrixNear);
+            ResolveRenderFloatingOrigin(
+                out double nativeShadowFloatingOriginX,
+                out double nativeShadowFloatingOriginY,
+                out double nativeShadowFloatingOriginZ);
+            shader.Uniform(
+                "nativeShadowReferenceOffsetFar",
+                (float)(nativeShadowReferenceFar.X - nativeShadowFloatingOriginX),
+                (float)(nativeShadowReferenceFar.Y - nativeShadowFloatingOriginY),
+                (float)(nativeShadowReferenceFar.Z - nativeShadowFloatingOriginZ));
+            shader.Uniform(
+                "nativeShadowReferenceOffsetNear",
+                (float)(nativeShadowReferenceNear.X - nativeShadowFloatingOriginX),
+                (float)(nativeShadowReferenceNear.Y - nativeShadowFloatingOriginY),
+                (float)(nativeShadowReferenceNear.Z - nativeShadowFloatingOriginZ));
+            shader.Uniform("nativeShadowRangeFar", nativeShadowRangeFar);
+            shader.Uniform("nativeShadowRangeNear", nativeShadowRangeNear);
             shader.BindTexture2D(
                 "reflectionSourceColor",
                 reflectionSourceCapture.IsReady(width, height)
@@ -2677,7 +3157,6 @@ internal sealed class FilmicDisplayRenderer : IRenderer
                 TextureTarget.Texture2D,
                 voxelTextureReady ? voxelRainSurfaceTexture : 0);
             GL.Uniform1(voxelRainSurfaceSamplerLocation, 12);
-            bool temporalCameraStable = UpdateTemporalCameraStability();
             shader.UniformMatrix("projection", projectionMatrix);
             shader.UniformMatrix("inverseProjection", inverseProjectionMatrix);
             shader.UniformMatrix("viewMatrix", viewMatrix);
@@ -2736,6 +3215,10 @@ internal sealed class FilmicDisplayRenderer : IRenderer
             // a different wave/reflection solution on adjacent pixels and was
             // visible as checkerboard flips during continuous play.
             shader.Uniform("transportInterlace", 0);
+            // A skipped bounce frame writes zero radiance before temporal blending,
+            // which makes indirect light decay and then spike on the next traced frame.
+            // Profiles reduce ray count/steps instead; every displayed frame remains coherent.
+            shader.Uniform("secondaryBounceCadence", 1);
             bool voxelBounceDiagnosticCapture = captureFrame
                 && effectiveDebugView == VintageRtxDebugView.VoxelBounce;
             denseMultiLightCluster = IsDenseMultiLightCluster(
@@ -2745,9 +3228,11 @@ internal sealed class FilmicDisplayRenderer : IRenderer
                 : adaptiveQualityLevel switch
                 {
                     1 => Math.Min(config.VoxelBounceRayCount, 1),
-                    // Preserve genuine secondary radiance at the minimum tier. Its
-                    // surface/visibility traversal budget is reduced separately.
-                    2 => Math.Min(config.VoxelBounceRayCount, 1),
+                    // The CPU-built directional irradiance field is the stable
+                    // secondary-light LOD at the minimum tier. A full-screen ray
+                    // every frame exceeded the pacing budget, while skipping it
+                    // periodically produced the visible zero/radiance pulse.
+                    2 => 0,
                     _ => config.VoxelBounceRayCount
                 };
             shader.Uniform("voxelBounceRayCount", effectiveVoxelBounceRayCount);
@@ -2760,9 +3245,8 @@ internal sealed class FilmicDisplayRenderer : IRenderer
             int effectiveVoxelBounceSteps = adaptiveQualityLevel switch
             {
                 1 => 7,
-                // The directional cache supplies the long-lived indirect lobe
-                // at the interlaced tier. Two surface steps retain a genuine
-                // secondary hit while leaving headroom for the 96-block sun ray.
+                // No per-pixel bounce ray is issued at this tier; these values
+                // remain valid ABI inputs and diagnostic-capture fallbacks.
                 2 => 2,
                 _ => highQualityVoxelBounceSteps
             };
@@ -2786,7 +3270,19 @@ internal sealed class FilmicDisplayRenderer : IRenderer
                 VintageRtxRenderProfile.Cinematic => 48,
                 _ => 20
             };
-            int effectiveSkyRayCount = adaptiveQualityLevel == 0 ? highQualitySkyRayCount : 1;
+            int effectiveSkyRayCount = adaptiveQualityLevel switch
+            {
+                1 => 1,
+                // Performance already consumes the CPU-built directional
+                // irradiance field and the independent long-range sun mask.
+                // Repeating a short hierarchical sky DDA on every full-size
+                // receiver duplicated occlusion work and exceeded the profile
+                // budget. The raster carrier retains Vintage Story's ambient
+                // sky solution at this lowest tier; Balanced and above keep an
+                // explicit world-space probe.
+                2 => 0,
+                _ => highQualitySkyRayCount
+            };
             int effectiveSkyTraceSteps = adaptiveQualityLevel switch
             {
                 1 => 10,
@@ -2836,7 +3332,10 @@ internal sealed class FilmicDisplayRenderer : IRenderer
                 2 => 4.0f,
                 _ => highQualitySunFineShadowDistance
             };
-            shader.Uniform("sunShadowDistance", config.SunShadowDistance);
+            float effectiveSunShadowDistance = voxelTextureReady
+                ? Math.Max(config.SunShadowDistance, voxelSnapshot.SunTraceDistance)
+                : config.SunShadowDistance;
+            shader.Uniform("sunShadowDistance", effectiveSunShadowDistance);
             shader.Uniform("sunFineShadowDistance", effectiveSunFineShadowDistance);
             shader.Uniform("occupancyScale", (float)VoxelScene.OccupancyScale);
             shader.Uniform("rayDistance", config.RayDistance);
@@ -2886,6 +3385,7 @@ internal sealed class FilmicDisplayRenderer : IRenderer
                 "screenSpaceReflectionsEnabled",
                 config.ScreenSpaceReflectionsEnabled
                     && gBufferAvailable
+                    && adaptiveQualityLevel < 2
                     ? 1
                     : 0);
             int highQualityMaximumVoxelLights = config.RenderProfile switch
@@ -2947,72 +3447,141 @@ internal sealed class FilmicDisplayRenderer : IRenderer
             shader.Uniform("temporalBlend", temporalBlend);
 
             GL.BindVertexArray(fullscreenVertexArray);
-            int shadowWidth = Math.Max(1, (width + 1) / 2);
-            int shadowHeight = Math.Max(1, (height + 1) / 2);
-            // Reciprocal half-resolution texel dimensions, in shadow-pixel^-1.
+            int shadowWidth = shadowTextureWidth;
+            int shadowHeight = shadowTextureHeight;
+            // Reciprocal tier-scaled texel dimensions, in shadow-pixel^-1.
             shader.Uniform(
                 "shadowInverseFrameSize",
                 1.0f / shadowWidth,
                 1.0f / shadowHeight);
-            bool selectedPointShadowSources = currentDynamicLightCount > 0
-                || voxelSnapshot.Lights is { Length: > 0 };
+            shader.Uniform("shadowFilterTapCount", adaptiveQualityLevel == 2 ? 2 : 4);
+            bool selectedPointShadowSources = currentVoxelLightCount > 0;
             bool selectedSunShadowSource = config.SunShadowsEnabled
                 && config.SunLightStrength > 0.0f;
             bool shadowFilteringActive = config.VoxelLightingEnabled
                 && voxelTextureReady
                 && gBufferAvailable
                 && (selectedPointShadowSources || selectedSunShadowSource);
+            bool shadowRefreshActive = shadowFilteringActive
+                && ShouldRefreshShadowVisibility(
+                    adaptiveQualityLevel,
+                    temporalCameraStable,
+                    captureFrame,
+                    shadowHistoryValid,
+                    renderedFrameCount);
             shader.Uniform("shadowPass", 0);
             shader.Uniform("prefilteredShadowVisibility", 0);
             shader.Uniform("shadowTemporalBlend", 0.0f);
             shader.Uniform("outputColorDomain", 1);
-            if (shadowFilteringActive)
+            if (shadowRefreshActive)
             {
-                // A coherent half-resolution viewport evaluates every receiver;
+                // A coherent tier-scaled viewport evaluates every receiver;
                 // there is no checkerboard/interlaced shadow phase at tier 2.
-                // Pass 1 stores dimensionless point-light visibility in R and
-                // direct-sun visibility in G. No final color is accumulated.
+                // Pass 1 preserves one dimensionless visibility per light slot
+                // across two RGBA16F banks and stores sun separately in R16F.
+                // No final color is accumulated and no source is averaged.
                 GL.Viewport(0, 0, shadowWidth, shadowHeight);
                 GL.BindFramebuffer(
                     FramebufferTarget.DrawFramebuffer,
                     shadowCurrentFramebuffer);
-                GL.DrawBuffer(DrawBufferMode.ColorAttachment0);
+                GL.DrawBuffers(ShadowDrawBuffers.Length, ShadowDrawBuffers);
                 shader.Uniform("shadowPass", 1);
                 GL.DrawArrays(PrimitiveType.Triangles, 0, 3);
 
-                // Pass 2 performs one shared spatial edge-aware resolve against
-                // the current G-buffer, followed by independent per-channel
-                // temporal rejection and clamping in RG16F history.
-                // Unit 0 is temporarily free because this pass does not read
-                // the raster carrier; unit 15 holds the previous RG16F mask.
+                // Pass 2 performs the same geometric bilateral support for all
+                // slots, but rejection/clamping remains independent per source.
+                // Units 0/5/8 already belong to float sampler2D uniforms whose
+                // original inputs are unused by this pass. Reusing only the
+                // same sampler type avoids illegal sampler2D/sampler3D aliasing;
+                // all three final-pass bindings are restored below.
                 int shadowWriteIndex = shadowHistoryIndex ^ 1;
-                shader.BindTexture2D("shadowCurrent", shadowCurrentTexture, 0);
                 shader.BindTexture2D(
-                    "shadowHistory",
-                    shadowHistoryTextures[shadowHistoryIndex],
-                    15);
+                    "shadowPointCurrentA",
+                    shadowCurrentPointATexture,
+                    0);
+                shader.BindTexture2D(
+                    "shadowPointCurrentB",
+                    shadowCurrentPointBTexture,
+                    5);
+                shader.BindTexture2D(
+                    "shadowSunCurrent",
+                    shadowCurrentSunTexture,
+                    8);
+                shader.BindTexture2D(
+                    "shadowPointHistoryA",
+                    shadowHistoryPointATextures[shadowHistoryIndex],
+                    ShadowPointATextureUnit);
+                shader.BindTexture2D(
+                    "shadowPointHistoryB",
+                    shadowHistoryPointBTextures[shadowHistoryIndex],
+                    ShadowPointBTextureUnit);
+                shader.BindTexture2D(
+                    "shadowSunHistory",
+                    shadowHistorySunTextures[shadowHistoryIndex],
+                    ShadowSunTextureUnit);
                 shader.Uniform("shadowPass", 2);
-                shader.Uniform(
-                    "shadowTemporalBlend",
-                    config.TemporalAccumulationEnabled
-                        && shadowHistoryValid
-                        && temporalCameraStable
-                        ? config.TemporalHistoryWeight
-                        : 0.0f);
+                // Raw visibility uses a fixed finite-emitter quadrature, so a
+                // current-frame bilateral resolve is already deterministic.
+                // Reusing screen-space visibility across frames without a
+                // previous receiver depth/normal buffer transfers an animal's
+                // shadow history onto the wall it vacates. Keep the history
+                // textures as persistent per-source storage for tier-two reuse,
+                // but never blend different receiver identities here.
+                shader.Uniform("shadowTemporalBlend", 0.0f);
                 GL.BindFramebuffer(
                     FramebufferTarget.DrawFramebuffer,
                     shadowHistoryFramebuffers[shadowWriteIndex]);
-                GL.DrawBuffer(DrawBufferMode.ColorAttachment0);
+                GL.DrawBuffers(ShadowDrawBuffers.Length, ShadowDrawBuffers);
                 GL.DrawArrays(PrimitiveType.Triangles, 0, 3);
 
                 shadowHistoryIndex = shadowWriteIndex;
                 shadowHistoryValid = true;
                 shader.BindTexture2D("sourceColor", sourceColorTexture, 0);
                 shader.BindTexture2D(
-                    "shadowHistory",
-                    shadowHistoryTextures[shadowHistoryIndex],
-                    15);
+                    "historyColor",
+                    temporalHistoryTextures[temporalHistoryIndex],
+                    5);
+                shader.BindTexture2D(
+                    "gMaterial",
+                    gBuffer.GlowTextureId,
+                    8);
+                shader.BindTexture2D(
+                    "shadowPointHistoryA",
+                    shadowHistoryPointATextures[shadowHistoryIndex],
+                    ShadowPointATextureUnit);
+                shader.BindTexture2D(
+                    "shadowPointHistoryB",
+                    shadowHistoryPointBTextures[shadowHistoryIndex],
+                    ShadowPointBTextureUnit);
+                shader.BindTexture2D(
+                    "shadowSunHistory",
+                    shadowHistorySunTextures[shadowHistoryIndex],
+                    ShadowSunTextureUnit);
+                GL.ActiveTexture(TextureUnit.Texture3);
+                GL.BindTexture(TextureTarget.Texture3D, voxelTexture);
+                GL.ActiveTexture(TextureUnit.Texture4);
+                GL.BindTexture(TextureTarget.Texture3D, voxelOccupancyTexture);
                 shader.Uniform("shadowPass", 0);
+                shader.Uniform("prefilteredShadowVisibility", 1);
+            }
+            else if (shadowFilteringActive)
+            {
+                // Stable Performance frames alternate with the entity-mirror
+                // replay. Rebind the prior independent source banks explicitly;
+                // their temporal ownership remains valid and the final pass sees
+                // exactly the same visibility solution as the preceding frame.
+                shader.BindTexture2D(
+                    "shadowPointHistoryA",
+                    shadowHistoryPointATextures[shadowHistoryIndex],
+                    ShadowPointATextureUnit);
+                shader.BindTexture2D(
+                    "shadowPointHistoryB",
+                    shadowHistoryPointBTextures[shadowHistoryIndex],
+                    ShadowPointBTextureUnit);
+                shader.BindTexture2D(
+                    "shadowSunHistory",
+                    shadowHistorySunTextures[shadowHistoryIndex],
+                    ShadowSunTextureUnit);
                 shader.Uniform("prefilteredShadowVisibility", 1);
             }
             else
@@ -3020,7 +3589,7 @@ internal sealed class FilmicDisplayRenderer : IRenderer
                 shadowHistoryValid = false;
             }
 
-            // Shadow passes use an owned half-resolution target. The final
+            // Shadow passes use an owned tier-scaled target. The final
             // color/diagnostic pass must cover the complete engine framebuffer.
             // GlState.Restore provides the exception-safe outer restoration.
             GL.Viewport(0, 0, width, height);
@@ -3034,7 +3603,7 @@ internal sealed class FilmicDisplayRenderer : IRenderer
             }
             else
             {
-                // The shadow resolve leaves its RG16F history target bound.
+                // The shadow resolve leaves its three-bank history target bound.
                 // Diagnostic views are final colour outputs, not shadow masks;
                 // explicitly restore the game's destination before drawing them.
                 // Without this branch the screen remains unchanged and an A/B
@@ -3252,31 +3821,104 @@ internal sealed class FilmicDisplayRenderer : IRenderer
             return false;
         }
 
-        var floatingOrigin = api.World.Player.Entity.Pos;
+        ResolveRenderFloatingOrigin(
+            out double floatingOriginX,
+            out double floatingOriginY,
+            out double floatingOriginZ);
         if (!liquidSurfaceRuntime.TryGetNearestSurfaceWorldY(
-                floatingOrigin.X,
-                floatingOrigin.Z,
+                floatingOriginX,
+                floatingOriginZ,
                 out float surfaceWorldY))
         {
             return false;
         }
 
-        entityMirrorProjection.Render(
-            frameWidth,
-            frameHeight,
-            reflectionSourceCapture.TextureId,
-            reflectionSourceCapture.PositionTextureId,
-            entityMirrorSourceCapture.PositionTextureId,
-            projectionMatrix,
-            viewMatrix,
-            inverseViewMatrix,
-            floatingOrigin.X,
-            floatingOrigin.Y,
-            floatingOrigin.Z,
-            surfaceWorldY,
-            config.ReflectionDistance,
-            captureEntityEvidence);
-        return true;
+        double[] cameraMatrix = api.Render.CameraMatrixOrigin;
+        float[] cameraMatrixFloat = api.Render.CameraMatrixOriginf;
+        double[] perspectiveProjection = api.Render.PerspectiveProjectionMat;
+        float[] currentProjection = api.Render.CurrentProjectionMatrix;
+        var projectionStack = api.Render.PMatrix;
+        if (cameraMatrix.Length < 16
+            || cameraMatrixFloat.Length < 16
+            || perspectiveProjection.Length < 16
+            || currentProjection.Length < 16
+            || projectionStack.Count < 1
+            || projectionStack.Top.Length < 16)
+        {
+            return false;
+        }
+
+        Array.Copy(cameraMatrix, mirrorGuardCameraMatrix, 16);
+        Array.Copy(cameraMatrixFloat, mirrorGuardCameraMatrixFloat, 16);
+        Array.Copy(perspectiveProjection, mirrorGuardPerspectiveProjection, 16);
+        Array.Copy(currentProjection, mirrorGuardCurrentProjection, 16);
+        Array.Copy(projectionStack.Top, mirrorGuardProjectionStackTop, 16);
+        int savedProjectionStackCount = projectionStack.Count;
+        try
+        {
+            entityMirrorProjection.Render(
+                frameWidth,
+                frameHeight,
+                reflectionSourceCapture.TextureId,
+                reflectionSourceCapture.PositionTextureId,
+                entityMirrorSourceCapture.PositionTextureId,
+                projectionMatrix,
+                viewMatrix,
+                inverseViewMatrix,
+                floatingOriginX,
+                floatingOriginY,
+                floatingOriginZ,
+                surfaceWorldY,
+                config.ReflectionDistance,
+                captureEntityEvidence,
+                MirrorResolutionDivisor(adaptiveQualityLevel));
+            return true;
+        }
+        finally
+        {
+            EntityMirrorGeometryReplayPatch.RestoreMutableCameraCarriers(
+                cameraMatrix,
+                mirrorGuardCameraMatrix,
+                cameraMatrixFloat,
+                mirrorGuardCameraMatrixFloat,
+                perspectiveProjection,
+                mirrorGuardPerspectiveProjection,
+                currentProjection,
+                mirrorGuardCurrentProjection,
+                projectionStack,
+                savedProjectionStackCount,
+                mirrorGuardProjectionStackTop);
+        }
+    }
+
+    /// <summary>Returns the full-frame divisor used by the official mirrored geometry carrier.</summary>
+    /// <param name="qualityLevel">Current adaptive tier, where two is Performance.</param>
+    /// <returns>Two for high/balanced tiers and four for stable full-rate Performance replay.</returns>
+    internal static int MirrorResolutionDivisor(int qualityLevel) => qualityLevel == 2 ? 4 : 2;
+
+    /// <summary>
+    /// Decides whether independent point/sun visibility banks need a fresh raw and bilateral pass.
+    /// Stable Performance frames reuse one visibility solution while the lower-resolution entity
+    /// mirror remains current at full display rate.
+    /// </summary>
+    /// <param name="qualityLevel">Current adaptive quality tier, where two is Performance.</param>
+    /// <param name="cameraStable">Whether the camera matches the preceding rendered frame.</param>
+    /// <param name="captureFrame">Whether automated evidence requires a current visibility mask.</param>
+    /// <param name="shadowHistoryReady">Whether reusable per-source visibility banks exist.</param>
+    /// <param name="frameIndex">Monotonic renderer frame index.</param>
+    /// <returns><see langword="true"/> when raw and filtered visibility must be regenerated.</returns>
+    internal static bool ShouldRefreshShadowVisibility(
+        int qualityLevel,
+        bool cameraStable,
+        bool captureFrame,
+        bool shadowHistoryReady,
+        long frameIndex)
+    {
+        return qualityLevel != 2
+            || !cameraStable
+            || captureFrame
+            || !shadowHistoryReady
+            || (frameIndex & 1L) != 0L;
     }
 
     /// <summary>Copies projection/view data into float arrays matching GLSL column-major upload.</summary>
@@ -3323,7 +3965,11 @@ internal sealed class FilmicDisplayRenderer : IRenderer
         }
 
         double[] currentMatrix = api.Render.CameraMatrixOrigin;
-        Vec3d currentPosition = api.World.Player.Entity.CameraPos;
+        // CameraPos includes engine eye/bob offsets which can oscillate while
+        // the rendered CameraMatrixOrigin and the player's world transform are
+        // unchanged. Anchor temporal reprojection to the authoritative entity
+        // position; the matrix still catches real eye rotation/translation.
+        var currentPosition = api.World.Player.Entity.Pos;
         bool stable = temporalCameraInitialized && currentMatrix.Length >= temporalCameraMatrix.Length;
         if (stable)
         {
@@ -3340,7 +3986,10 @@ internal sealed class FilmicDisplayRenderer : IRenderer
             double dx = currentPosition.X - temporalCameraX;
             double dy = currentPosition.Y - temporalCameraY;
             double dz = currentPosition.Z - temporalCameraZ;
-            stable &= dx * dx + dy * dy + dz * dz <= 0.000001;
+            if (!automatedCameraLock)
+            {
+                stable &= dx * dx + dy * dy + dz * dz <= 0.000001;
+            }
         }
 
         if (currentMatrix.Length >= temporalCameraMatrix.Length)
@@ -3463,7 +4112,10 @@ internal sealed class FilmicDisplayRenderer : IRenderer
 
         if (adaptiveOverBudgetFrames >= AdaptiveDowngradeFrames && adaptiveQualityLevel < 2)
         {
-            adaptiveQualityLevel++;
+            adaptiveQualityLevel = AdaptiveDowngradeTarget(
+                adaptiveQualityLevel,
+                gpuMilliseconds,
+                config.GpuBudgetMilliseconds);
             adaptiveOverBudgetFrames = 0;
             adaptiveUnderBudgetFrames = 0;
             adaptiveTransitionCooldownFrames = AdaptiveTransitionCooldownFrames;
@@ -3487,6 +4139,27 @@ internal sealed class FilmicDisplayRenderer : IRenderer
         }
 
         adaptiveQualityStatus = $"{QualityLevelName(adaptiveQualityLevel)} ({gpuMilliseconds:0.00}/{config.GpuBudgetMilliseconds:0.00}ms)";
+    }
+
+    /// <summary>
+    /// Selects the next lower-cost tier. A severe initial overload skips the short-lived Balanced
+    /// probe so temporal transport changes only once before it converges; mild pressure still moves
+    /// by one tier and retains the existing hysteresis.
+    /// </summary>
+    /// <param name="currentLevel">Current tier: zero high, one balanced, two performance.</param>
+    /// <param name="gpuMilliseconds">Smoothed VintageRTX GPU duration.</param>
+    /// <param name="budgetMilliseconds">Configured VintageRTX GPU budget.</param>
+    /// <returns>A bounded target tier in the inclusive range zero through two.</returns>
+    internal static int AdaptiveDowngradeTarget(
+        int currentLevel,
+        double gpuMilliseconds,
+        double budgetMilliseconds)
+    {
+        int boundedLevel = Math.Clamp(currentLevel, 0, 2);
+        bool severeInitialOverload = boundedLevel == 0
+            && budgetMilliseconds > 0.0
+            && gpuMilliseconds >= budgetMilliseconds * AdaptiveSevereOverBudgetRatio;
+        return severeInitialOverload ? 2 : Math.Min(2, boundedLevel + 1);
     }
 
     /// <summary>Maps the internal zero-based tier to stable status text.</summary>
@@ -3542,23 +4215,26 @@ internal sealed class FilmicDisplayRenderer : IRenderer
         shader.Uniform("sunOccupancyScale", (float)voxelSnapshot.SunOccupancyScale);
         shader.Uniform(
             "rainSurfaceOrigin",
-            (float)voxelSnapshot.SunOriginX,
-            (float)voxelSnapshot.SunOriginZ);
+            (float)voxelSnapshot.RainSurfaceOriginX,
+            (float)voxelSnapshot.RainSurfaceOriginZ);
         shader.Uniform(
             "rainSurfaceSize",
             (float)voxelSnapshot.RainSurfaceWidth,
             (float)voxelSnapshot.RainSurfaceDepth);
 
-        var floatingOrigin = api.World.Player.Entity.Pos;
+        ResolveRenderFloatingOrigin(
+            out double floatingOriginX,
+            out double floatingOriginY,
+            out double floatingOriginZ);
         Vec3d cameraPosition = new(
-            floatingOrigin.X + inverseViewMatrixDouble[12],
-            floatingOrigin.Y + inverseViewMatrixDouble[13],
-            floatingOrigin.Z + inverseViewMatrixDouble[14]);
+            floatingOriginX + inverseViewMatrixDouble[12],
+            floatingOriginY + inverseViewMatrixDouble[13],
+            floatingOriginZ + inverseViewMatrixDouble[14]);
         shader.Uniform(
             "floatingWorldOrigin",
-            (float)floatingOrigin.X,
-            (float)floatingOrigin.Y,
-            (float)floatingOrigin.Z);
+            (float)floatingOriginX,
+            (float)floatingOriginY,
+            (float)floatingOriginZ);
         shader.Uniform(
             "cameraWorldPosition",
             (float)cameraPosition.X,
@@ -3567,14 +4243,16 @@ internal sealed class FilmicDisplayRenderer : IRenderer
 
         Array.Clear(voxelLightPositions);
         Array.Clear(voxelLightColors);
+        Array.Clear(voxelLightPhotometry);
         Array.Clear(voxelLightSelectionScores);
+        Array.Clear(currentShadowLightSlotKeys);
         Array.Fill(voxelLightCasterLayers, -1.0f);
         int lightCount = enabled
             ? CopyDynamicPointLights(
                 config,
-                floatingOrigin.X,
-                floatingOrigin.Y,
-                floatingOrigin.Z,
+                floatingOriginX,
+                floatingOriginY,
+                floatingOriginZ,
                 maximumVoxelLights)
             : 0;
         if (enabled && voxelSnapshot.Lights is { Length: > 0 })
@@ -3609,13 +4287,24 @@ internal sealed class FilmicDisplayRenderer : IRenderer
             }
         }
 
-        BindSunUniforms(config, enabled);
+        BindSunUniforms(config, enabled, cameraPosition);
+
+        currentVoxelLightCount = lightCount;
+        if (!UpdateShadowLightSlotHistory(
+                lightCount,
+                floatingOriginX,
+                floatingOriginY,
+                floatingOriginZ))
+        {
+            shadowHistoryValid = false;
+        }
 
         shader.Uniform("voxelLightCount", lightCount);
         if (lightCount > 0)
         {
             GL.Uniform4(voxelLightPositionLocation, lightCount, voxelLightPositions);
             GL.Uniform4(voxelLightColorLocation, lightCount, voxelLightColors);
+            GL.Uniform4(voxelLightPhotometryLocation, lightCount, voxelLightPhotometry);
             GL.Uniform1(voxelLightCasterLayerLocation, lightCount, voxelLightCasterLayers);
         }
     }
@@ -3719,12 +4408,213 @@ internal sealed class FilmicDisplayRenderer : IRenderer
         voxelLightColors[offset] = light.Red;
         voxelLightColors[offset + 1] = light.Green;
         voxelLightColors[offset + 2] = light.Blue;
-        voxelLightColors[offset + 3] = pointLightRadius;
+        voxelLightColors[offset + 3] = Math.Min(pointLightRadius, light.TraceRadiusMetres());
+        voxelLightPhotometry[offset] = light.SourceHalfWidthMetres;
+        voxelLightPhotometry[offset + 1] = light.SourceHalfHeightMetres;
+        voxelLightPhotometry[offset + 2] = light.CutoffIlluminanceLux;
+        voxelLightPhotometry[offset + 3] = 1.0f;
         voxelLightCasterLayers[targetIndex] = light.CasterMask.Length
             == VoxelScene.LightCasterVoxelCount
                 ? staticIndex
                 : -1.0f;
         voxelLightSelectionScores[targetIndex] = selectionScore;
+        currentShadowLightSlotKeys[targetIndex] = StaticShadowLightSlotKey(light);
+    }
+
+    /// <summary>Builds a stable tagged key for one engine-owned dynamic light slot.</summary>
+    /// <param name="sourceIndex">Stable source index exposed by the engine point-light arrays.</param>
+    /// <returns>Non-zero dynamic-source identity disjoint from static emitter keys.</returns>
+    internal static long DynamicShadowLightSlotKey(int sourceIndex) =>
+        unchecked((long)(0x4000000000000000UL | (uint)(sourceIndex + 1)));
+
+    /// <summary>Builds a stable tagged key for one world-space voxel emitter.</summary>
+    /// <param name="light">Static light whose exact source position owns visibility history.</param>
+    /// <returns>Non-zero position identity disjoint from dynamic emitter keys.</returns>
+    internal static long StaticShadowLightSlotKey(VoxelLight light)
+    {
+        const ulong offsetBasis = 14695981039346656037UL;
+        const ulong prime = 1099511628211UL;
+        ulong hash = offsetBasis;
+        hash = (hash ^ (uint)BitConverter.SingleToInt32Bits(light.X)) * prime;
+        hash = (hash ^ (uint)BitConverter.SingleToInt32Bits(light.Y)) * prime;
+        hash = (hash ^ (uint)BitConverter.SingleToInt32Bits(light.Z)) * prime;
+        return unchecked((long)(0x8000000000000000UL | (hash & 0x3fffffffffffffffUL)));
+    }
+
+    /// <summary>Compares ordered active source identities before temporal visibility reuse.</summary>
+    /// <param name="previousKeys">Previous-frame slot identities.</param>
+    /// <param name="previousCount">Number of active previous slots.</param>
+    /// <param name="currentKeys">Current-frame slot identities.</param>
+    /// <param name="currentCount">Number of active current slots.</param>
+    /// <returns>Whether every active visibility channel still belongs to the same source.</returns>
+    internal static bool ShadowLightSlotsAreStable(
+        ReadOnlySpan<long> previousKeys,
+        int previousCount,
+        ReadOnlySpan<long> currentKeys,
+        int currentCount)
+    {
+        if (previousCount != currentCount
+            || previousCount < 0
+            || previousCount > previousKeys.Length
+            || currentCount < 0
+            || currentCount > currentKeys.Length)
+        {
+            return false;
+        }
+
+        return previousKeys[..previousCount].SequenceEqual(currentKeys[..currentCount]);
+    }
+
+    /// <summary>Commits current slot identities and reports whether temporal channels are reusable.</summary>
+    /// <param name="lightCount">Number of active point-light slots.</param>
+    /// <param name="anchorX">World-space player-origin X used by held-light classification.</param>
+    /// <param name="anchorY">World-space player-origin Y used by held-light classification.</param>
+    /// <param name="anchorZ">World-space player-origin Z used by held-light classification.</param>
+    /// <returns>Whether all current channels retain their previous source identity.</returns>
+    private bool UpdateShadowLightSlotHistory(
+        int lightCount,
+        double anchorX,
+        double anchorY,
+        double anchorZ)
+    {
+        bool stableIdentities = shadowLightSlotsInitialized
+            && ShadowLightSlotsAreStable(
+                previousShadowLightSlotKeys,
+                previousShadowLightSlotCount,
+                currentShadowLightSlotKeys,
+                lightCount);
+        bool stablePositions = stableIdentities
+            && StabilizeShadowLightPositions(
+                previousShadowLightPositions,
+                voxelLightPositions,
+                voxelLightCasterLayers,
+                lightCount,
+                0.01f,
+                (float)anchorX,
+                (float)anchorY,
+                (float)anchorZ,
+                0.75f);
+        Array.Copy(
+            currentShadowLightSlotKeys,
+            previousShadowLightSlotKeys,
+            currentShadowLightSlotKeys.Length);
+        for (int index = 0; index < lightCount; index++)
+        {
+            int packedOffset = index * 4;
+            int positionOffset = index * 3;
+            previousShadowLightPositions[positionOffset] = voxelLightPositions[packedOffset];
+            previousShadowLightPositions[positionOffset + 1] = voxelLightPositions[packedOffset + 1];
+            previousShadowLightPositions[positionOffset + 2] = voxelLightPositions[packedOffset + 2];
+        }
+        previousShadowLightSlotCount = lightCount;
+        shadowLightSlotsInitialized = true;
+        return stableIdentities && stablePositions;
+    }
+
+    /// <summary>Snaps sub-centimetre source jitter and rejects history for genuine emitter movement.</summary>
+    /// <param name="previousPositions">Previous packed XYZ positions.</param>
+    /// <param name="currentPositions">Current packed XYZI shader positions, modified for stable sources.</param>
+    /// <param name="lightCount">Active source count.</param>
+    /// <param name="stabilityDistance">Maximum position delta eligible for snapping.</param>
+    /// <returns>Whether every active source remained within the stability radius.</returns>
+    internal static bool StabilizeShadowLightPositions(
+        ReadOnlySpan<float> previousPositions,
+        Span<float> currentPositions,
+        int lightCount,
+        float stabilityDistance)
+    {
+        return StabilizeShadowLightPositions(
+            previousPositions,
+            currentPositions,
+            [],
+            lightCount,
+            stabilityDistance,
+            0.0f,
+            0.0f,
+            0.0f,
+            0.0f);
+    }
+
+    /// <summary>
+    /// Snaps real world-space sources while ignoring camera-aligned slots whose
+    /// raw shadow channels are intentionally constant and unused by final shading.
+    /// </summary>
+    /// <param name="previousPositions">Previous packed XYZ positions.</param>
+    /// <param name="currentPositions">Current packed XYZI shader positions.</param>
+    /// <param name="casterLayers">Per-slot caster layer; negative values identify dynamic sources.</param>
+    /// <param name="lightCount">Active source count.</param>
+    /// <param name="stabilityDistance">Maximum real-source displacement eligible for snapping.</param>
+    /// <param name="anchorX">Current world-space player-origin X.</param>
+    /// <param name="anchorY">Current world-space player-origin Y.</param>
+    /// <param name="anchorZ">Current world-space player-origin Z.</param>
+    /// <param name="cameraAlignedDistance">Maximum source-to-player distance for a shadowless camera slot.</param>
+    /// <returns>Whether every shadow-consuming source retained a reusable position.</returns>
+    internal static bool StabilizeShadowLightPositions(
+        ReadOnlySpan<float> previousPositions,
+        Span<float> currentPositions,
+        ReadOnlySpan<float> casterLayers,
+        int lightCount,
+        float stabilityDistance,
+        float anchorX,
+        float anchorY,
+        float anchorZ,
+        float cameraAlignedDistance)
+    {
+        if (lightCount < 0
+            || previousPositions.Length < lightCount * 3
+            || currentPositions.Length < lightCount * 4
+            || (!casterLayers.IsEmpty && casterLayers.Length < lightCount)
+            || !float.IsFinite(stabilityDistance)
+            || stabilityDistance < 0.0f
+            || (!casterLayers.IsEmpty
+                && (!float.IsFinite(anchorX)
+                    || !float.IsFinite(anchorY)
+                    || !float.IsFinite(anchorZ)
+                    || !float.IsFinite(cameraAlignedDistance)
+                    || cameraAlignedDistance < 0.0f)))
+        {
+            return false;
+        }
+
+        float maximumDistanceSquared = stabilityDistance * stabilityDistance;
+        float cameraAlignedDistanceSquared = cameraAlignedDistance * cameraAlignedDistance;
+        bool stable = true;
+        for (int index = 0; index < lightCount; index++)
+        {
+            int previousOffset = index * 3;
+            int currentOffset = index * 4;
+            float cameraDx = currentPositions[currentOffset] - anchorX;
+            float cameraDy = currentPositions[currentOffset + 1] - anchorY;
+            float cameraDz = currentPositions[currentOffset + 2] - anchorZ;
+            float cameraDistanceSquared = cameraDx * cameraDx
+                + cameraDy * cameraDy
+                + cameraDz * cameraDz;
+            bool cameraAlignedShadowless = !casterLayers.IsEmpty
+                && casterLayers[index] < -0.5f
+                && float.IsFinite(cameraAlignedDistanceSquared)
+                && cameraAlignedDistance > 0.0f
+                && cameraDistanceSquared < cameraAlignedDistanceSquared;
+            if (cameraAlignedShadowless)
+            {
+                continue;
+            }
+
+            float dx = currentPositions[currentOffset] - previousPositions[previousOffset];
+            float dy = currentPositions[currentOffset + 1] - previousPositions[previousOffset + 1];
+            float dz = currentPositions[currentOffset + 2] - previousPositions[previousOffset + 2];
+            float distanceSquared = dx * dx + dy * dy + dz * dz;
+            if (!float.IsFinite(distanceSquared) || distanceSquared > maximumDistanceSquared)
+            {
+                stable = false;
+                continue;
+            }
+
+            currentPositions[currentOffset] = previousPositions[previousOffset];
+            currentPositions[currentOffset + 1] = previousPositions[previousOffset + 1];
+            currentPositions[currentOffset + 2] = previousPositions[previousOffset + 2];
+        }
+
+        return stable;
     }
 
     /// <summary>Scores an emitter by intensity/range with distance-squared attenuation for selection only.</summary>
@@ -3810,6 +4700,9 @@ internal sealed class FilmicDisplayRenderer : IRenderer
                 greenRange * inverseRange,
                 blueRange * inverseRange,
                 Math.Min(range, config.PointLightRadius),
+                EmitterPhotometry.CandelaAtCutoffRange(
+                    range,
+                    EmitterPhotometry.DefaultCutoffIlluminanceLux),
                 range / (1.0f + viewDistanceSquared * 0.35f));
         }
 
@@ -3833,12 +4726,19 @@ internal sealed class FilmicDisplayRenderer : IRenderer
             voxelLightPositions[copiedOffset] = candidate.WorldX;
             voxelLightPositions[copiedOffset + 1] = candidate.WorldY;
             voxelLightPositions[copiedOffset + 2] = candidate.WorldZ;
-            voxelLightPositions[copiedOffset + 3] = 1.0f;
+            voxelLightPositions[copiedOffset + 3] = candidate.IntensityCandela;
             voxelLightColors[copiedOffset] = candidate.Red;
             voxelLightColors[copiedOffset + 1] = candidate.Green;
             voxelLightColors[copiedOffset + 2] = candidate.Blue;
             voxelLightColors[copiedOffset + 3] = candidate.Range;
+            voxelLightPhotometry[copiedOffset] = config.PointLightSourceRadius;
+            voxelLightPhotometry[copiedOffset + 1] = config.PointLightSourceRadius;
+            voxelLightPhotometry[copiedOffset + 2] =
+                EmitterPhotometry.DefaultCutoffIlluminanceLux;
+            voxelLightPhotometry[copiedOffset + 3] = 0.0f;
             voxelLightSelectionScores[copiedIndex] = candidate.Score;
+            currentShadowLightSlotKeys[copiedIndex] = DynamicShadowLightSlotKey(
+                candidate.SourceIndex);
             int selectedViewOffset = copiedIndex * 3;
             selectedDynamicLightViewPositions[selectedViewOffset] = candidate.ViewX;
             selectedDynamicLightViewPositions[selectedViewOffset + 1] = candidate.ViewY;
@@ -3868,7 +4768,7 @@ internal sealed class FilmicDisplayRenderer : IRenderer
                 {
                     int offset = index * 4;
                     api.Logger.Notification(
-                        "[VintageRTX.Test] Dynamic light {0}: view=({1:0.00},{2:0.00},{3:0.00}), world=({4:0.00},{5:0.00},{6:0.00}), radius={7:0.00}.",
+                        "[VintageRTX.Test] Dynamic light {0}: view=({1:0.00},{2:0.00},{3:0.00}), world=({4:0.00},{5:0.00},{6:0.00}), radius={7:0.00}, intensity={8:0.00} cd, source={9:0.000}x{10:0.000} m.",
                         index,
                         selectedDynamicLightViewPositions[index * 3],
                         selectedDynamicLightViewPositions[index * 3 + 1],
@@ -3876,7 +4776,10 @@ internal sealed class FilmicDisplayRenderer : IRenderer
                         voxelLightPositions[offset],
                         voxelLightPositions[offset + 1],
                         voxelLightPositions[offset + 2],
-                        voxelLightColors[offset + 3]);
+                        voxelLightColors[offset + 3],
+                        voxelLightPositions[offset + 3],
+                        voxelLightPhotometry[offset] * 2.0f,
+                        voxelLightPhotometry[offset + 1] * 2.0f);
                 }
             }
             lastDynamicLightCount = copiedCount;
@@ -4050,7 +4953,10 @@ internal sealed class FilmicDisplayRenderer : IRenderer
         worldZ = (float)(originZ + worldOffsetZ);
     }
 
-    /// <summary>One decoded game point light with stable ID, view/world positions, color, and score.</summary>
+    /// <summary>
+    /// One decoded game point light with stable ID, view/world positions, colour, physical intensity,
+    /// bounded trace range, and selection score.
+    /// </summary>
     private readonly record struct DynamicLightCandidate(
         int SourceIndex,
         float ViewX,
@@ -4063,6 +4969,7 @@ internal sealed class FilmicDisplayRenderer : IRenderer
         float Green,
         float Blue,
         float Range,
+        float IntensityCandela,
         float Score);
 
     /// <summary>Energy-conserving diagnostic decomposition across independent shadow-casting sources.</summary>
@@ -4075,7 +4982,11 @@ internal sealed class FilmicDisplayRenderer : IRenderer
     /// <summary>Binds normalized solar direction/color and hybrid trace range/enable state.</summary>
     /// <param name="config">Normalized sun strength, range, and enable settings.</param>
     /// <param name="voxelLightingEnabled">Whether occupancy data is valid for long-range visibility.</param>
-    private void BindSunUniforms(VintageRtxConfig config, bool voxelLightingEnabled)
+    /// <param name="cameraPosition">World-space camera position reconstructed from the same rendered-frame origin as the G-buffer.</param>
+    private void BindSunUniforms(
+        VintageRtxConfig config,
+        bool voxelLightingEnabled,
+        Vec3d cameraPosition)
     {
         if (!sunConfigurationLogged)
         {
@@ -4086,9 +4997,9 @@ internal sealed class FilmicDisplayRenderer : IRenderer
             sunConfigurationLogged = true;
         }
 
-        IClientGameCalendar? calendar = api.World.Calendar as IClientGameCalendar;
-        Vec3f sunDirection = calendar?.SunPositionNormalized
-            ?? api.Render.ShaderUniforms.SunPosition3D;
+        IGameCalendar worldCalendar = api.World.Calendar;
+        IClientGameCalendar? calendar = worldCalendar as IClientGameCalendar;
+        Vec3f sunDirection = VoxelScene.ResolveSunDirection(worldCalendar, cameraPosition);
         float directionLength = MathF.Sqrt(
             sunDirection.X * sunDirection.X
             + sunDirection.Y * sunDirection.Y
@@ -4111,7 +5022,6 @@ internal sealed class FilmicDisplayRenderer : IRenderer
         // The coordinate-aware API recomputes the astronomical term after an
         // automated time jump. IClientGameCalendar.DayLightStrength can retain
         // the pre-jump value on the first frame of a freshly created world.
-        Vec3d cameraPosition = api.World.Player.Entity.CameraPos;
         float daylightStrength = calendar?.GetDayLightStrength(
             cameraPosition.X,
             cameraPosition.Z) ?? 0.0f;
@@ -4130,6 +5040,17 @@ internal sealed class FilmicDisplayRenderer : IRenderer
         {
             api.Event.UnregisterRenderer(this, EnumRenderStage.AfterPostProcessing);
             preFinalDiagnosticRegistered = false;
+        }
+        if (cameraOriginCaptureRegistered)
+        {
+            api.Event.UnregisterRenderer(this, EnumRenderStage.Before);
+            cameraOriginCaptureRegistered = false;
+        }
+        if (nativeSunShadowCaptureRegistered)
+        {
+            api.Event.UnregisterRenderer(this, EnumRenderStage.ShadowFar);
+            api.Event.UnregisterRenderer(this, EnumRenderStage.ShadowNear);
+            nativeSunShadowCaptureRegistered = false;
         }
 
         if (sceneCopyTexture != 0)
@@ -4207,22 +5128,42 @@ internal sealed class FilmicDisplayRenderer : IRenderer
                 temporalFramebuffers[index] = 0;
             }
         }
-        if (shadowCurrentTexture != 0)
+        if (shadowCurrentPointATexture != 0)
         {
-            GL.DeleteTexture(shadowCurrentTexture);
-            shadowCurrentTexture = 0;
+            GL.DeleteTexture(shadowCurrentPointATexture);
+            shadowCurrentPointATexture = 0;
+        }
+        if (shadowCurrentPointBTexture != 0)
+        {
+            GL.DeleteTexture(shadowCurrentPointBTexture);
+            shadowCurrentPointBTexture = 0;
+        }
+        if (shadowCurrentSunTexture != 0)
+        {
+            GL.DeleteTexture(shadowCurrentSunTexture);
+            shadowCurrentSunTexture = 0;
         }
         if (shadowCurrentFramebuffer != 0)
         {
             GL.DeleteFramebuffer(shadowCurrentFramebuffer);
             shadowCurrentFramebuffer = 0;
         }
-        for (int index = 0; index < shadowHistoryTextures.Length; index++)
+        for (int index = 0; index < shadowHistoryPointATextures.Length; index++)
         {
-            if (shadowHistoryTextures[index] != 0)
+            if (shadowHistoryPointATextures[index] != 0)
             {
-                GL.DeleteTexture(shadowHistoryTextures[index]);
-                shadowHistoryTextures[index] = 0;
+                GL.DeleteTexture(shadowHistoryPointATextures[index]);
+                shadowHistoryPointATextures[index] = 0;
+            }
+            if (shadowHistoryPointBTextures[index] != 0)
+            {
+                GL.DeleteTexture(shadowHistoryPointBTextures[index]);
+                shadowHistoryPointBTextures[index] = 0;
+            }
+            if (shadowHistorySunTextures[index] != 0)
+            {
+                GL.DeleteTexture(shadowHistorySunTextures[index]);
+                shadowHistorySunTextures[index] = 0;
             }
             if (shadowHistoryFramebuffers[index] != 0)
             {
@@ -4233,6 +5174,7 @@ internal sealed class FilmicDisplayRenderer : IRenderer
 
         shader = null;
         lumaBridge.Dispose();
+        FenceStackAwareTessellationGuardPatch.Uninstall();
         ProjectileLiquidCollisionPatch.Uninstall();
         liquidSurfaceRuntime.Dispose();
         EntityMirrorGeometryReplayPatch.Uninstall();
@@ -4240,7 +5182,15 @@ internal sealed class FilmicDisplayRenderer : IRenderer
         entityMirrorSourceCapture.Dispose();
         entityMirrorProjection.Dispose();
         dynamicLiquidSurfaceBinding = default;
+        pendingVoxelSnapshot = default;
+        pendingVoxelSnapshotAvailable = false;
+        voxelSnapshot = default;
+        voxelTextureReady = false;
         performanceMonitor.Dispose();
+        Array.Clear(previousShadowLightSlotKeys);
+        shadowLightSlotsInitialized = false;
+        previousShadowLightSlotCount = 0;
+        currentVoxelLightCount = 0;
         initialized = false;
     }
 
@@ -4454,6 +5404,13 @@ internal sealed class FilmicDisplayRenderer : IRenderer
             && (dynamicLightCount > 1 || staticLights is { Length: > 1 });
     }
 }
+
+/// <summary>Borrowed native solar depth texture identifiers used to restore exact alpha silhouettes.</summary>
+/// <param name="FarTextureId">Far cascaded shadow-map depth texture, or zero.</param>
+/// <param name="NearTextureId">Near cascaded shadow-map depth texture, or zero.</param>
+internal readonly record struct NativeSunShadowDepthMaps(
+    int FarTextureId,
+    int NearTextureId);
 
 /// <summary>Paired A/B benchmark phases used to isolate effect cost from drift.</summary>
 internal enum BenchmarkPhase

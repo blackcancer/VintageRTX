@@ -25,7 +25,7 @@ internal static partial class RuntimeImageValidator
 
     /// <summary>Pure classification of one four-neighbor authored-normal cross.</summary>
     /// <param name="CountsTowardExcessiveDenominator">Whether all samples share one continuous authored receiver.</param>
-    /// <param name="IsExcessive">Whether a same-receiver normal discontinuity exceeds 35 degrees.</param>
+    /// <param name="IsExcessive">Whether multiple same-receiver normal discontinuities exceed 35 degrees.</param>
     /// <param name="IsResponsive">Whether accepted local RMS reaches one degree.</param>
     /// <param name="AngularRmsDegrees">Root-mean-square center-to-neighbor angle.</param>
     internal readonly record struct PbrNormalNeighborhoodAssessment(
@@ -33,6 +33,40 @@ internal static partial class RuntimeImageValidator
         bool IsExcessive,
         bool IsResponsive,
         double AngularRmsDegrees);
+
+    /// <summary>Ground and solar-occlusion evidence for a targeted exterior frame.</summary>
+    /// <param name="GroundCoverage">Fraction of the complete image occupied by upward receivers.</param>
+    /// <param name="ShadowedGroundRatio">Fraction of every upward receiver carrying solar occlusion.</param>
+    /// <param name="TargetGroundSamples">Upward-receiver samples inside the camera-centered target disc.</param>
+    /// <param name="TargetShadowedGroundRatio">Solar occlusion among receivers inside that target disc.</param>
+    internal readonly record struct SunReceiverCoverageAssessment(
+        double GroundCoverage,
+        double ShadowedGroundRatio,
+        int TargetGroundSamples,
+        double TargetShadowedGroundRatio);
+
+    /// <summary>Worst pairwise variation across three fixed-camera frames of one scalar channel.</summary>
+    /// <param name="Compatible">Whether all three images share non-zero dimensions.</param>
+    /// <param name="MaximumMeanAbsoluteDelta">Largest pairwise mean absolute normalized-channel delta.</param>
+    /// <param name="MaximumChangedPixelRatio">Largest pairwise fraction exceeding the requested change threshold.</param>
+    /// <param name="StableSampleRatio">Fraction retained after optional same-time Vanilla motion rejection.</param>
+    /// <param name="FirstMean">Mean retained scalar value in the first frame.</param>
+    /// <param name="SecondMean">Mean retained scalar value in the second frame.</param>
+    /// <param name="ThirdMean">Mean retained scalar value in the third frame.</param>
+    /// <param name="FirstSecondMeanAbsoluteDelta">Mean absolute delta from the first to second frame.</param>
+    /// <param name="SecondThirdMeanAbsoluteDelta">Mean absolute delta from the second to third frame.</param>
+    /// <param name="FirstThirdMeanAbsoluteDelta">Mean absolute delta from the first to third frame.</param>
+    internal readonly record struct TemporalTripletAssessment(
+        bool Compatible,
+        double MaximumMeanAbsoluteDelta,
+        double MaximumChangedPixelRatio,
+        double StableSampleRatio,
+        double FirstMean,
+        double SecondMean,
+        double ThirdMean,
+        double FirstSecondMeanAbsoluteDelta,
+        double SecondThirdMeanAbsoluteDelta,
+        double FirstThirdMeanAbsoluteDelta);
 
     /// <summary>Structural evidence for the two deterministic water-reflection witnesses.</summary>
     /// <param name="Compatible">Whether source and diagnostic dimensions can be compared.</param>
@@ -294,7 +328,11 @@ internal static partial class RuntimeImageValidator
     /// Executes the print Thin Leak Diagnostics step used by the deterministic runtime Image Validator fixture.
     /// </summary>
     /// <param name="log">The log input used to configure this deterministic test path.</param>
-    public static void PrintThinLeakDiagnostics(string log)
+    /// <param name="captureDirectory">
+    /// Optional archived capture directory used when the absolute paths recorded by the
+    /// isolated runtime no longer exist.
+    /// </param>
+    public static void PrintThinLeakDiagnostics(string log, string? captureDirectory = null)
     {
         Match finalMatch = FinalPairRegex().Matches(log).Cast<Match>().LastOrDefault() ?? Match.Empty;
         if (!finalMatch.Success)
@@ -302,21 +340,28 @@ internal static partial class RuntimeImageValidator
             throw new InvalidDataException("final before/after capture pair was not logged");
         }
 
-        using SKBitmap before = DecodeLoggedImage(finalMatch.Groups[1].Value);
-        using SKBitmap after = DecodeLoggedImage(finalMatch.Groups[2].Value);
-        using SKBitmap normal = DecodeLastLoggedImage(log, NormalMaskRegex());
-        using SKBitmap position = DecodeLastLoggedImage(log, PositionMaskRegex());
-        using SKBitmap material = DecodeLastLoggedImage(log, VoxelMaterialMaskRegex());
-        using SKBitmap visibility = DecodeLastLoggedImage(log, VoxelVisibilityMaskRegex());
-        using SKBitmap shadow = DecodeLastLoggedImage(log, ShadowMaskRegex());
-        using SKBitmap screenLighting = DecodeLastLoggedImage(log, ScreenLightingMaskRegex());
-        using SKBitmap reflection = DecodeLastLoggedImage(log, ReflectionMaskRegex());
-        using SKBitmap voxelReflection = DecodeLastLoggedImage(log, VoxelReflectionMaskRegex());
-        using SKBitmap bounce = DecodeLastLoggedImage(log, VoxelBounceMaskRegex());
-        using SKBitmap components = DecodeLastLoggedImage(log, TransportComponentsMaskRegex());
+        using SKBitmap before = DecodeLoggedImage(finalMatch.Groups[1].Value, captureDirectory);
+        using SKBitmap after = DecodeLoggedImage(finalMatch.Groups[2].Value, captureDirectory);
+        using SKBitmap normal = DecodeLastLoggedImage(log, NormalMaskRegex(), captureDirectory);
+        using SKBitmap position = DecodeLastLoggedImage(log, PositionMaskRegex(), captureDirectory);
+        using SKBitmap material = DecodeLastLoggedImage(log, VoxelMaterialMaskRegex(), captureDirectory);
+        using SKBitmap visibility = DecodeLastLoggedImage(log, VoxelVisibilityMaskRegex(), captureDirectory);
+        using SKBitmap shadow = DecodeLastLoggedImage(log, ShadowMaskRegex(), captureDirectory);
+        using SKBitmap nativeSun = DecodeLastLoggedImage(log, NativeSunShadowMaskRegex(), captureDirectory);
+        using SKBitmap screenLighting = DecodeLastLoggedImage(log, ScreenLightingMaskRegex(), captureDirectory);
+        using SKBitmap reflection = DecodeLastLoggedImage(log, ReflectionMaskRegex(), captureDirectory);
+        using SKBitmap voxelReflection = DecodeLastLoggedImage(log, VoxelReflectionMaskRegex(), captureDirectory);
+        using SKBitmap bounce = DecodeLastLoggedImage(log, VoxelBounceMaskRegex(), captureDirectory);
+        using SKBitmap components = DecodeLastLoggedImage(log, TransportComponentsMaskRegex(), captureDirectory);
 
         int reported = 0;
         int total = 0;
+        int coherentDepth = 0;
+        int coherentNormal = 0;
+        int coherentSurface = 0;
+        int missingVoxelMaterial = 0;
+        int nativeSupported = 0;
+        int voxelNativeDisagreement = 0;
         for (int y = 1; y < after.Height - 1; y++)
         {
             for (int x = 1; x < after.Width - 1; x++)
@@ -339,13 +384,63 @@ internal static partial class RuntimeImageValidator
                 }
 
                 total++;
+                bool horizontalAxis = horizontalDelta <= verticalDelta;
+                SKColor neighborA = position.GetPixel(
+                    horizontalAxis ? x - 1 : x,
+                    horizontalAxis ? y : y - 1);
+                SKColor neighborB = position.GetPixel(
+                    horizontalAxis ? x + 1 : x,
+                    horizontalAxis ? y : y + 1);
+                double centerDepth = position.GetPixel(x, y).Red / 255.0;
+                bool depthMatches = Math.Abs(centerDepth - neighborA.Red / 255.0) <= 0.012
+                    && Math.Abs(centerDepth - neighborB.Red / 255.0) <= 0.012;
+                Vector3 centerNormal = DecodeDiagnosticNormal(normal.GetPixel(x, y));
+                Vector3 normalA = DecodeDiagnosticNormal(normal.GetPixel(
+                    horizontalAxis ? x - 1 : x,
+                    horizontalAxis ? y : y - 1));
+                Vector3 normalB = DecodeDiagnosticNormal(normal.GetPixel(
+                    horizontalAxis ? x + 1 : x,
+                    horizontalAxis ? y : y + 1));
+                bool normalsMatch = Vector3.Dot(centerNormal, normalA) >= 0.92f
+                    && Vector3.Dot(centerNormal, normalB) >= 0.92f;
+                coherentDepth += depthMatches ? 1 : 0;
+                coherentNormal += normalsMatch ? 1 : 0;
+                coherentSurface += depthMatches && normalsMatch ? 1 : 0;
+                SKColor materialPixel = material.GetPixel(x, y);
+                missingVoxelMaterial += materialPixel.Red == 0
+                    && materialPixel.Green == 0
+                    && materialPixel.Blue == 0
+                        ? 1
+                        : 0;
+                SKColor nativeSunPixel = nativeSun.GetPixel(x, y);
+                bool hasNativeSupport = nativeSunPixel.Blue >= 128;
+                nativeSupported += hasNativeSupport ? 1 : 0;
+                voxelNativeDisagreement += hasNativeSupport
+                    && Math.Abs(nativeSunPixel.Red - nativeSunPixel.Green) >= 64
+                        ? 1
+                        : 0;
                 if (reported < 24 && (reported == 0 || (x + y * 3) % 17 == 0))
                 {
+                    SKColor beforeA = before.GetPixel(
+                        horizontalAxis ? x - 1 : x,
+                        horizontalAxis ? y : y - 1);
+                    SKColor beforeB = before.GetPixel(
+                        horizontalAxis ? x + 1 : x,
+                        horizontalAxis ? y : y + 1);
+                    SKColor afterA = after.GetPixel(
+                        horizontalAxis ? x - 1 : x,
+                        horizontalAxis ? y : y - 1);
+                    SKColor afterB = after.GetPixel(
+                        horizontalAxis ? x + 1 : x,
+                        horizontalAxis ? y : y + 1);
                     Console.WriteLine(
                         $"Leak ({x},{y}) before={Format(before.GetPixel(x, y))} "
                         + $"after={Format(after.GetPixel(x, y))} normal={Format(normal.GetPixel(x, y))} "
+                        + $"axisBefore={Format(beforeA)}/{Format(beforeB)} "
+                        + $"axisAfter={Format(afterA)}/{Format(afterB)} "
                         + $"position={Format(position.GetPixel(x, y))} material={Format(material.GetPixel(x, y))} "
                         + $"visibility={Format(visibility.GetPixel(x, y))} shadow={Format(shadow.GetPixel(x, y))} "
+                        + $"native={Format(nativeSunPixel)} "
                         + $"ssgi={Format(screenLighting.GetPixel(x, y))} reflection={Format(reflection.GetPixel(x, y))} "
                         + $"voxelReflection={Format(voxelReflection.GetPixel(x, y))} bounce={Format(bounce.GetPixel(x, y))} "
                         + $"components={Format(components.GetPixel(x, y))}");
@@ -354,7 +449,25 @@ internal static partial class RuntimeImageValidator
             }
         }
 
-        Console.WriteLine($"Thin leak diagnostics: {total} pixels, {reported} representative samples.");
+        Console.WriteLine(
+            $"Thin leak diagnostics: {total} pixels, {reported} representative samples; "
+            + $"coherent depth={coherentDepth}, coherent normal={coherentNormal}, "
+            + $"coherent surface={coherentSurface}, missing voxel material={missingVoxelMaterial}, "
+            + $"native support={nativeSupported}, voxel/native disagreement={voxelNativeDisagreement}.");
+    }
+
+    /// <summary>Decodes the normal diagnostic's signed unit vector.</summary>
+    /// <param name="color">RGB diagnostic sample encoded from -1..1 to 0..1.</param>
+    /// <returns>A normalized signed vector, or the forward fallback for a degenerate sample.</returns>
+    private static Vector3 DecodeDiagnosticNormal(SKColor color)
+    {
+        Vector3 normal = new(
+            color.Red / 127.5f - 1.0f,
+            color.Green / 127.5f - 1.0f,
+            color.Blue / 127.5f - 1.0f);
+        return normal.LengthSquared() > 0.0001f
+            ? Vector3.Normalize(normal)
+            : Vector3.UnitZ;
     }
 
     /// <summary>
@@ -362,25 +475,36 @@ internal static partial class RuntimeImageValidator
     /// </summary>
     /// <param name="log">The log input used to configure this deterministic test path.</param>
     /// <param name="regex">Coordinate component in the space defined by the tested API.</param>
+    /// <param name="captureDirectory">Optional directory containing archived capture PNG files.</param>
     /// <returns>The decode Last Logged Image result consumed by the caller&apos;s assertion.</returns>
-    private static SKBitmap DecodeLastLoggedImage(string log, Regex regex)
+    private static SKBitmap DecodeLastLoggedImage(
+        string log,
+        Regex regex,
+        string? captureDirectory = null)
     {
         Match match = regex.Matches(log).Cast<Match>().LastOrDefault() ?? Match.Empty;
         if (!match.Success)
         {
             throw new InvalidDataException($"diagnostic capture for '{regex}' was not logged");
         }
-        return DecodeLoggedImage(match.Groups[1].Value);
+        return DecodeLoggedImage(match.Groups[1].Value, captureDirectory);
     }
 
     /// <summary>
     /// Executes the decode Logged Image step used by the deterministic runtime Image Validator fixture.
     /// </summary>
     /// <param name="loggedPath">Filesystem location constrained to the isolated test sandbox.</param>
+    /// <param name="captureDirectory">Optional directory containing an archived copy of the logged PNG.</param>
     /// <returns>The decode Logged Image result consumed by the caller&apos;s assertion.</returns>
-    private static SKBitmap DecodeLoggedImage(string loggedPath)
+    private static SKBitmap DecodeLoggedImage(
+        string loggedPath,
+        string? captureDirectory = null)
     {
         string path = loggedPath.Trim().Replace('/', Path.DirectorySeparatorChar);
+        if (!File.Exists(path) && !string.IsNullOrWhiteSpace(captureDirectory))
+        {
+            path = Path.Combine(captureDirectory, Path.GetFileName(path));
+        }
         SKBitmap? bitmap = File.Exists(path) ? SKBitmap.Decode(File.ReadAllBytes(path)) : null;
         return bitmap ?? throw new InvalidDataException($"diagnostic PNG could not be decoded: '{path}'");
     }
@@ -496,6 +620,14 @@ internal static partial class RuntimeImageValidator
                 + $"(thin leak density {thinLeakDensity:P3})");
         }
         failures.AddRange(ValidateShadowMask(log, shadowValidation));
+        if (ShouldValidateRenderLabVegetationSunShadow(log))
+        {
+            failures.AddRange(ValidateRenderLabVegetationSunShadow(log));
+        }
+        if (ShouldValidateRealMapVegetationSunShadow(log))
+        {
+            failures.AddRange(ValidateRealMapVegetationSunShadow(log));
+        }
         failures.AddRange(ValidatePbrMaterialMask(log, requirePbrReferenceMaterials));
         failures.AddRange(ValidatePbrNormalMask(log));
         if (validateReflections)
@@ -516,6 +648,329 @@ internal static partial class RuntimeImageValidator
         }
 
         return failures;
+    }
+
+    /// <summary>
+    /// Validates temporally separated final and point-shadow frames from the fixed lantern scene.
+    /// Sparse animated flame pixels are tolerated; broad receiver illumination or visibility
+    /// changes are rejected because camera, weather, clock, geometry, and emitter are locked.
+    /// </summary>
+    /// <param name="log">Merged client/server log containing the persisted capture paths.</param>
+    /// <returns>Actionable stability failures, or an empty list for a stable triplet.</returns>
+    public static IReadOnlyList<string> ValidateLightStability(string log)
+    {
+        string[] labels =
+        [
+            "final",
+            "light-stability-final-b",
+            "light-stability-final-c",
+            "voxel-shadow",
+            "light-stability-shadow-b",
+            "light-stability-shadow-c"
+        ];
+        string[] baselinePaths = new string[labels.Length];
+        string[] effectPaths = new string[labels.Length];
+        for (int index = 0; index < labels.Length; index++)
+        {
+            if (!TryFindCapturePairPaths(
+                    log,
+                    labels[index],
+                    out baselinePaths[index],
+                    out effectPaths[index]))
+            {
+                return [$"light-stability capture was not logged: {labels[index]}"];
+            }
+            if (!File.Exists(baselinePaths[index]))
+            {
+                return [$"light-stability Vanilla witness is missing: {baselinePaths[index]}"];
+            }
+            if (!File.Exists(effectPaths[index]))
+            {
+                return [$"light-stability capture file is missing: {effectPaths[index]}"];
+            }
+        }
+
+        using SKBitmap? finalBaselineA = SKBitmap.Decode(File.ReadAllBytes(baselinePaths[0]));
+        using SKBitmap? finalBaselineB = SKBitmap.Decode(File.ReadAllBytes(baselinePaths[1]));
+        using SKBitmap? finalBaselineC = SKBitmap.Decode(File.ReadAllBytes(baselinePaths[2]));
+        using SKBitmap? shadowBaselineA = SKBitmap.Decode(File.ReadAllBytes(baselinePaths[3]));
+        using SKBitmap? shadowBaselineB = SKBitmap.Decode(File.ReadAllBytes(baselinePaths[4]));
+        using SKBitmap? shadowBaselineC = SKBitmap.Decode(File.ReadAllBytes(baselinePaths[5]));
+        using SKBitmap? finalA = SKBitmap.Decode(File.ReadAllBytes(effectPaths[0]));
+        using SKBitmap? finalB = SKBitmap.Decode(File.ReadAllBytes(effectPaths[1]));
+        using SKBitmap? finalC = SKBitmap.Decode(File.ReadAllBytes(effectPaths[2]));
+        using SKBitmap? shadowA = SKBitmap.Decode(File.ReadAllBytes(effectPaths[3]));
+        using SKBitmap? shadowB = SKBitmap.Decode(File.ReadAllBytes(effectPaths[4]));
+        using SKBitmap? shadowC = SKBitmap.Decode(File.ReadAllBytes(effectPaths[5]));
+        if (finalA is null || finalB is null || finalC is null
+            || shadowA is null || shadowB is null || shadowC is null
+            || finalBaselineA is null || finalBaselineB is null || finalBaselineC is null
+            || shadowBaselineA is null || shadowBaselineB is null || shadowBaselineC is null)
+        {
+            return ["one or more light-stability captures could not be decoded"];
+        }
+
+        TemporalTripletAssessment final = MeasureMotionRejectedTemporalTriplet(
+            finalA,
+            finalB,
+            finalC,
+            finalBaselineA,
+            finalBaselineB,
+            finalBaselineC,
+            redChannelOnly: false,
+            changeThreshold: 0.025,
+            baselineMotionThreshold: 0.02,
+            compareEffectDeltaFromBaseline: true,
+            baselineMotionHaloPixels: 2);
+        TemporalTripletAssessment shadow = MeasureMotionRejectedTemporalTriplet(
+            shadowA,
+            shadowB,
+            shadowC,
+            shadowBaselineA,
+            shadowBaselineB,
+            shadowBaselineC,
+            redChannelOnly: true,
+            changeThreshold: 0.05,
+            baselineMotionThreshold: 0.02,
+            compareEffectDeltaFromBaseline: false,
+            baselineMotionHaloPixels: 2);
+        Console.WriteLine(
+            $"Fixed-light temporal stability: final MAE={final.MaximumMeanAbsoluteDelta:0.0000}, "
+            + $"final changed={final.MaximumChangedPixelRatio:P2}, final stable receivers={final.StableSampleRatio:P2}, "
+            + $"final correction means={final.FirstMean:0.0000}/{final.SecondMean:0.0000}/{final.ThirdMean:0.0000}, "
+            + $"final pair MAE={final.FirstSecondMeanAbsoluteDelta:0.0000}/{final.SecondThirdMeanAbsoluteDelta:0.0000}/{final.FirstThirdMeanAbsoluteDelta:0.0000}, "
+            + $"point-shadow MAE={shadow.MaximumMeanAbsoluteDelta:0.0000}, "
+            + $"point-shadow changed={shadow.MaximumChangedPixelRatio:P2}, "
+            + $"point-shadow stable receivers={shadow.StableSampleRatio:P2}, "
+            + $"point-shadow means={shadow.FirstMean:0.0000}/{shadow.SecondMean:0.0000}/{shadow.ThirdMean:0.0000}, "
+            + $"point-shadow pair MAE={shadow.FirstSecondMeanAbsoluteDelta:0.0000}/{shadow.SecondThirdMeanAbsoluteDelta:0.0000}/{shadow.FirstThirdMeanAbsoluteDelta:0.0000}.");
+
+        List<string> failures = [];
+        if (!final.Compatible || !shadow.Compatible)
+        {
+            failures.Add("light-stability triplet dimensions are incompatible");
+            return failures;
+        }
+        if (final.StableSampleRatio < 0.40 || shadow.StableSampleRatio < 0.40)
+        {
+            failures.Add(
+                $"light-stability Vanilla witnesses retain too few static receivers "
+                + $"(final {final.StableSampleRatio:P2}, point-shadow {shadow.StableSampleRatio:P2})");
+            return failures;
+        }
+        if (final.MaximumMeanAbsoluteDelta > 0.010
+            || final.MaximumChangedPixelRatio > 0.08)
+        {
+            failures.Add(
+                $"fixed lantern illumination flickers or moves (MAE {final.MaximumMeanAbsoluteDelta:0.0000}, "
+                + $"changed {final.MaximumChangedPixelRatio:P2})");
+        }
+        if (shadow.MaximumMeanAbsoluteDelta > 0.008
+            || shadow.MaximumChangedPixelRatio > 0.04)
+        {
+            failures.Add(
+                $"fixed lantern projected shadow is temporally unstable (MAE {shadow.MaximumMeanAbsoluteDelta:0.0000}, "
+                + $"changed {shadow.MaximumChangedPixelRatio:P2})");
+        }
+
+        return failures;
+    }
+
+    /// <summary>Measures the worst of the three pairwise scalar-image differences.</summary>
+    /// <param name="first">First fixed-camera frame.</param>
+    /// <param name="second">Second fixed-camera frame.</param>
+    /// <param name="third">Third fixed-camera frame.</param>
+    /// <param name="redChannelOnly">Whether to inspect only the red point-shadow carrier.</param>
+    /// <param name="changeThreshold">Normalized delta above which a pixel is counted as changed.</param>
+    /// <returns>Worst pairwise mean and changed-pixel ratio.</returns>
+    internal static TemporalTripletAssessment MeasureTemporalTriplet(
+        SKBitmap first,
+        SKBitmap second,
+        SKBitmap third,
+        bool redChannelOnly,
+        double changeThreshold)
+    {
+        return MeasureMotionRejectedTemporalTriplet(
+            first,
+            second,
+            third,
+            first,
+            second,
+            third,
+            redChannelOnly,
+            changeThreshold,
+            baselineMotionThreshold: 1.0,
+            compareEffectDeltaFromBaseline: false,
+            baselineMotionHaloPixels: 0);
+    }
+
+    /// <summary>
+    /// Measures temporal effect variation only where the simultaneous Vanilla frames prove
+    /// that geometry and animation remained stable throughout the triplet.
+    /// </summary>
+    /// <param name="first">First effect frame.</param>
+    /// <param name="second">Second effect frame.</param>
+    /// <param name="third">Third effect frame.</param>
+    /// <param name="baselineFirst">Simultaneous Vanilla witness for <paramref name="first"/>.</param>
+    /// <param name="baselineSecond">Simultaneous Vanilla witness for <paramref name="second"/>.</param>
+    /// <param name="baselineThird">Simultaneous Vanilla witness for <paramref name="third"/>.</param>
+    /// <param name="redChannelOnly">Whether to inspect only the red point-shadow carrier.</param>
+    /// <param name="changeThreshold">Normalized effect delta above which a stable pixel is counted as changed.</param>
+    /// <param name="baselineMotionThreshold">Maximum Vanilla RGB-channel delta retained as static geometry.</param>
+    /// <param name="compareEffectDeltaFromBaseline">Whether to compare the visual RTX correction rather than absolute effect colour.</param>
+    /// <param name="baselineMotionHaloPixels">Pixel radius eroded around Vanilla motion before measurement.</param>
+    /// <returns>Worst pairwise effect variation and the fraction of geometrically stable samples.</returns>
+    internal static TemporalTripletAssessment MeasureMotionRejectedTemporalTriplet(
+        SKBitmap first,
+        SKBitmap second,
+        SKBitmap third,
+        SKBitmap baselineFirst,
+        SKBitmap baselineSecond,
+        SKBitmap baselineThird,
+        bool redChannelOnly,
+        double changeThreshold,
+        double baselineMotionThreshold,
+        bool compareEffectDeltaFromBaseline = false,
+        int baselineMotionHaloPixels = 0)
+    {
+        if (first.Width <= 0
+            || first.Height <= 0
+            || second.Width != first.Width
+            || second.Height != first.Height
+            || third.Width != first.Width
+            || third.Height != first.Height
+            || baselineFirst.Width != first.Width
+            || baselineFirst.Height != first.Height
+            || baselineSecond.Width != first.Width
+            || baselineSecond.Height != first.Height
+            || baselineThird.Width != first.Width
+            || baselineThird.Height != first.Height
+            || !double.IsFinite(changeThreshold)
+            || changeThreshold < 0.0
+            || changeThreshold > 1.0
+            || !double.IsFinite(baselineMotionThreshold)
+            || baselineMotionThreshold < 0.0
+            || baselineMotionThreshold > 1.0
+            || baselineMotionHaloPixels < 0
+            || baselineMotionHaloPixels > 32)
+        {
+            return default;
+        }
+
+        double[] sums = new double[3];
+        double[] frameSums = new double[3];
+        int[] changed = new int[3];
+        int sampled = 0;
+        int stable = 0;
+        for (int y = 0; y < first.Height; y += 2)
+        {
+            for (int x = 0; x < first.Width; x += 2)
+            {
+                sampled++;
+                if (!IsVanillaNeighborhoodStable(x, y))
+                {
+                    continue;
+                }
+
+                stable++;
+                SKColor baselineA = baselineFirst.GetPixel(x, y);
+                SKColor baselineB = baselineSecond.GetPixel(x, y);
+                SKColor baselineC = baselineThird.GetPixel(x, y);
+                SKColor effectA = first.GetPixel(x, y);
+                SKColor effectB = second.GetPixel(x, y);
+                SKColor effectC = third.GetPixel(x, y);
+                double valueA = redChannelOnly ? effectA.Red / 255.0 : Luminance(effectA);
+                double valueB = redChannelOnly ? effectB.Red / 255.0 : Luminance(effectB);
+                double valueC = redChannelOnly ? effectC.Red / 255.0 : Luminance(effectC);
+                if (compareEffectDeltaFromBaseline)
+                {
+                    valueA -= Luminance(baselineA);
+                    valueB -= Luminance(baselineB);
+                    valueC -= Luminance(baselineC);
+                }
+                frameSums[0] += valueA;
+                frameSums[1] += valueB;
+                frameSums[2] += valueC;
+                AccumulatePair(0, Math.Abs(valueB - valueA));
+                AccumulatePair(1, Math.Abs(valueC - valueB));
+                AccumulatePair(2, Math.Abs(valueC - valueA));
+            }
+        }
+
+        return new TemporalTripletAssessment(
+            true,
+            stable == 0 ? 0.0 : sums.Max() / stable,
+            stable == 0 ? 0.0 : (double)changed.Max() / stable,
+            sampled == 0 ? 0.0 : (double)stable / sampled,
+            stable == 0 ? 0.0 : frameSums[0] / stable,
+            stable == 0 ? 0.0 : frameSums[1] / stable,
+            stable == 0 ? 0.0 : frameSums[2] / stable,
+            stable == 0 ? 0.0 : sums[0] / stable,
+            stable == 0 ? 0.0 : sums[1] / stable,
+            stable == 0 ? 0.0 : sums[2] / stable);
+
+        void AccumulatePair(int pairIndex, double delta)
+        {
+            sums[pairIndex] += delta;
+            changed[pairIndex] += delta > changeThreshold ? 1 : 0;
+        }
+
+        bool IsVanillaNeighborhoodStable(int centerX, int centerY)
+        {
+            int radius = baselineMotionHaloPixels;
+            int step = radius == 0 ? 1 : 2;
+            for (int offsetY = -radius; offsetY <= radius; offsetY += step)
+            {
+                int sampleY = Math.Clamp(centerY + offsetY, 0, first.Height - 1);
+                for (int offsetX = -radius; offsetX <= radius; offsetX += step)
+                {
+                    int sampleX = Math.Clamp(centerX + offsetX, 0, first.Width - 1);
+                    SKColor firstWitness = baselineFirst.GetPixel(sampleX, sampleY);
+                    SKColor secondWitness = baselineSecond.GetPixel(sampleX, sampleY);
+                    SKColor thirdWitness = baselineThird.GetPixel(sampleX, sampleY);
+                    double maximumDelta = Math.Max(
+                        MaximumRgbDelta(firstWitness, secondWitness),
+                        Math.Max(
+                            MaximumRgbDelta(secondWitness, thirdWitness),
+                            MaximumRgbDelta(firstWitness, thirdWitness)));
+                    if (maximumDelta > baselineMotionThreshold)
+                    {
+                        return false;
+                    }
+                }
+            }
+
+            return true;
+        }
+    }
+
+    /// <summary>Returns the largest normalized RGB-channel delta between two pixels.</summary>
+    private static double MaximumRgbDelta(SKColor left, SKColor right) =>
+        Math.Max(
+            Math.Abs(right.Red - left.Red),
+            Math.Max(Math.Abs(right.Green - left.Green), Math.Abs(right.Blue - left.Blue))) / 255.0;
+
+    /// <summary>Finds both paths for one exact automatic-capture comparison label.</summary>
+    private static bool TryFindCapturePairPaths(
+        string log,
+        string label,
+        out string baselinePath,
+        out string effectPath)
+    {
+        string escapedLabel = Regex.Escape(label);
+        Match match = Regex.Matches(
+                log,
+                $@"Comparison capture saved: (.+?-{escapedLabel}-before\.png) and (.+?-{escapedLabel}-vintagertx\.png)",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)
+            .Cast<Match>()
+            .LastOrDefault() ?? Match.Empty;
+        baselinePath = match.Success
+            ? match.Groups[1].Value.Trim().Replace('/', Path.DirectorySeparatorChar)
+            : string.Empty;
+        effectPath = match.Success
+            ? match.Groups[2].Value.Trim().Replace('/', Path.DirectorySeparatorChar)
+            : string.Empty;
+        return match.Success;
     }
 
     /// <summary>
@@ -606,33 +1061,33 @@ internal static partial class RuntimeImageValidator
         double roughRatio = authoredSamples > 0 ? (double)authoredRough / authoredSamples : 0.0;
         double smoothRatio = authoredSamples > 0 ? (double)authoredSmooth / authoredSamples : 0.0;
         Console.WriteLine(
-            $"PBR material mask: authored={authoredCoverage:P1}, "
+            $"PBR material mask: file-backed={authoredCoverage:P1}, "
             + $"metal={metalCoverage:P2}, rough={roughRatio:P1}, smooth={smoothRatio:P1}, "
             + $"smoothness buckets={smoothnessBuckets.Count}.");
         List<string> failures = [];
         if (authoredCoverage < 0.10)
         {
             failures.Add(
-                $"authored PBR payload is absent from visible terrain "
+                $"file-backed PBR payload is absent from visible terrain "
                 + $"({authoredCoverage:P1} of sampled pixels)");
         }
         if (smoothnessBuckets.Count < 3)
         {
             failures.Add(
-                $"authored roughness is flat or not decoded "
+                $"file-backed roughness is flat or not decoded "
                 + $"({smoothnessBuckets.Count} quantized smoothness buckets)");
         }
         if (requirePbrReferenceMaterials && metalCoverage < 0.001)
         {
             failures.Add(
-                $"authored metallic material is absent or too small to assess "
+                $"file-backed metallic material is absent or too small to assess "
                 + $"({metalCoverage:P3} of sampled pixels)");
         }
         if (requirePbrReferenceMaterials
             && (roughRatio < 0.02 || smoothRatio < 0.01))
         {
             failures.Add(
-                $"rough and polished authored materials are not visually separated "
+                $"rough and polished file-backed materials are not visually separated "
                 + $"(rough {roughRatio:P1}, smooth {smoothRatio:P1})");
         }
 
@@ -749,20 +1204,20 @@ internal static partial class RuntimeImageValidator
         if (localAngularRms.Count < 64)
         {
             failures.Add(
-                $"authored PBR normal response has too little measurable terrain "
+                $"file-backed PBR normal response has too little measurable terrain "
                 + $"({localAngularRms.Count} interior neighborhoods)");
         }
         if (!HasAppliedPbrNormalResponse(p90, responsiveRatio, globalAngularRms))
         {
             failures.Add(
-                $"authored normal maps are flat or not applied in the rendered G-buffer "
+                $"file-backed normal maps are flat or not applied in the rendered G-buffer "
                 + $"(local angular RMS p90 {p90:0.000} deg, responsive {responsiveRatio:P1}, "
                 + $"global angular RMS {globalAngularRms:0.000} deg)");
         }
         if (p90 > 18.0 || excessiveRatio > 0.08)
         {
             failures.Add(
-                $"authored normal maps are overdriven and would produce embossed shimmer "
+                $"file-backed normal maps are overdriven and would produce embossed shimmer "
                 + $"(local angular RMS p90 {p90:0.000} deg, excessive {excessiveRatio:P1})");
         }
 
@@ -797,7 +1252,7 @@ internal static partial class RuntimeImageValidator
         }
 
         double squaredAngleSum = 0.0;
-        double maximumAngle = 0.0;
+        int excessiveNeighborCount = 0;
         foreach (PbrNormalNeighborhoodSample neighbor in neighbors)
         {
             int materialDelta = Math.Max(
@@ -816,11 +1271,22 @@ internal static partial class RuntimeImageValidator
             double dot = Math.Clamp(Vector3.Dot(centerNormal, neighborNormal), -1.0f, 1.0f);
             double angle = Math.Acos(dot) * 180.0 / Math.PI;
             squaredAngleSum += angle * angle;
-            maximumAngle = Math.Max(maximumAngle, angle);
+            excessiveNeighborCount += angle > excessiveAngleDegrees ? 1 : 0;
         }
 
         double angularRms = Math.Sqrt(squaredAngleSum / neighbors.Length);
-        bool excessive = maximumAngle > excessiveAngleDegrees;
+        // One axial outlier is the signature of a receiver/silhouette edge
+        // slipping through the 8-bit depth diagnostic: the other three samples
+        // still agree with the center. A truly overdriven center texel or a
+        // discontinuous tangent field disagrees in at least two directions.
+        // Exclude the unresolved single edge from both response and excessive
+        // populations instead of misreporting macro geometry as normal-map gain.
+        if (excessiveNeighborCount == 1)
+        {
+            return default;
+        }
+
+        bool excessive = excessiveNeighborCount >= 2;
         return new PbrNormalNeighborhoodAssessment(
             CountsTowardExcessiveDenominator: true,
             IsExcessive: excessive,
@@ -2498,9 +2964,82 @@ internal static partial class RuntimeImageValidator
             return ["normal/shadow captures could not be paired for the long-range ground receiver"];
         }
 
+        SunReceiverCoverageAssessment assessment = MeasureSunReceiverCoverage(
+            normal,
+            shadow,
+            targetRadiusRatio: 0.18);
+        Console.WriteLine(
+            $"Exterior ground receiver: coverage={assessment.GroundCoverage:P1}, "
+            + $"shadowed={assessment.ShadowedGroundRatio:P1}, "
+            + $"target samples={assessment.TargetGroundSamples}, "
+            + $"target shadowed={assessment.TargetShadowedGroundRatio:P1}.");
+
+        List<string> failures = [];
+        if (assessment.GroundCoverage < minimumGroundRatio)
+        {
+            failures.Add(
+                $"exterior frame lacks receiving ground ({assessment.GroundCoverage:P1}, "
+                + $"expected {minimumGroundRatio:P0})");
+        }
+        bool hasPhysicalTarget = log.Contains(
+            "physical shadow target=",
+            StringComparison.OrdinalIgnoreCase);
+        double evaluatedShadowedRatio = hasPhysicalTarget
+            ? assessment.TargetShadowedGroundRatio
+            : assessment.ShadowedGroundRatio;
+        if (hasPhysicalTarget && assessment.TargetGroundSamples < 128)
+        {
+            failures.Add(
+                $"physical roof-shadow target lacks enough receiving ground "
+                + $"({assessment.TargetGroundSamples} samples)");
+        }
+        if (evaluatedShadowedRatio < minimumShadowedGroundRatio)
+        {
+            failures.Add(
+                hasPhysicalTarget
+                    ? $"roof shadow misses its physically projected ground target "
+                        + $"({evaluatedShadowedRatio:P1}, expected {minimumShadowedGroundRatio:P0})"
+                    : $"roof shadow does not reach enough of the distant ground receiver "
+                        + $"({evaluatedShadowedRatio:P1}, expected {minimumShadowedGroundRatio:P0})");
+        }
+
+        return failures;
+    }
+
+    /// <summary>
+    /// Measures all upward receivers and a camera-centered target disc. Exterior-roof probes aim
+    /// the view directly at the similar-triangle sun/ground intersection, so the disc represents
+    /// the physically predicted footprint rather than an arbitrary portion of the landscape.
+    /// </summary>
+    /// <param name="normal">World-normal diagnostic.</param>
+    /// <param name="shadow">Solar-shadow diagnostic whose green channel stores occlusion.</param>
+    /// <param name="targetRadiusRatio">Disc radius relative to the shorter image edge.</param>
+    /// <returns>Global framing plus localized receiver evidence.</returns>
+    internal static SunReceiverCoverageAssessment MeasureSunReceiverCoverage(
+        SKBitmap normal,
+        SKBitmap shadow,
+        double targetRadiusRatio)
+    {
+        ArgumentNullException.ThrowIfNull(normal);
+        ArgumentNullException.ThrowIfNull(shadow);
+        if (normal.Width != shadow.Width || normal.Height != shadow.Height)
+        {
+            throw new ArgumentException("Normal and shadow diagnostics must have identical dimensions.");
+        }
+        if (!double.IsFinite(targetRadiusRatio) || targetRadiusRatio is <= 0.0 or > 0.5)
+        {
+            throw new ArgumentOutOfRangeException(nameof(targetRadiusRatio));
+        }
+
         int ground = 0;
         int shadowedGround = 0;
+        int targetGround = 0;
+        int targetShadowedGround = 0;
         int samples = 0;
+        double centerX = (normal.Width - 1) * 0.5;
+        double centerY = (normal.Height - 1) * 0.5;
+        double targetRadius = Math.Min(normal.Width, normal.Height) * targetRadiusRatio;
+        double targetRadiusSquared = targetRadius * targetRadius;
         for (int y = 0; y < normal.Height; y += 2)
         {
             for (int x = 0; x < normal.Width; x += 2)
@@ -2516,32 +3055,29 @@ internal static partial class RuntimeImageValidator
                     && encodedNormal.Green >= encodedNormal.Blue + 20;
                 if (upwardReceiver)
                 {
+                    bool shadowed = shadow.GetPixel(x, y).Green >= 148;
                     ground++;
-                    shadowedGround += shadow.GetPixel(x, y).Green >= 148 ? 1 : 0;
+                    shadowedGround += shadowed ? 1 : 0;
+                    double deltaX = x - centerX;
+                    double deltaY = y - centerY;
+                    if (deltaX * deltaX + deltaY * deltaY <= targetRadiusSquared)
+                    {
+                        targetGround++;
+                        targetShadowedGround += shadowed ? 1 : 0;
+                    }
                 }
 
                 samples++;
             }
         }
 
-        double groundRatio = (double)ground / samples;
-        double shadowedRatio = ground > 0 ? (double)shadowedGround / ground : 0.0;
-        Console.WriteLine(
-            $"Exterior ground receiver: coverage={groundRatio:P1}, shadowed={shadowedRatio:P1}.");
-
-        List<string> failures = [];
-        if (groundRatio < minimumGroundRatio)
-        {
-            failures.Add($"exterior frame lacks receiving ground ({groundRatio:P1}, expected {minimumGroundRatio:P0})");
-        }
-        if (shadowedRatio < minimumShadowedGroundRatio)
-        {
-            failures.Add(
-                $"roof shadow does not reach enough of the distant ground receiver "
-                + $"({shadowedRatio:P1}, expected {minimumShadowedGroundRatio:P0})");
-        }
-
-        return failures;
+        return new SunReceiverCoverageAssessment(
+            GroundCoverage: samples > 0 ? (double)ground / samples : 0.0,
+            ShadowedGroundRatio: ground > 0 ? (double)shadowedGround / ground : 0.0,
+            TargetGroundSamples: targetGround,
+            TargetShadowedGroundRatio: targetGround > 0
+                ? (double)targetShadowedGround / targetGround
+                : 0.0);
     }
 
     /// <summary>

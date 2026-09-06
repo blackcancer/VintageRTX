@@ -178,6 +178,12 @@ internal sealed class PbrPackValidator
             errors.Add($"{manifestEntry.FullName}: generator.execution must be 'offline-only'.");
         }
 
+        string? defaultProvenance = GetString(root, "defaultProvenance");
+        if (schemaVersion >= 4 && !IsMaterialProvenance(defaultProvenance))
+        {
+            errors.Add($"{manifestEntry.FullName}: schema v4 defaultProvenance must be 'generated' or 'authored'.");
+        }
+
         if (!TryGetProperty(root, "textures", out JsonElement textures)
             || textures.ValueKind != JsonValueKind.Array)
         {
@@ -197,6 +203,13 @@ internal sealed class PbrPackValidator
             string context = $"{manifestEntry.FullName}:textures[{textureIndex}]";
             textureIndex++;
             textureCount++;
+            string? entryProvenance = GetString(texture, "provenance");
+            if (schemaVersion >= 4
+                && entryProvenance is not null
+                && !IsMaterialProvenance(entryProvenance))
+            {
+                errors.Add($"{context}: provenance must be 'generated' or 'authored'.");
+            }
             if (!TryGetProperty(texture, "source", out JsonElement source))
             {
                 errors.Add($"{context}: source is missing.");
@@ -266,6 +279,14 @@ internal sealed class PbrPackValidator
             }
         }
     }
+
+    /// <summary>Checks one manifest provenance label without accepting implicit aliases.</summary>
+    /// <param name="value">Candidate JSON string.</param>
+    /// <returns>Whether the value names a supported material provenance.</returns>
+    private static bool IsMaterialProvenance(string? value) =>
+        value is not null
+        && (value.Equals("generated", StringComparison.Ordinal)
+            || value.Equals("authored", StringComparison.Ordinal));
 
     private static void ValidateSource(
         string sourceAssetsRoot,

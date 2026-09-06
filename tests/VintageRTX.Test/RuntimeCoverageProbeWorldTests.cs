@@ -43,9 +43,15 @@ public sealed class RuntimeCoverageProbeWorldTests
         Assert.AreEqual(1, success.BulkCommitCount);
         Assert.IsTrue(success.ChatMessages.Any(static text => text.StartsWith("/tp =", StringComparison.Ordinal)));
         Assert.IsTrue(GetField<bool>(probe, "renderLabLightPositionSet"));
+        Assert.AreEqual(
+            success.Air.Id,
+            success.GetPlacedBlock(6, 105, 10, BlockLayersAccess.Solid).Id,
+            "The +X solar aperture must remain open behind the tallgrass witness.");
         Assert.IsTrue(success.Logs.Any(static entry =>
             entry.Message.Contains("Render lab reflection targets verified: count=3", StringComparison.Ordinal)
             && entry.Message.Contains("emissive=none", StringComparison.Ordinal)));
+        Assert.IsTrue(success.Logs.Any(static entry =>
+            entry.Message.Contains("Render lab solar aperture verified: side=+X", StringComparison.Ordinal)));
         Assert.IsTrue(success.Logs.Any(static entry =>
             entry.Message.Contains("Render lab camera applied: close=true", StringComparison.Ordinal)
             && entry.Message.Contains("water and authored casters in frame=true", StringComparison.Ordinal)));
@@ -236,9 +242,11 @@ public sealed class RuntimeCoverageProbeWorldTests
         Assert.IsTrue(Math.Sqrt(
             Math.Pow(projectileTargets[0].X - landingTargets[1].X, 2)
             + Math.Pow(projectileTargets[0].Z - landingTargets[1].Z, 2)) >= 2.90);
+        Assert.AreEqual(landingTargets[1].X, projectileTargets[1].X, 0.001);
+        Assert.AreEqual(landingTargets[1].Z, projectileTargets[1].Z, 0.001);
         Assert.IsTrue(Math.Sqrt(
-            Math.Pow(projectileTargets[1].X - landingTargets[1].X, 2)
-            + Math.Pow(projectileTargets[1].Z - landingTargets[1].Z, 2)) >= 2.90);
+            Math.Pow(projectileTargets[1].X - projectileTargets[0].X, 2)
+            + Math.Pow(projectileTargets[1].Z - projectileTargets[0].Z, 2)) >= 2.90);
         string witnessCommand = water.ChatMessages.Single(static text =>
             text.StartsWith("/vintagertxtest witness ", StringComparison.Ordinal));
         string[] witnessArguments = witnessCommand.Split(' ', StringSplitOptions.RemoveEmptyEntries);
@@ -459,6 +467,8 @@ public sealed class RuntimeCoverageProbeWorldTests
     private static RuntimeCoverageProbeHarness CreateExteriorHarness()
     {
         RuntimeCoverageProbeHarness harness = new();
+        harness.Solid.BlockMaterial = EnumBlockMaterial.Wood;
+        harness.Solid.Code = new AssetLocation("game:slantedroofing-oak");
         harness.RainHeightAt = static (x, z) => Math.Abs(x) <= 1 && Math.Abs(z) <= 1 ? 82 : 78;
         harness.FallbackBlockAt = (x, y, z, layer) =>
             layer != BlockLayersAccess.Fluid

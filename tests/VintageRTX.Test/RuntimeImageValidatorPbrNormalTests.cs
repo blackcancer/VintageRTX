@@ -45,11 +45,11 @@ public sealed class RuntimeImageValidatorPbrNormalTests
         Assert.IsTrue(assessment.AngularRmsDegrees is > 1.0 and < 3.0);
     }
 
-    /// <summary>A greater-than-35-degree jump on one continuous receiver remains a real failure.</summary>
+    /// <summary>A single axial jump is excluded because the 8-bit depth image cannot prove continuity.</summary>
     [TestMethod]
     [TestCategory("Runtime")]
     [TestCategory("PBR")]
-    public void SameReceiverNormalJumpAboveThirtyFiveDegreesIsExcessive()
+    public void SingleAxialNormalJumpIsExcludedAsAnUnresolvedGeometryEdge()
     {
         RuntimeImageValidator.PbrNormalNeighborhoodSample center = Sample(0.0, 40, 80, 220, 100);
         RuntimeImageValidator.PbrNormalNeighborhoodSample[] neighbors = CoherentNeighbors();
@@ -58,10 +58,30 @@ public sealed class RuntimeImageValidatorPbrNormalTests
         RuntimeImageValidator.PbrNormalNeighborhoodAssessment assessment =
             RuntimeImageValidator.AssessPbrNormalNeighborhood(in center, neighbors);
 
+        Assert.IsFalse(assessment.CountsTowardExcessiveDenominator);
+        Assert.IsFalse(assessment.IsExcessive);
+        Assert.IsFalse(assessment.IsResponsive);
+        Assert.AreEqual(0.0, assessment.AngularRmsDegrees);
+    }
+
+    /// <summary>Multiple large disagreements remain a real overdriven tangent-field failure.</summary>
+    [TestMethod]
+    [TestCategory("Runtime")]
+    [TestCategory("PBR")]
+    public void MultiDirectionNormalSpikeAboveThirtyFiveDegreesIsExcessive()
+    {
+        RuntimeImageValidator.PbrNormalNeighborhoodSample center = Sample(0.0, 40, 80, 220, 100);
+        RuntimeImageValidator.PbrNormalNeighborhoodSample[] neighbors = CoherentNeighbors();
+        neighbors[0] = Sample(40.0, 40, 80, 220, 100);
+        neighbors[2] = Sample(-40.0, 40, 80, 220, 100);
+
+        RuntimeImageValidator.PbrNormalNeighborhoodAssessment assessment =
+            RuntimeImageValidator.AssessPbrNormalNeighborhood(in center, neighbors);
+
         Assert.IsTrue(assessment.CountsTowardExcessiveDenominator);
         Assert.IsTrue(assessment.IsExcessive);
         Assert.IsFalse(assessment.IsResponsive);
-        Assert.IsTrue(assessment.AngularRmsDegrees > 20.0);
+        Assert.IsTrue(assessment.AngularRmsDegrees > 28.0);
     }
 
     /// <summary>The cave result passes only through strong combined angular-energy evidence.</summary>

@@ -187,7 +187,7 @@ public sealed class RuntimeCoverageProbeBehaviorTests
     }
 
     /// <summary>
-    /// Verifies the render Callback Resumes Lab And Applies Both Camera Lock Modes regression contract against deterministic fixture data.
+    /// Verifies the render callback resumes laboratory and real-map worlds and applies both camera lock modes.
     /// </summary>
     [TestMethod]
     public void RenderCallbackResumesLabAndAppliesBothCameraLockModes()
@@ -201,6 +201,11 @@ public sealed class RuntimeCoverageProbeBehaviorTests
         Assert.AreEqual(1, harness.PauseCalls);
         probe.OnRenderFrame(0.016f, EnumRenderStage.Before);
         Assert.AreEqual(1, harness.PauseCalls);
+
+        RuntimeCoverageProbeHarness mapHarness = new() { IsPaused = true };
+        using RuntimeScenarioProbe mapProbe = mapHarness.CreateProbe("lantern-night");
+        mapProbe.OnRenderFrame(0.016f, EnumRenderStage.Before);
+        Assert.AreEqual(1, mapHarness.PauseCalls);
 
         SetField(probe, "exteriorCameraLockTicks", 5);
         SetField(probe, "exteriorYaw", 0.7f);
@@ -225,6 +230,31 @@ public sealed class RuntimeCoverageProbeBehaviorTests
         harness.PlayerAvailable = false;
         probe.OnRenderFrame(0.016f, EnumRenderStage.Before);
         probe.Dispose();
+    }
+
+    /// <summary>Verifies the real-map lantern camera locates only active lanterns and issues a stable teleport.</summary>
+    [TestMethod]
+    public void LanternNightCameraFindsLitAuthoredBlockAndClearView()
+    {
+        RuntimeCoverageProbeHarness harness = new();
+        TestLightBlock unlit = new("game:lantern-large-up", 0);
+        TestLightBlock lit = new("game:lantern-large-up", 20);
+        TestLightBlock torch = new("game:torch-up", 20);
+        BlockPos sample = new(2, 80, 0);
+
+        Assert.IsFalse(RuntimeScenarioProbe.IsLitLantern(null!, harness.BlockAccessor, sample));
+        Assert.IsFalse(RuntimeScenarioProbe.IsLitLantern(torch, harness.BlockAccessor, sample));
+        Assert.IsFalse(RuntimeScenarioProbe.IsLitLantern(unlit, harness.BlockAccessor, sample));
+        Assert.IsTrue(RuntimeScenarioProbe.IsLitLantern(lit, harness.BlockAccessor, sample));
+
+        harness.SetBlock(sample.X, sample.Y, sample.Z, lit);
+        using RuntimeScenarioProbe probe = harness.CreateProbe("lantern-night");
+        Assert.IsTrue((bool)Invoke(probe, "TryApplyLanternNightCamera")!);
+        Assert.IsTrue(harness.ChatMessages.Any(static message => message.StartsWith("/tp =", StringComparison.Ordinal)));
+        Assert.IsTrue(harness.Logs.Any(static entry => entry.Message.Contains(
+            "Lantern night camera applied",
+            StringComparison.Ordinal)));
+        Assert.IsTrue(GetField<bool>(probe, "exteriorPositionLocked"));
     }
 
     /// <summary>
@@ -281,6 +311,61 @@ public sealed class RuntimeCoverageProbeBehaviorTests
         Assert.IsTrue(harness.Logs.Any(static entry =>
             entry.Message.Contains("wide-lake camera restored", StringComparison.Ordinal)));
         probe.Dispose();
+    }
+
+    /// <summary>Verifies that real-map lantern framing rejects an animal volume near the eye.</summary>
+    [TestMethod]
+    public void LanternNightCameraAvoidsNearbyAgentOcclusion()
+    {
+        RuntimeCoverageProbeHarness harness = new();
+        BlockPos lantern = new(2, 80, 0);
+        harness.SetBlock(lantern.X, lantern.Y, lantern.Z, harness.Solid);
+
+        Vec3d? unobstructed = RuntimeScenarioProbe.FindLanternCameraEye(
+            harness.BlockAccessor,
+            lantern);
+        Assert.IsNotNull(unobstructed);
+        LanternCameraEntityBounds body = new(
+            unobstructed.X - 0.4,
+            unobstructed.Y - 0.8,
+            unobstructed.Z - 0.7,
+            unobstructed.X + 1.6,
+            unobstructed.Y + 0.8,
+            unobstructed.Z + 0.7);
+        Assert.IsFalse(RuntimeScenarioProbe.IsLanternCameraEntityClear(
+            unobstructed.X,
+            unobstructed.Y,
+            unobstructed.Z,
+            [body]));
+
+        Vec3d? displaced = RuntimeScenarioProbe.FindLanternCameraEye(
+            harness.BlockAccessor,
+            lantern,
+            [body]);
+        Assert.IsNotNull(displaced);
+        Assert.AreNotEqual(unobstructed, displaced);
+        Assert.IsTrue(RuntimeScenarioProbe.IsLanternCameraEntityClear(
+            displaced.X,
+            displaced.Y,
+            displaced.Z,
+            [body]));
+        Assert.IsTrue(RuntimeScenarioProbe.IsLanternCameraEntityClear(
+            displaced.X,
+            displaced.Y,
+            displaced.Z,
+            null));
+
+        EntityPlayer entity = new();
+        LanternCameraEntityBounds fallbackBounds = LanternCameraEntityBounds.FromEntity(entity);
+        Assert.AreEqual(-0.5, fallbackBounds.MinimumX, 0.0001);
+        Assert.AreEqual(2.0, fallbackBounds.MaximumY, 0.0001);
+        entity.Pos.SetPos(10.0, 20.0, 30.0);
+        entity.SetSelectionBox(2.0f, 3.0f);
+        LanternCameraEntityBounds entityBounds = LanternCameraEntityBounds.FromEntity(entity);
+        Assert.AreEqual(9.0, entityBounds.MinimumX, 0.0001);
+        Assert.AreEqual(23.0, entityBounds.MaximumY, 0.0001);
+        Assert.AreEqual(0.0, entityBounds.SquaredDistanceTo(10.0, 21.0, 30.0), 0.0001);
+        Assert.AreEqual(1.0, entityBounds.SquaredDistanceTo(12.0, 21.0, 30.0), 0.0001);
     }
 
     /// <summary>
@@ -342,15 +427,23 @@ public sealed class RuntimeCoverageProbeBehaviorTests
         CollectionAssert.Contains(north.ChatMessages, "/weather setir clearsky");
         CollectionAssert.Contains(north.ChatMessages, "/weather setprecip -1");
 
+        RuntimeScenarioProbe northDay = north.CreateProbe("exterior-roof", 10.0f, clearWeather: true);
+        Invoke(northDay, "ApplyDeterministicEnvironment");
+        CollectionAssert.Contains(north.ChatMessages, "/time setmonth jul");
+
         north.HourOfDay = 23.0f;
         north.SpeedOfTime = 0.0f;
         north.DaylightStrength = 0.0f;
+        north.SunDirection = new Vec3f(0.2f, -0.8f, 0.3f);
         north.Climate = new ClimateCondition { Rainfall = 0, RainCloudOverlay = 0 };
         Invoke(night, "VerifyDeterministicEnvironment");
         Assert.IsTrue(GetField<bool>(night, "environmentVerified"));
 
         RuntimeCoverageProbeHarness south = new();
         south.Hemisphere = EnumHemisphere.South;
+        RuntimeScenarioProbe southDay = south.CreateProbe("exterior-roof", 10.0f, clearWeather: true);
+        Invoke(southDay, "ApplyDeterministicEnvironment");
+        CollectionAssert.Contains(south.ChatMessages, "/time setmonth jan");
         RuntimeScenarioProbe rainy = south.CreateProbe("nonstandard-geometry", 6.0f, precipitation: 0.7f);
         Invoke(rainy, "ApplyDeterministicEnvironment");
         CollectionAssert.Contains(south.ChatMessages, "/time setmonth jul");
@@ -370,6 +463,8 @@ public sealed class RuntimeCoverageProbeBehaviorTests
 
         south.PlayerAvailable = false;
         Invoke(rainy, "ApplyDeterministicEnvironment");
+        northDay.Dispose();
+        southDay.Dispose();
         night.Dispose();
         rainy.Dispose();
     }
@@ -395,6 +490,7 @@ public sealed class RuntimeCoverageProbeBehaviorTests
 
         RuntimeCoverageProbeHarness night = new();
         night.DaylightStrength = 1.0f;
+        night.DirectSunLightStrength = 1.0f;
         night.Climate = new ClimateCondition { Rainfall = 0.0f, RainCloudOverlay = 0.0f };
         RuntimeScenarioProbe nightProbe = night.CreateProbe("lantern-night", clearWeather: true);
         Invoke(nightProbe, "VerifyDeterministicEnvironment");
@@ -409,6 +505,32 @@ public sealed class RuntimeCoverageProbeBehaviorTests
         Invoke(runningProbe, "VerifyDeterministicEnvironment");
         Assert.IsFalse(GetField<bool>(runningProbe, "environmentVerified"));
         runningProbe.Dispose();
+
+        RuntimeCoverageProbeHarness settlingDay = new();
+        settlingDay.HourOfDay = 10.0f;
+        settlingDay.SpeedOfTime = 0.0f;
+        settlingDay.SunDirection = new Vec3f(0.2f, -0.6f, 0.2f);
+        settlingDay.Climate = new ClimateCondition { Rainfall = 0.0f, RainCloudOverlay = 0.0f };
+        RuntimeScenarioProbe settlingProbe = settlingDay.CreateProbe(
+            "exterior-roof",
+            hour: 10.0f,
+            clearWeather: true);
+        Invoke(settlingProbe, "VerifyDeterministicEnvironment");
+        // The hour and effective stopped rate already match. A stale client
+        // solar cache must settle without resuming or repeatedly resetting the
+        // authoritative 1.22.7 calendar.
+        Assert.AreEqual(0, settlingDay.ChatMessages.Count);
+        settlingDay.SpeedOfTime = 60.0f;
+        settlingDay.SunDirection = new Vec3f(0.2f, 0.2f, 0.2f);
+        settlingDay.DaylightStrength = 1.0f;
+        settlingDay.DirectSunLightStrength = 1.0f;
+        settlingDay.MoonLightStrength = 0.0f;
+        Invoke(settlingProbe, "VerifyDeterministicEnvironment");
+        CollectionAssert.Contains(settlingDay.ChatMessages, "/time stop");
+        settlingDay.SpeedOfTime = 0.0f;
+        Invoke(settlingProbe, "VerifyDeterministicEnvironment");
+        Assert.IsTrue(GetField<bool>(settlingProbe, "environmentVerified"));
+        settlingProbe.Dispose();
 
         RuntimeCoverageProbeHarness lockedClockBadWeather = new();
         lockedClockBadWeather.HourOfDay = 8.0f;
@@ -519,5 +641,30 @@ public sealed class RuntimeCoverageProbeBehaviorTests
     private static void AssertEnumField(object instance, string fieldName, string expected)
     {
         Assert.AreEqual(expected, GetField<object>(instance, fieldName).ToString());
+    }
+
+    /// <summary>Minimal collectible whose emitted HSV value is controlled by the lantern-camera fixture.</summary>
+    private sealed class TestLightBlock : Block
+    {
+        private readonly byte value;
+
+        /// <summary>Creates a block with a stable code, identifier, and emitted-value channel.</summary>
+        /// <param name="code">Full asset identifier.</param>
+        /// <param name="value">HSV emission value.</param>
+        internal TestLightBlock(string code, byte value)
+        {
+            Code = new AssetLocation(code);
+            this.value = value;
+        }
+
+        /// <summary>Returns the fixture-controlled warm-light HSV payload.</summary>
+        /// <param name="blockAccessor">Unused accessor required by the game API.</param>
+        /// <param name="pos">Unused position required by the game API.</param>
+        /// <param name="stack">Optional placed item state.</param>
+        /// <returns>A three-channel HSV emission value.</returns>
+        public override byte[] GetLightHsv(
+            IBlockAccessor blockAccessor,
+            BlockPos pos,
+            ItemStack? stack = null) => [24, 7, value];
     }
 }

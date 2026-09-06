@@ -129,7 +129,7 @@ internal static class PreflightSuite
         };
         config.Clamp();
         Assert(config.GpuBudgetMilliseconds == 0.75f, "GPU budget lower bound");
-        Assert(config.SunShadowDistance == 96.0f, "sun range upper bound");
+        Assert(config.SunShadowDistance == 640.0f, "sun range upper bound");
         Assert(config.PointLightRadius == 32.0f, "point range upper bound");
         Assert(config.ReflectionDistance == 1.0f, "reflection range lower bound");
         Assert(config.VoxelBounceDistance == 24.0f, "voxel bounce range upper bound");
@@ -217,6 +217,11 @@ internal static class PreflightSuite
             "projected shadow masks must follow geometric receivers, not normal-map microfacets");
         Assert(shader.Contains("traceScreenSpaceReflection", StringComparison.Ordinal), "localized reflection trace missing");
         Assert(shader.Contains("traceVoxelReflection", StringComparison.Ordinal), "off-screen voxel reflection trace missing");
+        Assert(
+            shader.Contains(
+                "screenSpaceReflectionsEnabled != 0 || voxelReflectionsEnabled != 0",
+                StringComparison.Ordinal),
+            "the performance reflection LOD must keep voxel/environment reflections when SSR is disabled");
         Assert(shader.Contains("const int MAX_RAYS = 8;", StringComparison.Ordinal)
             && shader.Contains("const int MAX_STEPS = 24;", StringComparison.Ordinal)
             && shader.Contains("const int MAX_REFLECTION_STEPS = 24;", StringComparison.Ordinal)
@@ -404,12 +409,19 @@ internal static class PreflightSuite
             "localized energy-weighted point-light shadow missing");
         Assert(!shader.Contains("tracedShadowAttenuation", StringComparison.Ordinal), "binary whole-frame shadow attenuation remains");
         Assert(shader.Contains("historyColor", StringComparison.Ordinal), "temporal history sampler missing");
-        Assert(shader.Contains("samplePointLightSurface", StringComparison.Ordinal), "area-light jitter missing");
-        Assert(shader.Contains("coherent Vogel disk", StringComparison.Ordinal), "coherent point-shadow sampling missing");
-        Assert(shader.Contains("sparkling point cloud", StringComparison.Ordinal), "motion-safe shadow phase missing");
+        Assert(shader.Contains("samplePointLightSurface", StringComparison.Ordinal), "area-light quadrature missing");
+        Assert(shader.Contains("diametrically opposed pairs", StringComparison.Ordinal), "centred point-shadow sampling missing");
+        Assert(shader.Contains("cannot flicker between frames", StringComparison.Ordinal), "stationary shadow phase missing");
         Assert(shader.Contains("pointLightShadowSamples", StringComparison.Ordinal), "adaptive shadow sample uniform missing");
-        Assert(shader.Contains("coherent hemisphere rotation", StringComparison.Ordinal), "coherent SSGI sampling missing");
-        Assert(shader.Contains("Cross-bilateral temporal denoiser", StringComparison.Ordinal), "edge-aware temporal denoiser missing");
+        Assert(shader.Contains("fixed coherent basis", StringComparison.Ordinal), "world-stable SSGI sampling missing");
+        Assert(shader.Contains("Cross-bilateral temporal denoiser", StringComparison.Ordinal)
+            && shader.Contains("centerHistory - centerCarrier", StringComparison.Ordinal)
+            && shader.Contains("- neighborCarrier", StringComparison.Ordinal)
+            && shader.Contains("centerCarrier", StringComparison.Ordinal)
+            && shader.Contains("coherentNeighborCount >= 2", StringComparison.Ordinal)
+            && shader.Contains("transportEnvelopeMargin", StringComparison.Ordinal)
+            && shader.Contains("centerCarrier + filteredDelta", StringComparison.Ordinal),
+            "source-detail-preserving temporal transport denoiser missing");
         Assert(shader.Contains("primaryFirstPersonOverlay", StringComparison.Ordinal)
             && shader.Contains("must remain the direct raster carrier", StringComparison.Ordinal)
             && shader.Contains("surfaceTemporalBlend", StringComparison.Ordinal)
@@ -433,8 +445,9 @@ internal static class PreflightSuite
             && shader.Contains("conservative G-buffer dilation", StringComparison.Ordinal),
             "one-pixel opaque G-buffer seam repair missing");
         Assert(shader.Contains("opaqueGeometryFallback", StringComparison.Ordinal)
+            && shader.Contains("&& isInsideVoxelVolume(worldPosition) ? 0.86 : 0.0", StringComparison.Ordinal)
             && shader.Contains("riskyReliability", StringComparison.Ordinal),
-            "opaque voxel-boundary material fallback missing");
+            "volume-bounded opaque voxel-boundary material fallback missing");
         Assert(shader.Contains("evaluateDirectSpecular", StringComparison.Ordinal)
             && shader.Contains("directSpecularRadiance", StringComparison.Ordinal)
             && shader.Contains("surfaceRoughness", StringComparison.Ordinal)
@@ -459,8 +472,10 @@ internal static class PreflightSuite
         Assert(shader.Contains("transparencyRisk", StringComparison.Ordinal), "opaque/transparent relighting split missing");
         Assert(shader.Contains("float daylightRelighting = smoothstep(", StringComparison.Ordinal)
             && shader.Contains("float enclosedPhysicalRelighting = mix(", StringComparison.Ordinal)
-            && shader.Contains("mix(enclosedPhysicalRelighting, 0.72, exteriorConfidence)", StringComparison.Ordinal),
-            "low-daylight local-light chromaticity preservation missing");
+            && shader.Contains("float opaquePhysicalTransportConfidence = packedSurfaceAvailable", StringComparison.Ordinal)
+            && shader.Contains("float opaquePhysicalTransportFloor = mix(0.96, 0.90, metallic)", StringComparison.Ordinal)
+            && shader.Contains("mix(enclosedPhysicalRelighting, 0.84, exteriorConfidence)", StringComparison.Ordinal),
+            "stable photometric local-light transport dominance missing");
         Assert(shader.Contains("vec3 exposedRadiance = positiveRadiance * exp2(exposure)", StringComparison.Ordinal)
             && shader.Contains("float value = exposedLuminance * 0.65", StringComparison.Ordinal)
             && shader.Contains("gamutCompression", StringComparison.Ordinal)
@@ -502,7 +517,7 @@ internal static class PreflightSuite
             && shader.Contains("derivativeNormal = cross", StringComparison.Ordinal),
             "geometric-normal ray bias missing");
         Assert(shader.Contains("cameraAlignedLight", StringComparison.Ordinal)
-            && shader.Contains("cameraWorldPosition) < 0.75", StringComparison.Ordinal),
+            && shader.Contains("floatingWorldOrigin) < 0.75", StringComparison.Ordinal),
             "camera-aligned held-light self-intersection guard missing");
         Assert(shader.Contains("boundedMultiLightCluster", StringComparison.Ordinal)
             && shader.Contains("denseDynamicLightCluster", StringComparison.Ordinal)
@@ -543,7 +558,7 @@ internal static class PreflightSuite
             && shader.Contains("vec3 physicalTransport = surfaceAlbedo", StringComparison.Ordinal)
             && shader.Contains("vec3 energyMatchedPhysicalTransport = physicalTransport", StringComparison.Ordinal)
             && shader.Contains("float exteriorEnergyScale = clamp(", StringComparison.Ordinal)
-            && shader.Contains("physicalRelightingWeight = packedSurfaceAvailable", StringComparison.Ordinal)
+            && shader.Contains("physicalRelightingWeight = opaquePhysicalTransportConfidence", StringComparison.Ordinal)
             && shader.Contains("authoredAlbedoLuminance", StringComparison.Ordinal)
             && shader.Contains("sourceLinear * tracedExteriorShadow", StringComparison.Ordinal)
             && !shader.Contains("shadowSubtraction", StringComparison.Ordinal),
@@ -576,7 +591,7 @@ internal static class PreflightSuite
         Assert(shader.Contains("voxelBounceSteps", StringComparison.Ordinal)
             && shader.Contains("voxelBounceShadowSteps", StringComparison.Ordinal),
             "adaptive voxel bounce traversal budgets missing");
-        Assert(shader.Contains("temporalFrameIndex % 3 == 0", StringComparison.Ordinal)
+        Assert(shader.Contains("temporalFrameIndex % max(secondaryBounceCadence, 1) == 0", StringComparison.Ordinal)
             && shader.Contains("debugView == 8", StringComparison.Ordinal),
             "performance-tier temporal bounce cadence missing");
         Assert(VoxelScene.ShouldCastShadow(EnumChunkRenderPass.Opaque), "opaque mesh faces must cast shadows");
@@ -800,7 +815,7 @@ internal static class PreflightSuite
         Assert(voxelSceneSource.Contains("GetDefaultBlockMesh(block)", StringComparison.Ordinal)
             && voxelSceneSource.Contains("cached with { GeometryKind = BlockGeometryKind.DynamicInstance }", StringComparison.Ordinal)
             && voxelSceneSource.Contains("occupancy.HasDetailedMesh && occupancy.OpaqueTriangles > 0", StringComparison.Ordinal)
-            && voxelSceneSource.Contains("bands lower={13}, middle={14}, upper={15}, empty={16}", StringComparison.Ordinal)
+            && voxelSceneSource.Contains("bands lower={17}, middle={18}, upper={19}, empty={20}", StringComparison.Ordinal)
             && voxelSceneSource.Contains("Occupancy fallback: code={0}, reason={1}, count={2}", StringComparison.Ordinal),
             "BlockEntity default-mesh caster or runtime fallback/band diagnostics missing");
         Assert(voxelSceneSource.Contains("GetBlockEntity(position)", StringComparison.Ordinal)
@@ -871,6 +886,12 @@ internal static class PreflightSuite
             && shader.Contains("traceSunClipmapVisibility", StringComparison.Ordinal)
             && shader.Contains("MAX_SUN_STEPS must never silently shorten", StringComparison.Ordinal),
             "dedicated conservative 96-block sun clipmap contract missing");
+        Assert(voxelSceneSource.Contains("Sun-shadow reach adapted:", StringComparison.Ordinal)
+            && voxelSceneSource.Contains("desired-view={1}", StringComparison.Ordinal)
+            && voxelSceneSource.Contains("approved-view={2}", StringComparison.Ordinal)
+            && voxelSceneSource.Contains("effective-trace={3}", StringComparison.Ordinal)
+            && voxelSceneSource.Contains("distant-cell={4}", StringComparison.Ordinal),
+            "runtime view-distance shadow-reach evidence missing");
         MeshData emissiveMesh = new(false)
         {
             xyz =
@@ -968,8 +989,31 @@ internal static class PreflightSuite
                 && !renderer.Contains("adaptiveQualityLevel == 2 ? 1 : 0", StringComparison.Ordinal),
             "performance tier must retain artifact-free full-frame transport");
         Assert(
+            renderer.Contains("shader.Uniform(\"secondaryBounceCadence\", 1)", StringComparison.Ordinal)
+                && shader.Contains("secondaryBounceCadence <= 1", StringComparison.Ordinal)
+                && shader.Contains("temporalFrameIndex % max(secondaryBounceCadence, 1) == 0", StringComparison.Ordinal),
+            "every profile must trace coherent secondary radiance without zero-energy cadence frames");
+        Assert(
+            renderer.Contains("shader.Uniform(\"shadowTemporalBlend\", 0.0f)", StringComparison.Ordinal)
+                && shader.Contains("if (hitNormalRoughness.a < -0.0005)", StringComparison.Ordinal)
+                && shader.Contains(
+                    "result.indirect += sampleReflectionSource(hitUv) * confidence;",
+                    StringComparison.Ordinal)
+                && !shader.Contains(
+                    "result.indirect += texture(sourceColor, hitUv).rgb * confidence;",
+                    StringComparison.Ordinal),
+            "screen-space receiver history and mismatched moving-entity colour must not contaminate fixed lighting");
+        Assert(
             renderer.Contains("adaptiveQualityLevel < 2", StringComparison.Ordinal),
             "performance tier must shed the secondary diffuse full-screen trace");
+        Assert(
+            renderer.Contains(
+                "config.ScreenSpaceReflectionsEnabled\r\n                    && gBufferAvailable\r\n                    && adaptiveQualityLevel < 2",
+                StringComparison.Ordinal)
+            || renderer.Contains(
+                "config.ScreenSpaceReflectionsEnabled\n                    && gBufferAvailable\n                    && adaptiveQualityLevel < 2",
+                StringComparison.Ordinal),
+            "performance tier must use voxel/environment reflection without the screen-depth walk");
         Assert(
             renderer.IndexOf("UpdateAdaptiveQuality(config, captureFrame);", StringComparison.Ordinal)
                 < renderer.IndexOf("bool voxelReflectionDiagnosticCapture", StringComparison.Ordinal),
@@ -990,8 +1034,10 @@ internal static class PreflightSuite
                 && renderer.Contains("staticLights is { Length: > 1 }", StringComparison.Ordinal)
                 && renderer.Contains("2 => 3", StringComparison.Ordinal)
                 && renderer.Contains("effectivePointLightShadowSamples = Math.Min", StringComparison.Ordinal)
-                && shader.Contains("float frame = temporalBlend > 0.001 && transportInterlace == 0", StringComparison.Ordinal),
-            "performance tier must preserve three sources and cap each to one dense-cluster ray");
+                && shader.Contains("if (sampleCount <= 1)", StringComparison.Ordinal)
+                && shader.Contains("float pairSide = float(pairedSampleIndex & 1)", StringComparison.Ordinal)
+                && !shader.Contains("frame * 0.75487766625", StringComparison.Ordinal),
+            "performance tier must preserve three sources with a stationary centre-balanced emitter sequence");
         Assert(
             renderer.Contains("AdaptiveUpgradeFrames = 7200", StringComparison.Ordinal),
             "adaptive promotion must require sustained headroom");
@@ -1000,9 +1046,14 @@ internal static class PreflightSuite
                 && renderer.Contains("AdaptiveTransitionCooldownFrames = 120", StringComparison.Ordinal),
             "adaptive transport must reach its stable native-resolution tier promptly");
         Assert(
-            renderer.Contains("Preserve genuine secondary radiance", StringComparison.Ordinal)
-                && renderer.Contains("2 => Math.Min(config.VoxelBounceRayCount, 1)", StringComparison.Ordinal),
-            "performance tier must preserve one bounded voxel-bounce ray in normal gameplay");
+            renderer.Contains("directional irradiance field is the stable", StringComparison.Ordinal)
+                && renderer.Contains("2 => 0", StringComparison.Ordinal),
+            "performance tier must use the stable irradiance LOD without periodic bounce spikes");
+        Assert(
+            renderer.Contains("Repeating a short hierarchical sky DDA", StringComparison.Ordinal)
+                && renderer.Contains("int effectiveSkyRayCount = adaptiveQualityLevel switch", StringComparison.Ordinal)
+                && shader.Contains("skyRayCount <= 0 || sunColorStrength.w < 0.08", StringComparison.Ordinal),
+            "performance tier must reuse stable sky fields instead of duplicating a full-screen voxel DDA");
         Assert(
             renderer.Contains("voxelIrradianceTexture", StringComparison.Ordinal)
                 && renderer.Contains("voxelIrradianceDirectionTexture", StringComparison.Ordinal)
@@ -1180,6 +1231,14 @@ internal static class PreflightSuite
             "PBR manifest schema v3 is invalid");
         Assert(schemaV3.RootElement.GetProperty("description").GetString()!.Contains("native sidecar", StringComparison.Ordinal),
             "PBR manifest v3 must declare source-domain adjacent sidecars");
+
+        string schemaV4Path = Path.Combine(root, "docs", "pbr-pack-manifest-v4.schema.json");
+        using JsonDocument schemaV4 = JsonDocument.Parse(File.ReadAllBytes(schemaV4Path));
+        Assert(schemaV4.RootElement.GetProperty("properties").GetProperty("schemaVersion").GetProperty("const").GetInt32() == 4,
+            "PBR manifest schema v4 is invalid");
+        Assert(schemaV4.RootElement.GetProperty("required").EnumerateArray()
+                .Any(item => item.GetString() == "defaultProvenance"),
+            "PBR manifest v4 must make material provenance explicit");
     }
 
     /// <summary>
@@ -1219,7 +1278,9 @@ internal static class PreflightSuite
         PbrManifest? manifest = JsonSerializer.Deserialize<PbrManifest>(
             File.ReadAllBytes(manifestPath),
             new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-        Assert(manifest?.SchemaVersion == 3 && manifest.Textures.Count == 9_582,
+        Assert(manifest?.SchemaVersion == 4
+                && manifest.DefaultProvenance == "generated"
+                && manifest.Textures.Count == 9_582,
             "embedded PBR manifest ledger mismatch");
         int expectedTextureCount = manifest!.Textures.Count;
         Assert(sourceSidecars.Length == expectedTextureCount * 4,
@@ -1512,8 +1573,9 @@ internal static class PreflightSuite
         Assert(displayShader.Contains("vec4 deferredMaterial = texelFetch(gMaterial", StringComparison.Ordinal)
             && displayShader.Contains("float packedSurfaceValue = abs(packedSurfaceAlpha)", StringComparison.Ordinal)
             && displayShader.Contains("packedSurfaceValue * 1025.0 - 1.0", StringComparison.Ordinal)
-            && displayShader.Contains("float authoredMetallic = float(packedMaterial & 7) / 7.0", StringComparison.Ordinal)
-            && displayShader.Contains("float authoredEmissive = float((packedMaterial >> 3) & 7) / 7.0", StringComparison.Ordinal),
+            && displayShader.Contains("float pbrPayloadPresent = (packedMaterial & 32) != 0 ? 1.0 : 0.0", StringComparison.Ordinal)
+            && displayShader.Contains("float authoredMetallic = float(packedMaterial & 3) / 3.0", StringComparison.Ordinal)
+            && displayShader.Contains("float authoredEmissive = float((packedMaterial >> 2) & 7) / 7.0", StringComparison.Ordinal),
             "deferred PBR payload decoding changed channels or filtering contract");
         Assert(displayShader.Contains("vec3 earlyWorldNormal = normalize(", StringComparison.Ordinal)
             && displayShader.Contains("worldNormal = earlyWorldNormal", StringComparison.Ordinal)
@@ -1550,17 +1612,18 @@ internal static class PreflightSuite
             }
         }
 
-        for (int metallic = 0; metallic < 8; metallic++)
+        for (int metallic = 0; metallic < 4; metallic++)
         {
             for (int emissive = 0; emissive < 8; emissive++)
             {
-                int encodedBits = metallic | (emissive << 3) | 64;
+                int encodedBits = metallic | (emissive << 2) | 32 | 64;
                 double encoded = encodedBits / 255.0;
                 int decodedBits = (int)Math.Floor(encoded * 255.0 + 0.5);
-                Assert((decodedBits & 7) == metallic
-                    && ((decodedBits >> 3) & 7) == emissive
+                Assert((decodedBits & 3) == metallic
+                    && ((decodedBits >> 2) & 7) == emissive
+                    && (decodedBits & 32) != 0
                     && (decodedBits & 64) != 0,
-                    "metallic/emissive/presence payload does not round-trip");
+                    "metallic/emissive/PBR-presence/override payload does not round-trip");
             }
         }
     }
@@ -1614,7 +1677,13 @@ internal static class PreflightSuite
             1,
             1);
         Assert(
-            consolidated.SequenceEqual(new byte[] { 200, 100, 120, 85 }),
+            consolidated.SequenceEqual(new byte[]
+            {
+                200,
+                100,
+                120,
+                PbrTerrainRenderer.PackMaterialBits(180, 90, true, true)
+            }),
             "consolidated PBR channels were premultiplied or packed incorrectly");
     }
 
@@ -1967,6 +2036,7 @@ internal static class PreflightSuite
             "many-lights-stress",
             "exterior-roof",
             "sunrise-exterior",
+            "vegetation-shadow-map",
             "moving-camera",
             "water-reflection",
             "rain-wetness",
@@ -2006,7 +2076,9 @@ internal static class PreflightSuite
             && ScenarioCatalog.Get("render-lab-performance").RunBenchmark
             && ScenarioCatalog.Get("render-lab-performance").RuntimeProbe == "render-lab"
             && ScenarioCatalog.Get("render-lab-performance").ValidateReflections
-            && ScenarioCatalog.Get("render-lab-performance").ValidateVoxelReflections,
+            && ScenarioCatalog.Get("render-lab-performance").ValidateVoxelReflections
+            && ScenarioCatalog.Get("render-lab-performance").WorldSeed
+                == ScenarioCatalog.RenderLabWorldSeed,
             "performance lab must reuse the isolated scene and gate reflections plus A/B/A timing");
         Dictionary<string, VintageRtxRenderProfile> renderLabProfiles = new(StringComparer.Ordinal)
         {
@@ -2059,7 +2131,14 @@ internal static class PreflightSuite
             captureSource.Contains("ReadyForBenchmark", StringComparison.Ordinal)
             && captureSource.Contains("automaticSequenceCompletedUtc.AddSeconds(2)", StringComparison.Ordinal),
             "render-lab benchmark must start only after diagnostic readback and encoding settle");
-        Assert(ScenarioCatalog.Get("lantern-night").WorldHour == 0.0, "lantern scenario must run at fixed midnight");
+        Assert(
+            ScenarioCatalog.Get("lantern-night") is
+            {
+                WorldHour: 0.0,
+                RunBenchmark: false,
+                RenderProfile: VintageRtxRenderProfile.Cinematic
+            },
+            "lantern visual validation must run at fixed midnight and maximum authored quality without an FPS gate");
         Assert(
             ScenarioCatalog.Get("held-light").ShadowValidation == ShadowValidation.CameraAligned,
             "held light must reject false camera-aligned self-occlusion");
@@ -2073,6 +2152,17 @@ internal static class PreflightSuite
         Assert(
             ScenarioCatalog.Get("sunrise-exterior").WorldHour == 9.0,
             "sunrise exterior must run at a fixed low-sun hour");
+        Assert(
+            ScenarioCatalog.Get("vegetation-shadow-map") is
+            {
+                World: "foggy village world",
+                RuntimeProbe: "vegetation-shadow-map",
+                RunBenchmark: false,
+                CaptureProfile: "vegetation-shadow-map",
+                ShadowValidation: ShadowValidation.SunProjected,
+                RenderProfile: VintageRtxRenderProfile.Ultra
+            },
+            "real-map vegetation must be a capture-only fixed-Ultra sun-shadow case on foggy village");
         Assert(
             ScenarioCatalog.Get("moving-camera").RuntimeProbe == "moving-camera",
             "moving-camera scenario must exercise real camera history rejection");
@@ -2499,6 +2589,22 @@ internal static class PreflightSuite
             !RuntimeLogValidator.Validate(validBenchmark, completionScenario)
                 .Any(static failure => failure.Contains("A/B/A metrics", StringComparison.Ordinal)),
             "runtime validation must accept one complete, coherent A/B/A result at the inclusive budgets");
+        const string contendedBenchmark =
+            "[VintageRTX] Stabilized A/B/A result | baseline: fps=59.2, 1%low=38.4, jitter=2.59ms, gpu=0.00ms | effect: fps=48.5, 1%low=22.1, jitter=7.73ms, gpu=6.56ms | delta fps=+10.7, delta 1%low=+16.3.";
+        Assert(
+            !RuntimeLogValidator.BaselineCanEvaluatePerformance(59.2, 38.4, completionScenario)
+                && RuntimeLogValidator.TryDescribeBenchmarkContention(
+                    contendedBenchmark,
+                    completionScenario,
+                    out string contentionDiagnostic)
+                && contentionDiagnostic.Contains("performance gates are inconclusive", StringComparison.Ordinal)
+                && !RuntimeLogValidator.Validate(contendedBenchmark, completionScenario)
+                    .Any(static failure => failure.Contains("GPU cost", StringComparison.Ordinal)
+                        || failure.Contains("frame-time", StringComparison.Ordinal)
+                        || failure.Contains("effect average", StringComparison.Ordinal)
+                        || failure.Contains("effect 1% low", StringComparison.Ordinal)
+                        || failure.Contains("jitter increase", StringComparison.Ordinal)),
+            "a baseline below the requested effect floors must be reported as contended, not as a renderer regression");
         Assert(
             RuntimeLogValidator.Validate(validBenchmark + "\n" + validBenchmark, completionScenario)
                 .Contains("stabilized A/B/A metrics are missing or malformed"),
@@ -2660,8 +2766,8 @@ internal static class PreflightSuite
                 0.0f,
                 0.0f,
                 true,
-                0.08f),
-            "night verification must accept low measured daylight");
+                -0.01f),
+            "night verification must accept a sun below the horizon while allowing lunar ambient light");
         Assert(
             !RuntimeScenarioProbe.IsEnvironmentVerified(
                 0.0f,
@@ -2671,8 +2777,30 @@ internal static class PreflightSuite
                 0.0f,
                 0.0f,
                 true,
-                0.45f),
-            "night verification must reject a bright clock-compatible scene");
+                0.01f),
+            "night verification must reject a clock-compatible scene with the sun above the horizon");
+        Assert(
+            RuntimeScenarioProbe.IsEnvironmentVerified(
+                12.0f,
+                true,
+                12.0f,
+                0.0f,
+                0.0f,
+                0.0f,
+                sunVertical: 0.05f,
+                requireDay: true),
+            "daylight verification must wait for the sun to reach the camera-placement threshold");
+        Assert(
+            !RuntimeScenarioProbe.IsEnvironmentVerified(
+                12.0f,
+                true,
+                12.0f,
+                0.0f,
+                0.0f,
+                0.0f,
+                sunVertical: -0.01f,
+                requireDay: true),
+            "daylight verification must reject a nominal daytime clock while the sun is below the horizon");
         Assert(
             RuntimeScenarioProbe.IsEnvironmentVerified(
                 12.0f,

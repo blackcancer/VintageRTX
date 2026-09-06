@@ -1,11 +1,12 @@
 using OpenTK.Graphics.OpenGL4;
 using Vintagestory.API.Client;
 using Vintagestory.API.Common;
+using Vintagestory.API.MathTools;
 
 namespace VintageRTX.Rendering;
 
 /// <summary>
-/// Renders a horizontal mirrored world view into a half-resolution colour/depth target. The primary
+/// Renders a horizontal mirrored world view into a tier-scaled colour/depth target. The primary
 /// path replays official terrain and entity geometry under the reflected camera; the clean late-
 /// opaque point projection remains a compatibility fallback and never contains the deferred arm.
 /// </summary>
@@ -20,6 +21,12 @@ internal sealed class EntityMirrorProjection : IDisposable
     /// <summary>Allocation-free far depth used to clear the mirror depth attachment.</summary>
     private static readonly float[] FarDepthClear = [1.0f];
 
+    /// <summary>
+    /// Small world-space separation that keeps the liquid raster itself and numerically submerged
+    /// fragments out of the reflected depth buffer before they can hide valid scenery.
+    /// </summary>
+    private const double MirrorClipBiasWorldBlocks = 0.015;
+
     private readonly ICoreClientAPI api;
     private IShaderProgram? shader;
     private int colorTextureId;
@@ -28,6 +35,14 @@ internal sealed class EntityMirrorProjection : IDisposable
     private int entityEvidenceColorTextureId;
     private int entityEvidenceDepthTextureId;
     private int entityEvidenceFramebufferId;
+    /// <summary>Owned OpenGL projection whose near plane is the active liquid interface.</summary>
+    private readonly double[] obliqueProjectionMatrix = new double[16];
+    /// <summary>Reusable inverse-view scratch used while transforming the world clip plane.</summary>
+    private readonly double[] inverseMirrorViewScratch = new double[16];
+    /// <summary>Reusable inverse-projection scratch used to locate the opposite clip-space corner.</summary>
+    private readonly double[] inverseProjectionScratch = new double[16];
+    /// <summary>Suppresses repeated warnings while the fail-closed screen-derived fallback is active.</summary>
+    private bool clipProjectionFailureLogged;
     private int vertexArrayId;
     private int width;
     private int height;
@@ -41,7 +56,7 @@ internal sealed class EntityMirrorProjection : IDisposable
         this.api = api ?? throw new ArgumentNullException(nameof(api));
     }
 
-    /// <summary>Gets the half-resolution reflected world colour/coverage texture.</summary>
+    /// <summary>Gets the tier-scaled reflected world colour/coverage texture.</summary>
     internal int ColorTextureId => colorTextureId;
 
     /// <summary>Gets reflected world depth for reconstructing and clipping source geometry.</summary>
@@ -90,6 +105,7 @@ internal sealed class EntityMirrorProjection : IDisposable
     /// <param name="surfaceWorldY">Dominant horizontal liquid interface.</param>
     /// <param name="maximumDistance">Maximum reflected entity distance in world blocks.</param>
     /// <param name="captureEntityEvidence">Whether to render an isolated entity carrier this frame.</param>
+    /// <param name="resolutionDivisor">Full-frame divisor for the owned mirror target.</param>
     internal void Render(
         int frameWidth,
         int frameHeight,
@@ -104,7 +120,8 @@ internal sealed class EntityMirrorProjection : IDisposable
         double floatingOriginZ,
         float surfaceWorldY,
         float maximumDistance,
-        bool captureEntityEvidence)
+        bool captureEntityEvidence,
+        int resolutionDivisor)
     {
         ObjectDisposedException.ThrowIf(disposed, this);
         if (frameWidth <= 0 || frameHeight <= 0)
@@ -121,8 +138,14 @@ internal sealed class EntityMirrorProjection : IDisposable
         {
             throw new ArgumentOutOfRangeException(nameof(surfaceWorldY));
         }
+        if (resolutionDivisor < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(resolutionDivisor));
+        }
 
-        EnsureSize(Math.Max(1, (frameWidth + 1) / 2), Math.Max(1, (frameHeight + 1) / 2));
+        EnsureSize(
+            Math.Max(1, (frameWidth + resolutionDivisor - 1) / resolutionDivisor),
+            Math.Max(1, (frameHeight + resolutionDivisor - 1) / resolutionDivisor));
         GL.BindFramebuffer(FramebufferTarget.DrawFramebuffer, framebufferId);
         GL.DrawBuffer(DrawBufferMode.ColorAttachment0);
         GL.Viewport(0, 0, width, height);
@@ -140,7 +163,28 @@ internal sealed class EntityMirrorProjection : IDisposable
             api.Render.CameraMatrixOrigin,
             surfaceWorldY - floatingOriginY,
             mirroredCameraMatrix);
-        _ = EntityMirrorGeometryReplayPatch.TryReplay(mirroredCameraMatrix);
+        bool mirrorProjectionReady = BuildObliqueMirrorProjection(
+            api.Render.PerspectiveProjectionMat,
+            mirroredCameraMatrix,
+            surfaceWorldY - floatingOriginY,
+            MirrorClipBiasWorldBlocks,
+            obliqueProjectionMatrix,
+            inverseMirrorViewScratch,
+            inverseProjectionScratch);
+        if (mirrorProjectionReady)
+        {
+            _ = EntityMirrorGeometryReplayPatch.TryReplay(
+                mirroredCameraMatrix,
+                obliqueProjectionMatrix);
+            clipProjectionFailureLogged = false;
+        }
+        else if (!clipProjectionFailureLogged)
+        {
+            clipProjectionFailureLogged = true;
+            api.Logger.Warning(
+                "[VintageRTX] Mirrored liquid clip projection is unavailable; "
+                + "official world replay is skipped so submerged depth cannot occlude reflections.");
+        }
 
         // Conservative entity supplement for future engine builds whose exact
         // renderer moves. It cannot reveal occluded faces by itself, but the
@@ -184,7 +228,12 @@ internal sealed class EntityMirrorProjection : IDisposable
             // Replay official entities without terrain into the evidence target
             // after the clean supplement; reflected depth keeps the result
             // entity-only while exposing occluded and lower body faces.
-            _ = EntityMirrorGeometryReplayPatch.TryReplayEntitiesOnly(mirroredCameraMatrix);
+            if (mirrorProjectionReady)
+            {
+                _ = EntityMirrorGeometryReplayPatch.TryReplayEntitiesOnly(
+                    mirroredCameraMatrix,
+                    obliqueProjectionMatrix);
+            }
         }
     }
 
@@ -286,8 +335,8 @@ internal sealed class EntityMirrorProjection : IDisposable
     }
 
     /// <summary>Allocates the RGBA16F colour and depth24 target and compiles its shader lazily.</summary>
-    /// <param name="targetWidth">Positive half-resolution width.</param>
-    /// <param name="targetHeight">Positive half-resolution height.</param>
+    /// <param name="targetWidth">Positive tier-scaled width.</param>
+    /// <param name="targetHeight">Positive tier-scaled height.</param>
     private void EnsureSize(int targetWidth, int targetHeight)
     {
         EnsureShader();
@@ -355,7 +404,7 @@ internal sealed class EntityMirrorProjection : IDisposable
         width = targetWidth;
         height = targetHeight;
         api.Logger.Notification(
-            "[VintageRTX] Half-resolution entity mirror target resized to {0}x{1}.",
+            "[VintageRTX] Tier-scaled entity mirror target resized to {0}x{1}.",
             width,
             height);
     }
@@ -390,6 +439,246 @@ internal sealed class EntityMirrorProjection : IDisposable
         {
             throw new InvalidOperationException($"The {label} framebuffer is incomplete.");
         }
+    }
+
+    /// <summary>
+    /// Replaces the OpenGL near row of a perspective projection with the liquid plane transformed
+    /// into reflected-view space. The retained half-space is world Y greater than or equal to the
+    /// biased interface, so submerged geometry is clipped before depth testing rather than masked
+    /// after it has already hidden valid reflected scenery.
+    /// </summary>
+    /// <param name="projectionMatrix">Column-major OpenGL perspective projection.</param>
+    /// <param name="mirroredViewMatrix">Column-major reflected floating-origin view.</param>
+    /// <param name="surfaceLocalY">Liquid interface Y relative to the floating origin.</param>
+    /// <param name="clipBias">Non-negative world separation above the liquid raster.</param>
+    /// <param name="destination">Sixteen-element column-major oblique projection output.</param>
+    /// <returns>True only when both matrices and the resulting clip plane are finite and invertible.</returns>
+    internal static bool BuildObliqueMirrorProjection(
+        double[] projectionMatrix,
+        double[] mirroredViewMatrix,
+        double surfaceLocalY,
+        double clipBias,
+        double[] destination)
+    {
+        return BuildObliqueMirrorProjection(
+            projectionMatrix,
+            mirroredViewMatrix,
+            surfaceLocalY,
+            clipBias,
+            destination,
+            new double[16],
+            new double[16]);
+    }
+
+    /// <summary>Allocation-free implementation used by the live render path.</summary>
+    /// <param name="projectionMatrix">Column-major OpenGL perspective projection.</param>
+    /// <param name="mirroredViewMatrix">Column-major reflected floating-origin view.</param>
+    /// <param name="surfaceLocalY">Liquid interface Y relative to the floating origin.</param>
+    /// <param name="clipBias">Non-negative world separation above the liquid raster.</param>
+    /// <param name="destination">Sixteen-element column-major oblique projection output.</param>
+    /// <param name="inverseView">Sixteen-element reusable inverse-view storage.</param>
+    /// <param name="inverseProjection">Sixteen-element reusable inverse-projection storage.</param>
+    /// <returns>True when an exact OpenGL oblique near plane was produced.</returns>
+    private static bool BuildObliqueMirrorProjection(
+        double[] projectionMatrix,
+        double[] mirroredViewMatrix,
+        double surfaceLocalY,
+        double clipBias,
+        double[] destination,
+        double[] inverseView,
+        double[] inverseProjection)
+    {
+        if (projectionMatrix.Length < 16
+            || mirroredViewMatrix.Length < 16
+            || destination.Length < 16
+            || inverseView.Length < 16
+            || inverseProjection.Length < 16
+            || !double.IsFinite(surfaceLocalY)
+            || !double.IsFinite(clipBias)
+            || clipBias < 0.0
+            || !IsFiniteMatrix(projectionMatrix)
+            || !IsFiniteMatrix(mirroredViewMatrix))
+        {
+            Array.Clear(destination);
+            return false;
+        }
+
+        Array.Clear(inverseView);
+        Array.Clear(inverseProjection);
+        if (Mat4d.Invert(inverseView, mirroredViewMatrix) is null
+            || Mat4d.Invert(inverseProjection, projectionMatrix) is null
+            || !IsFiniteMatrix(inverseView)
+            || !IsFiniteMatrix(inverseProjection))
+        {
+            Array.Clear(destination);
+            return false;
+        }
+
+        // World/local plane (0, 1, 0, -height) retains p·x >= 0. Plane covectors
+        // transform by inverse-transpose into the reflected camera's view space.
+        double planeHeight = surfaceLocalY + clipBias;
+        double planeD = -planeHeight;
+        double planeX = inverseView[1] + inverseView[3] * planeD;
+        double planeY = inverseView[5] + inverseView[7] * planeD;
+        double planeZ = inverseView[9] + inverseView[11] * planeD;
+        double planeW = inverseView[13] + inverseView[15] * planeD;
+        double normalLength = Math.Sqrt(
+            planeX * planeX + planeY * planeY + planeZ * planeZ);
+        if (!IsUsableNormalLength(normalLength))
+        {
+            Array.Clear(destination);
+            return false;
+        }
+
+        planeX /= normalLength;
+        planeY /= normalLength;
+        planeZ /= normalLength;
+        planeW /= normalLength;
+        // The oblique near-plane derivation assumes the reflected camera lies
+        // on the rejected side. Underwater/coplanar cameras require a distinct
+        // internal-reflection model, so suppress this above-water replay rather
+        // than reversing the half-space or exposing submerged depth.
+        if (planeW >= -1e-6)
+        {
+            Array.Clear(destination);
+            return false;
+        }
+
+        // In OpenGL clip space the far corner opposite the new near plane is
+        // (sign(A), sign(B), 1, 1). Its inverse projection supplies Lengyel's q.
+        double cornerX = CopySignOne(planeX);
+        double cornerY = CopySignOne(planeY);
+        const double cornerZ = 1.0;
+        const double cornerW = 1.0;
+        double qX = inverseProjection[0] * cornerX
+            + inverseProjection[4] * cornerY
+            + inverseProjection[8] * cornerZ
+            + inverseProjection[12] * cornerW;
+        double qY = inverseProjection[1] * cornerX
+            + inverseProjection[5] * cornerY
+            + inverseProjection[9] * cornerZ
+            + inverseProjection[13] * cornerW;
+        double qZ = inverseProjection[2] * cornerX
+            + inverseProjection[6] * cornerY
+            + inverseProjection[10] * cornerZ
+            + inverseProjection[14] * cornerW;
+        double qW = inverseProjection[3] * cornerX
+            + inverseProjection[7] * cornerY
+            + inverseProjection[11] * cornerZ
+            + inverseProjection[15] * cornerW;
+        double denominator = planeX * qX
+            + planeY * qY
+            + planeZ * qZ
+            + planeW * qW;
+        if (!IsUsableClipDenominator(denominator))
+        {
+            Array.Clear(destination);
+            return false;
+        }
+
+        double scale = 2.0 / denominator;
+        double clipX = planeX * scale;
+        double clipY = planeY * scale;
+        double clipZ = planeZ * scale;
+        double clipW = planeW * scale;
+        if (!AreFiniteClipCoefficients(clipX, clipY, clipZ, clipW))
+        {
+            Array.Clear(destination);
+            return false;
+        }
+
+        return TryWriteObliqueProjection(
+            projectionMatrix,
+            clipX,
+            clipY,
+            clipZ,
+            clipW,
+            destination);
+    }
+
+    /// <summary>
+    /// Writes the derived clip plane into the third projection row and rejects finite operands whose
+    /// subtraction overflows. Keeping this final numerical boundary isolated makes the defensive
+    /// overflow path deterministic without relaxing any live matrix validation.
+    /// </summary>
+    /// <param name="projectionMatrix">Prevalidated finite sixteen-element source projection.</param>
+    /// <param name="clipX">Finite normalized clip-plane X coefficient.</param>
+    /// <param name="clipY">Finite normalized clip-plane Y coefficient.</param>
+    /// <param name="clipZ">Finite normalized clip-plane Z coefficient.</param>
+    /// <param name="clipW">Finite normalized clip-plane W coefficient.</param>
+    /// <param name="destination">Prevalidated sixteen-element destination.</param>
+    /// <returns>True when every written projection coefficient remains finite.</returns>
+    internal static bool TryWriteObliqueProjection(
+        double[] projectionMatrix,
+        double clipX,
+        double clipY,
+        double clipZ,
+        double clipW,
+        double[] destination)
+    {
+        Array.Copy(projectionMatrix, destination, 16);
+        // Column-major indices 2/6/10/14 form the projection's third row.
+        // Subtracting row four makes z_clip + w_clip equal the retained plane.
+        destination[2] = clipX - projectionMatrix[3];
+        destination[6] = clipY - projectionMatrix[7];
+        destination[10] = clipZ - projectionMatrix[11];
+        destination[14] = clipW - projectionMatrix[15];
+        if (!IsFiniteMatrix(destination))
+        {
+            Array.Clear(destination);
+            return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>Checks that a transformed plane normal can be normalized safely.</summary>
+    /// <param name="normalLength">Computed Euclidean normal length.</param>
+    /// <returns>True only for a finite, non-degenerate length.</returns>
+    internal static bool IsUsableNormalLength(double normalLength) =>
+        double.IsFinite(normalLength) && normalLength > 1e-10;
+
+    /// <summary>Checks the Lengyel plane/corner denominator before reciprocal scaling.</summary>
+    /// <param name="denominator">Plane dot opposite clip-space corner.</param>
+    /// <returns>True only for a finite denominator separated from zero.</returns>
+    internal static bool IsUsableClipDenominator(double denominator) =>
+        double.IsFinite(denominator) && Math.Abs(denominator) > 1e-10;
+
+    /// <summary>Checks all four scaled clip-plane coefficients before projection-row writes.</summary>
+    /// <param name="clipX">Scaled X coefficient.</param>
+    /// <param name="clipY">Scaled Y coefficient.</param>
+    /// <param name="clipZ">Scaled Z coefficient.</param>
+    /// <param name="clipW">Scaled W coefficient.</param>
+    /// <returns>True only when every coefficient is finite.</returns>
+    internal static bool AreFiniteClipCoefficients(
+        double clipX,
+        double clipY,
+        double clipZ,
+        double clipW) =>
+        double.IsFinite(clipX)
+        && double.IsFinite(clipY)
+        && double.IsFinite(clipZ)
+        && double.IsFinite(clipW);
+
+    /// <summary>Returns +1 for zero/positive values and -1 for negative values.</summary>
+    /// <param name="value">Finite plane component.</param>
+    /// <returns>Signed unit corner coordinate.</returns>
+    private static double CopySignOne(double value) => value < 0.0 ? -1.0 : 1.0;
+
+    /// <summary>Checks the first sixteen entries of a column-major matrix for finite values.</summary>
+    /// <param name="matrix">Matrix storage already known to contain at least sixteen entries.</param>
+    /// <returns>True only when all matrix coefficients are finite.</returns>
+    private static bool IsFiniteMatrix(double[] matrix)
+    {
+        for (int index = 0; index < 16; index++)
+        {
+            if (!double.IsFinite(matrix[index]))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /// <summary>Allocates one clamp-to-edge two-dimensional target texture.</summary>

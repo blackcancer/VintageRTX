@@ -48,8 +48,28 @@
       <HintPath>$(VintageStoryPath)\VintagestoryAPI.dll</HintPath>
       <Private>true</Private>
     </Reference>
+    <Reference Include="OpenTK.Core">
+      <HintPath>$(VintageStoryPath)\Lib\OpenTK.Core.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
     <Reference Include="OpenTK.Graphics">
       <HintPath>$(VintageStoryPath)\Lib\OpenTK.Graphics.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="OpenTK.Mathematics">
+      <HintPath>$(VintageStoryPath)\Lib\OpenTK.Mathematics.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="OpenTK.Windowing.Common">
+      <HintPath>$(VintageStoryPath)\Lib\OpenTK.Windowing.Common.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="OpenTK.Windowing.Desktop">
+      <HintPath>$(VintageStoryPath)\Lib\OpenTK.Windowing.Desktop.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="OpenTK.Windowing.GraphicsLibraryFramework">
+      <HintPath>$(VintageStoryPath)\Lib\OpenTK.Windowing.GraphicsLibraryFramework.dll</HintPath>
       <Private>true</Private>
     </Reference>
     <Reference Include="SkiaSharp">
@@ -60,8 +80,30 @@
       <HintPath>$(VintageStoryPath)\Lib\0Harmony.dll</HintPath>
       <Private>true</Private>
     </Reference>
+    <Reference Include="Microsoft.Data.Sqlite">
+      <HintPath>$(VintageStoryPath)\Lib\Microsoft.Data.Sqlite.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="SQLitePCLRaw.batteries_v2">
+      <HintPath>$(VintageStoryPath)\Lib\SQLitePCLRaw.batteries_v2.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="SQLitePCLRaw.core">
+      <HintPath>$(VintageStoryPath)\Lib\SQLitePCLRaw.core.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="SQLitePCLRaw.provider.e_sqlite3">
+      <HintPath>$(VintageStoryPath)\Lib\SQLitePCLRaw.provider.e_sqlite3.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
     <None Include="$(VintageStoryPath)\Lib\libSkiaSharp.dll"
           Link="libSkiaSharp.dll"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="$(VintageStoryPath)\Lib\glfw3.dll"
+          Link="glfw3.dll"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="$(VintageStoryPath)\Lib\e_sqlite3.dll"
+          Link="e_sqlite3.dll"
           CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

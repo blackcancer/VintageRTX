@@ -89,7 +89,33 @@ internal sealed class FrameCaptureService
         (240, "reflection", VintageRtxDebugView.Reflection),
         (250, "voxel-reflection", VintageRtxDebugView.VoxelReflection),
         (260, "water", VintageRtxDebugView.Water),
-        (270, "voxel-shadow", VintageRtxDebugView.VoxelShadow)
+        (270, "voxel-shadow", VintageRtxDebugView.VoxelShadow),
+        (280, "native-sun-shadow", VintageRtxDebugView.NativeSunShadow)
+    ];
+
+    /// <summary>
+    /// Full copied-map evidence plus a source-separated sun-shadow carrier. This remains distinct
+    /// from the default campaign so existing scenarios and their terminal timing do not change.
+    /// </summary>
+    private static readonly (long Frame, string Label, VintageRtxDebugView? DebugView)[]
+        VegetationMapSequence =
+    [
+        (180, "final", VintageRtxDebugView.Final),
+        (200, "normal", VintageRtxDebugView.Normal),
+        (220, "position", VintageRtxDebugView.Position),
+        (240, "lighting", VintageRtxDebugView.Lighting),
+        (250, "reflection", VintageRtxDebugView.Reflection),
+        (260, "voxel-reflection", VintageRtxDebugView.VoxelReflection),
+        (270, "voxel-albedo", VintageRtxDebugView.VoxelAlbedo),
+        (280, "voxel-bounce", VintageRtxDebugView.VoxelBounce),
+        (290, "voxel-visibility", VintageRtxDebugView.VoxelVisibility),
+        (300, "transport-components", VintageRtxDebugView.TransportComponents),
+        (310, "voxel-shadow", VintageRtxDebugView.VoxelShadow),
+        (315, "native-sun-shadow", VintageRtxDebugView.NativeSunShadow),
+        (320, "material", VintageRtxDebugView.Material),
+        (330, "water", VintageRtxDebugView.Water),
+        (340, "wetness", VintageRtxDebugView.Wetness),
+        (350, "entity-mirror", VintageRtxDebugView.EntityMirror)
     ];
 
     private static readonly (long Frame, string Label, VintageRtxDebugView? DebugView)[] LiquidLabSequence =
@@ -109,6 +135,27 @@ internal sealed class FrameCaptureService
         (425, "liquid-transport", VintageRtxDebugView.TransportComponents)
     ];
 
+    /// <summary>
+    /// Fixed-camera lantern sequence used to measure temporal light stability independently from
+    /// the ordinary one-shot diagnostics. The three final frames and three point/sun visibility
+    /// frames are separated by two reference seconds, so source-slot movement, history pumping,
+    /// or non-deterministic shadow filtering cannot hide inside adjacent-frame correlation.
+    /// </summary>
+    private static readonly (long Frame, string Label, VintageRtxDebugView? DebugView)[]
+        LightStabilitySequence =
+    [
+        (180, "final", VintageRtxDebugView.Final),
+        (200, "normal", VintageRtxDebugView.Normal),
+        (220, "position", VintageRtxDebugView.Position),
+        (240, "material", VintageRtxDebugView.Material),
+        (260, "lighting", VintageRtxDebugView.Lighting),
+        (280, "voxel-shadow", VintageRtxDebugView.VoxelShadow),
+        (400, "light-stability-final-b", VintageRtxDebugView.Final),
+        (420, "light-stability-shadow-b", VintageRtxDebugView.VoxelShadow),
+        (540, "light-stability-final-c", VintageRtxDebugView.Final),
+        (560, "light-stability-shadow-c", VintageRtxDebugView.VoxelShadow)
+    ];
+
     private readonly ICoreClientAPI api;
     /// <summary>Reads process configuration through a deterministic seam.</summary>
     private readonly Func<string, string?> readEnvironment;
@@ -120,6 +167,12 @@ internal sealed class FrameCaptureService
     private readonly string automaticCaptureProfile;
     private readonly bool renderLabProfile;
     private readonly bool liquidLabProfile;
+    /// <summary>Whether the capture measures fixed-scene light and shadow stability over time.</summary>
+    private readonly bool lightStabilityProfile;
+    /// <summary>Whether a copied real map must wait for its server-placed plant witness.</summary>
+    private readonly bool vegetationMapProfile;
+    /// <summary>Whether the scenario guarantees entity witnesses for the raw mirror diagnostic.</summary>
+    private readonly bool waterReflectionProfile;
     private readonly int automaticCaptureFrame;
     private readonly DateTime automaticCaptureNotBeforeUtc;
     private int uploadedVoxelGeneration;
@@ -176,11 +229,32 @@ internal sealed class FrameCaptureService
             captureProfile,
             "liquid-lab",
             StringComparison.OrdinalIgnoreCase);
-        automaticSequence = liquidLabProfile
-            ? LiquidLabSequence
+        lightStabilityProfile = string.Equals(
+            captureProfile,
+            "light-stability",
+            StringComparison.OrdinalIgnoreCase);
+        vegetationMapProfile = string.Equals(
+            captureProfile,
+            "vegetation-shadow-map",
+            StringComparison.OrdinalIgnoreCase);
+        waterReflectionProfile = string.Equals(
+            captureProfile,
+            "water-reflection",
+            StringComparison.OrdinalIgnoreCase);
+        automaticSequence = lightStabilityProfile
+            ? LightStabilitySequence
+            : liquidLabProfile
+                ? LiquidLabSequence
             : renderLabProfile
                 ? RenderLabSequence
-                : AutomaticSequence;
+                : vegetationMapProfile
+                    ? VegetationMapSequence
+                    : waterReflectionProfile
+                        ? AutomaticSequence
+                        // Generic map probes do not guarantee any entity inside
+                        // the mirror frustum. End on wetness rather than retrying
+                        // an unavailable optional entity-only target forever.
+                        : AutomaticSequence[..^1];
         // The liquid motion profile still needs physical phase separation. The
         // render lab instead uses an explicit post-commit voxel-generation gate.
         automaticCaptureNotBeforeUtc = liquidLabProfile
@@ -499,15 +573,31 @@ internal sealed class FrameCaptureService
             return true;
         }
 
-        if (renderLabProfile || liquidLabProfile)
+        if (renderLabProfile || liquidLabProfile || vegetationMapProfile)
         {
+            string readyVariable = vegetationMapProfile
+                ? "VINTAGERTX_VEGETATION_MAP_READY"
+                : "VINTAGERTX_RENDER_LAB_READY";
+            string? readyState = readEnvironment(readyVariable);
             bool ready = string.Equals(
-                readEnvironment("VINTAGERTX_RENDER_LAB_READY"),
+                readyState,
                 "1",
                 StringComparison.Ordinal);
             if (!ready)
             {
-                if (renderLabProfile)
+                if (vegetationMapProfile
+                    && string.Equals(readyState, "staging", StringComparison.OrdinalIgnoreCase))
+                {
+                    // The client exposes a short staging phase before sending the authoritative
+                    // placement command. Latch that exact pre-mutation generation once, so a fast
+                    // chunk rebuild cannot be mistaken for the floor when READY arrives later.
+                    if (!renderLabCommitObserved)
+                    {
+                        renderLabCommitObserved = true;
+                        renderLabCommitGeneration = uploadedVoxelGeneration;
+                    }
+                }
+                else if (renderLabProfile)
                 {
                     renderLabCommitObserved = false;
                     renderLabCommitGeneration = -1;
@@ -517,11 +607,11 @@ internal sealed class FrameCaptureService
                 return false;
             }
 
-            if (renderLabProfile && !renderLabCommitObserved)
+            if ((renderLabProfile || vegetationMapProfile) && !renderLabCommitObserved)
             {
-                // The probe raises READY only after committing the room, camera,
-                // and lights. The currently uploaded generation can still be the
-                // scan that began before that commit, so it is the rejected floor.
+                // A staged-scene probe raises READY only after its block mutation and camera lock.
+                // The currently uploaded generation can still be the scan that began before that
+                // mutation, so it is the rejected floor for both lab and copied-map witnesses.
                 renderLabCommitObserved = true;
                 renderLabCommitGeneration = uploadedVoxelGeneration;
                 request = default;
@@ -529,7 +619,7 @@ internal sealed class FrameCaptureService
                 return false;
             }
 
-            if (renderLabProfile
+            if ((renderLabProfile || vegetationMapProfile)
                 && (!voxelSceneSettled
                     || uploadedVoxelGeneration <= renderLabCommitGeneration))
             {
@@ -539,8 +629,13 @@ internal sealed class FrameCaptureService
             }
         }
 
+        bool deterministicEnvironmentPending = string.Equals(
+            readEnvironment("VINTAGERTX_TEST_ENVIRONMENT_READY"),
+            "0",
+            StringComparison.Ordinal);
         if (automaticCaptureFrame > 0
             && automaticCaptureIndex < automaticSequence.Length
+            && !deterministicEnvironmentPending
             && utcNow() >= automaticCaptureNotBeforeUtc)
         {
             (long sequenceFrame, string label, VintageRtxDebugView? debugView) =

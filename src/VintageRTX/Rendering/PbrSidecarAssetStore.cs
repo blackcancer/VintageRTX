@@ -62,17 +62,12 @@ internal sealed class PbrSidecarAssetStore
         ILogger logger)
     {
         Dictionary<AssetLocation, IAsset> captured = [];
-        AssetLocation[] locations = assetManager.AllAssets.Keys
-            .Where(IsPbrSidecar)
+        KeyValuePair<AssetLocation, IAsset>[] sidecars = assetManager.AllAssets
+            .Where(entry => IsPbrSidecar(entry.Key))
             .ToArray();
 
-        foreach (AssetLocation location in locations)
+        foreach ((AssetLocation location, IAsset asset) in sidecars)
         {
-            if (!assetManager.AllAssets.TryGetValue(location, out IAsset? asset))
-            {
-                continue;
-            }
-
             captured.TryAdd(location, asset);
         }
 

@@ -103,6 +103,7 @@ internal sealed class RuntimeCoverageProbeHarness
                 "get_Player" => PlayerAvailable ? player : null,
                 "get_BlockAccessor" => blockAccessor,
                 "get_Calendar" => CalendarAvailable ? calendar : null,
+                "get_MapSizeY" => MapSizeY,
                 "GetBlockAccessorBulkUpdate" => bulkAccessor,
                 _ => RuntimeCoverageDispatchProxy.DefaultValue(method.ReturnType)
             });
@@ -257,6 +258,9 @@ internal sealed class RuntimeCoverageProbeHarness
     /// </summary>
     internal bool CalendarAvailable { get; set; } = true;
 
+    /// <summary>Gets or sets whether the calendar double exposes coordinate-aware solar calculation.</summary>
+    internal bool CalendarSunCalculationAvailable { get; set; } = true;
+
     /// <summary>
     /// Gets or sets the is Paused value exposed to the deterministic fixture.
     /// </summary>
@@ -292,10 +296,19 @@ internal sealed class RuntimeCoverageProbeHarness
     /// </summary>
     internal float SpeedOfTime { get; set; }
 
+    /// <summary>Gets or sets the calendar progression multiplier exposed by the 1.22 API.</summary>
+    internal float CalendarSpeedMultiplier { get; set; } = 1.0f;
+
     /// <summary>
     /// Gets or sets the daylight Strength value exposed to the deterministic fixture.
     /// </summary>
     internal float DaylightStrength { get; set; }
+
+    /// <summary>Gets or sets the direct solar contribution exposed by the client calendar.</summary>
+    internal float DirectSunLightStrength { get; set; }
+
+    /// <summary>Gets or sets the lunar contribution exposed by the client calendar.</summary>
+    internal float MoonLightStrength { get; set; }
 
     /// <summary>
     /// Gets or sets the hemisphere value exposed to the deterministic fixture.
@@ -362,6 +375,13 @@ internal sealed class RuntimeCoverageProbeHarness
     /// Gets or sets the fallback Block At value exposed to the deterministic fixture.
     /// </summary>
     internal System.Func<int, int, int, int, Block>? FallbackBlockAt { get; set; }
+
+    /// <summary>
+    /// Gets or sets a test-only predicate that makes <c>GetBlock</c> return a null-like engine
+    /// result at selected coordinates. Production accessors normally return air; this hook covers
+    /// the probe's defensive handling of unloaded or malformed third-party accessor results.
+    /// </summary>
+    internal System.Func<int, int, int, int, bool>? ReturnNullBlockAt { get; set; }
 
     /// <summary>
     /// Gets or sets the light At value exposed to the deterministic fixture.
@@ -652,6 +672,30 @@ internal sealed class RuntimeCoverageProbeHarness
             return Climate;
         }
 
+        if (method.Name == "SearchBlocks")
+        {
+            BlockPos minimum = (BlockPos)arguments![0]!;
+            BlockPos maximum = (BlockPos)arguments[1]!;
+            ActionConsumable<Block, BlockPos> consume =
+                (ActionConsumable<Block, BlockPos>)arguments[2]!;
+            foreach (((int x, int y, int z, int layer), Block block) in blocks)
+            {
+                if (layer is not BlockLayersAccess.MostSolid and not BlockLayersAccess.Solid
+                    || x < minimum.X || x > maximum.X
+                    || y < minimum.Y || y > maximum.Y
+                    || z < minimum.Z || z > maximum.Z)
+                {
+                    continue;
+                }
+
+                if (!consume(block, new BlockPos(x, y, z, minimum.dimension)))
+                {
+                    break;
+                }
+            }
+            return null;
+        }
+
         if (method.Name == "GetLightLevel")
         {
             return LightAt((BlockPos)arguments![0]!, (EnumLightLevelType)arguments[1]!);
@@ -695,8 +739,12 @@ internal sealed class RuntimeCoverageProbeHarness
         {
             "get_HourOfDay" => HourOfDay,
             "get_SpeedOfTime" => SpeedOfTime,
+            "get_CalendarSpeedMul" => CalendarSpeedMultiplier,
             "get_DayLightStrength" => DaylightStrength,
+            "get_SunLightStrength" => DirectSunLightStrength,
+            "get_MoonLightStrength" => MoonLightStrength,
             "get_SunPositionNormalized" => SunDirection,
+            "GetSunPosition" => CalendarSunCalculationAvailable ? SunDirection : null,
             "GetDayLightStrength" => DaylightStrength,
             "GetHemisphere" => Hemisphere,
             _ => RuntimeCoverageDispatchProxy.DefaultValue(method.ReturnType)
@@ -713,6 +761,11 @@ internal sealed class RuntimeCoverageProbeHarness
     /// <returns>The resolve Block result consumed by the caller&apos;s assertion.</returns>
     private Block ResolveBlock(int x, int y, int z, int layer)
     {
+        if (ReturnNullBlockAt?.Invoke(x, y, z, layer) == true)
+        {
+            return null!;
+        }
+
         if (blocks.TryGetValue((x, y, z, layer), out Block? exact))
         {
             return exact;

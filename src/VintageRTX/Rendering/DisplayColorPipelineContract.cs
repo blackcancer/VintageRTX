@@ -125,7 +125,6 @@ internal static class DisplayColorPipelineContract
         int frameBufferIndex = (int)EnumFrameBuffer.LiquidDepth;
         if (frameWidth <= 0
             || frameHeight <= 0
-            || frameBufferIndex < 0
             || frameBuffers.Count <= frameBufferIndex)
         {
             return false;
@@ -167,7 +166,6 @@ internal static class DisplayColorPipelineContract
         int frameBufferIndex = (int)kind;
         if (frameWidth <= 0
             || frameHeight <= 0
-            || frameBufferIndex < 0
             || frameBuffers.Count <= frameBufferIndex)
         {
             return false;

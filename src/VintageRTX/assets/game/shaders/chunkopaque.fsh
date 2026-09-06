@@ -106,8 +106,9 @@ void main()
     vec4 unlitTexColor = getColorMapped(terrainTexLinear, texture(terrainTex, uv));
     vec4 texColor = unlitTexColor * rgba;
     // One proven sampler transports every sidecar: filtered RG are tangent
-    // normal XY, filtered B is roughness, and exact A is the packed categorical
-    // material payload. Z is reconstructed from the normalized XY disk.
+    // normal XY, filtered B is roughness, and exact A carries two-bit metallic,
+    // three-bit emissive, PBR-presence and reliable-override flags. Z is
+    // reconstructed from the normalized XY disk.
     vec4 pbrSurface = texture(vintagertxMaterialTex, uv);
     ivec2 pbrAtlasSize = textureSize(vintagertxMaterialTex, 0);
     ivec2 pbrTexel = clamp(

@@ -43,6 +43,9 @@ public sealed class RuntimeCoverageProbeTickTests
 
         harness.HourOfDay = 12.0f;
         harness.SpeedOfTime = 0.0f;
+        harness.DaylightStrength = 1.0f;
+        harness.DirectSunLightStrength = 1.0f;
+        harness.SunDirection = new Vec3f(0.2f, 0.7f, 0.2f);
         harness.Climate = new ClimateCondition { Rainfall = 0.0f, RainCloudOverlay = 0.0f };
         SetField(probe, "readyTicks", 174);
         harness.Tick(0.02f);
