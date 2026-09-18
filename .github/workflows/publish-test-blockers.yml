@@ -2,7 +2,7 @@ name: Validate and publish test blocker repair
 on:
   push:
     branches: [dev/renderer-recovery-20260918]
-    paths: ['tools/recovery/apply_test_blockers.py', 'tools/recovery/finish_test_blockers.py', 'tools/recovery/inspect_test_blockers.py', 'tests/VintageRTX.Test/MirrorDepthRegressionTests.cs', '.github/workflows/publish-test-blockers.yml']
+    paths: ['tools/recovery/apply_test_blockers.py', 'tools/recovery/finish_test_blockers.py', 'tools/recovery/inspect_test_blockers.py', 'tests/VintageRTX.Test/MirrorDepthRegressionTests.cs', 'tests/feedback/test_grid_ties.py', '.github/workflows/publish-test-blockers.yml']
 permissions:
   contents: write
 concurrency:
@@ -55,7 +55,7 @@ jobs:
           set -euo pipefail
           export LD_LIBRARY_PATH="$VINTAGE_STORY/Lib:${LD_LIBRARY_PATH:-}"
           export BLOCKER_RESULTS="$RUNNER_TEMP/blocker-evidence"
-          filter='FullyQualifiedName~MirrorDepthRegressionTests|FullyQualifiedName~RuntimeCoverageModSystemTests|FullyQualifiedName~PreFinalDisplayPassUsesRealHiddenContextAndRestoresState|FullyQualifiedName~ExteriorRoofCameraCoversLowSunNoCandidateAndOpenGroundSuccess|FullyQualifiedName~RealRuntimeLocalBodyCarrierRetainsMeasuredComponents|FullyQualifiedName~VoxelShadowTraversalAdvancesEveryTiedAxis|FullyQualifiedName~ShaderUsesNativeVegetationLocallyAndVoxelVisibilityBeyondCascadeExit|FullyQualifiedName~VisualStudioExplorerTests.PreflightContract'
+          filter='FullyQualifiedName~MirrorDepthRegressionTests|FullyQualifiedName~RuntimeCoverageModSystemTests|FullyQualifiedName~PreFinalDisplayPassUsesRealHiddenContextAndRestoresState|FullyQualifiedName~ExteriorRoofCameraCoversLowSunNoCandidateAndOpenGroundSuccess|FullyQualifiedName~RealRuntimeLocalBodyCarrierRetainsMeasuredComponents|FullyQualifiedName~RealFixtureSurvivesUnicodePathAndRejectsChangedBytes|FullyQualifiedName~VoxelShadowTraversalAdvancesEveryTiedAxis|FullyQualifiedName~ShaderUsesNativeVegetationLocallyAndVoxelVisibilityBeyondCascadeExit|FullyQualifiedName~VisualStudioExplorerTests.PreflightContract'
           code=0
           xvfb-run -a dotnet test tests/VintageRTX.Test/VintageRTX.Test.csproj -c Release --no-build --no-restore --filter "$filter" --logger 'trx;LogFileName=blockers.trx' --results-directory "$BLOCKER_RESULTS" > "$BLOCKER_RESULTS/tests.log" 2>&1 || code=$?
           python3 tools/recovery/inspect_test_blockers.py | tee "$BLOCKER_RESULTS/summary.log"
@@ -77,7 +77,7 @@ jobs:
           remote=$(git ls-remote origin refs/heads/dev/renderer-recovery-20260918 | cut -f1)
           test "$remote" = "$GITHUB_SHA"
           git diff --check
-          git add src/VintageRTX/Rendering/EntityMirrorProjection.cs src/VintageRTX/Rendering/FilmicDisplayRenderer.cs src/VintageRTX/VintageRtxModSystem.cs src/VintageRTX/Configuration/GuiDialogVintageRtxSettings.cs tests/VintageRTX.Test/RuntimeCoverageModSystemTests.cs tests/VintageRTX.Test/ShadowFilterPipelineTests.cs tests/VintageRTX.Test/VegetationSunShadowRegressionTests.cs tests/VintageRTX.Test/PreflightSuite.cs tests/VintageRTX.Test/VintageRTX.Test.csproj tests/VintageRTX.Test/TestPaths.cs tests/VintageRTX.Test/RuntimeCoverageProbeWorldTests.cs
+          git add src/VintageRTX/Rendering/EntityMirrorProjection.cs src/VintageRTX/Rendering/FilmicDisplayRenderer.cs src/VintageRTX/VintageRtxModSystem.cs src/VintageRTX/Configuration/GuiDialogVintageRtxSettings.cs src/VintageRTX/Testing/RuntimeScenarioProbe.cs tests/VintageRTX.Test/RuntimeCoverageModSystemTests.cs tests/VintageRTX.Test/ShadowFilterPipelineTests.cs tests/VintageRTX.Test/VegetationSunShadowRegressionTests.cs tests/VintageRTX.Test/PreflightSuite.cs tests/VintageRTX.Test/VintageRTX.Test.csproj tests/VintageRTX.Test/TestPaths.cs tests/VintageRTX.Test/RuntimeCoverageProbeWorldTests.cs tests/VintageRTX.Test/RuntimeImageValidatorReflectionWitnessTests.cs
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git commit -m 'fix: validate mirror inversion before GL and repair test bootstrap contracts'
