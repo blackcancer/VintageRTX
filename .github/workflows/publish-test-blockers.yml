@@ -51,12 +51,12 @@ jobs:
         env:
           LIBGL_ALWAYS_SOFTWARE: '1'
         run: |
-          set -uo pipefail
+          set -euo pipefail
           export LD_LIBRARY_PATH="$VINTAGE_STORY/Lib:${LD_LIBRARY_PATH:-}"
           export BLOCKER_RESULTS="$RUNNER_TEMP/blocker-evidence"
           filter='FullyQualifiedName~MirrorDepthRegressionTests|FullyQualifiedName~RuntimeCoverageModSystemTests|FullyQualifiedName~PreFinalDisplayPassUsesRealHiddenContextAndRestoresState|FullyQualifiedName~ExteriorRoofCameraCoversLowSunNoCandidateAndOpenGroundSuccess|FullyQualifiedName~RealRuntimeLocalBodyCarrierRetainsMeasuredComponents|FullyQualifiedName~VoxelShadowTraversalAdvancesEveryTiedAxis|FullyQualifiedName~ShaderUsesNativeVegetationLocallyAndVoxelVisibilityBeyondCascadeExit|FullyQualifiedName~VisualStudioExplorerTests.PreflightContract'
-          xvfb-run -a dotnet test tests/VintageRTX.Test/VintageRTX.Test.csproj -c Release --no-build --no-restore --filter "$filter" --logger 'trx;LogFileName=blockers.trx' --results-directory "$BLOCKER_RESULTS" > "$BLOCKER_RESULTS/tests.log" 2>&1
-          code=$?
+          code=0
+          xvfb-run -a dotnet test tests/VintageRTX.Test/VintageRTX.Test.csproj -c Release --no-build --no-restore --filter "$filter" --logger 'trx;LogFileName=blockers.trx' --results-directory "$BLOCKER_RESULTS" > "$BLOCKER_RESULTS/tests.log" 2>&1 || code=$?
           python3 tools/recovery/inspect_test_blockers.py | tee "$BLOCKER_RESULTS/summary.log"
           if ! test -f "$BLOCKER_RESULTS/blockers.trx"; then tail -60 "$BLOCKER_RESULTS/tests.log"; fi
           exit "$code"
