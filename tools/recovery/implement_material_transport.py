@@ -25,6 +25,11 @@ code=once(code,'''        api.Event.UnregisterRenderer(rawAlbedoCapture, EnumRen
             api.Event.UnregisterRenderer(rawAlbedoCapture, EnumRenderStage.Opaque);
             rawAlbedoCapture.Dispose();
         }''')
+# Shader creation also occurs during initialization. Only explicit reload invalidates an
+# active opaque transaction: scope the replacement to that method, not both occurrences.
+old="s=once(s,'''            shader = CreateShader();''', '''            rawAlbedoCapture.ReloadShader();\n            shader = CreateShader();''')"
+new="a,o,b=span(s,'    public bool ReloadShader()')\nmethod=once(s[a:b], '            shader = CreateShader();', '            rawAlbedoCapture.ReloadShader();\\n            shader = CreateShader();')\ns=s[:a]+method+s[b:]"
+code=once(code,old,new)
 exec(compile(code,str(recipe),'exec'),{'__file__':str(recipe),'__name__':'__main__'})
 p='src/VintageRTX/assets/vintagertx/shaders/display.frag'
 edit(p,'''    float voxelMetallicHint = smoothstep(0.66, 0.74, result.material.a);
