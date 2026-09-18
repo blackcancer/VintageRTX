@@ -1,0 +1,54 @@
+name: Recovery toolchain snapshot
+on:
+  push:
+    branches: [dev/renderer-recovery-20260918]
+    paths: ['.github/workflows/recovery-toolchain.yml']
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9
+        with:
+          dotnet-version: '10.0.401'
+      - name: Collect public SDK and versioned reference assemblies only
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          mkdir -p transfer/reference/Lib server packages restore
+          curl -fL --retry 2 'https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.401/dotnet-sdk-10.0.401-linux-x64.tar.gz' -o transfer/dotnet-sdk.tar.gz
+          curl -fL --retry 2 'https://cdn.vintagestory.at/gamefiles/stable/vs_server_linux-x64_1.22.7.tar.gz' -o server.tar.gz
+          echo 'a7d4a520604590a96de812ee6c6baf4404d43d86cf1ec4fbac1b3a580b52c847  server.tar.gz' | sha256sum -c -
+          tar -xzf server.tar.gz -C server
+          api_dll=$(find server -name VintagestoryAPI.dll -print -quit)
+          game_root=$(dirname "$api_dll")
+          cp "$game_root"/VintagestoryAPI.* transfer/reference/
+          find "$game_root/Lib" -maxdepth 1 -type f \( -name '*.dll' -o -name '*.xml' -o -name '*.so' -o -name '*.so.*' \) -exec cp '{}' transfer/reference/Lib/ \;
+          cat > restore/Offline.csproj <<'EOF'
+          <Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup><ItemGroup>
+          <PackageReference Include="OpenTK.Graphics" Version="4.9.4" />
+          <PackageReference Include="OpenTK.Core" Version="4.9.4" />
+          <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+          <PackageReference Include="MSTest.TestAdapter" Version="3.7.1" />
+          <PackageReference Include="MSTest.TestFramework" Version="3.7.1" />
+          <PackageReference Include="coverlet.collector" Version="6.0.4" />
+          </ItemGroup></Project>
+          EOF
+          dotnet restore restore/Offline.csproj --source https://api.nuget.org/v3/index.json --packages "$RUNNER_TEMP/packages"
+          for name in Core Graphics; do
+            find "packages/opentk.${name,,}/4.9.4/lib" -name "OpenTK.$name.dll" -print -quit | xargs -r -I{} cp '{}' transfer/reference/Lib/
+          done
+          tar -czf transfer/nuget-packages.tar.gz -C packages .
+          find transfer/reference -type f -print0 | sort -z | xargs -0 sha256sum > transfer/reference.sha256
+          sha256sum transfer/dotnet-sdk.tar.gz transfer/nuget-packages.tar.gz > transfer/toolchain.sha256
+          echo 'SDK 10.0.401; VintageStory API official server 1.22.7; missing OpenTK Core/Graphics from NuGet 4.9.4. Reference assemblies are for development; never bundle game libraries in the mod.' > transfer/README.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: recovery-offline-toolchain
+          path: ${{ runner.temp }}/transfer/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
