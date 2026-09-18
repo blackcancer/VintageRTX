@@ -12,6 +12,7 @@ namespace VintageRTX.Rendering;
 /// </summary>
 internal sealed class RawAlbedoCapture : IRenderer
 {
+    /// <summary>Owner of this feature's shader-activation postfixes only.</summary>
     private const string HarmonyId = "vintagertx.raw-albedo";
     private readonly ICoreClientAPI api;
     private readonly RawAlbedoTarget target = new();
@@ -21,6 +22,7 @@ internal sealed class RawAlbedoCapture : IRenderer
     private static RawAlbedoCapture? current;
     private bool faulted;
     private bool warned;
+    private bool publishedLogged;
     private bool enabled = true;
     private bool disposed;
 
@@ -33,6 +35,8 @@ internal sealed class RawAlbedoCapture : IRenderer
     public int RenderRange => 0;
     /// <summary>Gets a complete published albedo/depth texture or zero.</summary>
     internal int TextureId => enabled && !faulted ? target.TextureId : 0;
+    /// <summary>Reports actual frame availability rather than only the user's desired option.</summary>
+    internal string Status => faulted ? "unavailable" : TextureId > 0 ? "captured-rgb" : "compatibility";
     /// <summary>Enables capture on the next opaque boundary, never publishes stale disabled data.</summary>
     internal bool Enabled { get => enabled; set => enabled = value; }
 
@@ -68,7 +72,16 @@ internal sealed class RawAlbedoCapture : IRenderer
     internal void EndFrame()
     {
         if (disposed) return;
-        try { target.End(enabled && !faulted); }
+        try
+        {
+            target.End(enabled && !faulted);
+            if (target.Ready && !publishedLogged)
+            {
+                publishedLogged = true;
+                api.Logger.Notification("[VintageRTX] Unlit RGB capture active: opaque attachment 4, paired view depth, {0}x{1}.",
+                    api.Render.FrameWidth, api.Render.FrameHeight);
+            }
+        }
         catch (Exception error) { Fail(error); }
     }
 
@@ -134,6 +147,7 @@ internal sealed class RawAlbedoCapture : IRenderer
         writers.Clear();
         faulted = false;
         warned = false;
+        publishedLogged = false;
         return true;
     }
 
