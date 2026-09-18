@@ -176,6 +176,14 @@ internal sealed class VoxelScene : IDisposable
     private byte[] readyIrradianceDirection = new byte[
         Width * Height * Depth * IrradianceDirectionChannels];
     private VoxelLight[] readyLights = Array.Empty<VoxelLight>();
+    private bool liveLightsUploadPending;
+    private bool liveRadianceUploadPending;
+    private bool radianceRefreshRequested;
+    private long readyGeometryRevision;
+    private Task<VoxelRadianceField>? radianceRefreshTask;
+    private int radianceTaskGeneration;
+    private long radianceTaskRevision;
+
     private int originX;
     private int originY;
     private int originZ;
@@ -500,6 +508,7 @@ internal sealed class VoxelScene : IDisposable
         if (!building)
         {
             ProcessDirtyBlocks();
+            PollRadianceRefresh();
             return;
         }
 
@@ -784,6 +793,11 @@ internal sealed class VoxelScene : IDisposable
         int cameraZ,
         bool scheduleSettleRebuild)
     {
+        liveLightsUploadPending = false;
+        liveRadianceUploadPending = false;
+        radianceRefreshRequested = false;
+        readyGeometryRevision++;
+
         originX = cameraX - Width / 2;
         originY = cameraY - Height / 2;
         originZ = cameraZ - Depth / 2;
@@ -1187,6 +1201,84 @@ internal sealed class VoxelScene : IDisposable
     }
 
     /// <summary>Coalesces up to sixteen world changes per tick into main/sun/rain partial updates.</summary>
+    /// <summary>Refreshes the emitter table without rescanning any terrain, liquid or sun volume.</summary>
+    private void RefreshReadyEmitter(int x, int y, int z)
+    {
+        if (x < originX || x >= originX + Width || y < originY || y >= originY + Height
+            || z < originZ || z >= originZ + Depth) return;
+        buildLights.RemoveAll(light => (int)MathF.Floor(light.X) == x
+            && (int)MathF.Floor(light.Y) == y && (int)MathF.Floor(light.Z) == z);
+        samplePosition.Set(x, y, z);
+        Block solid = api.World.BlockAccessor.GetBlock(samplePosition, BlockLayersAccess.Solid);
+        Block fluid = api.World.BlockAccessor.GetBlock(samplePosition, BlockLayersAccess.Fluid);
+        CollectLight(solid, x, y, z);
+        if (!ReferenceEquals(solid, fluid)) CollectLight(fluid, x, y, z);
+        VoxelLight[] selected = buildLights.OrderByDescending(light => light.Score(api.World.Player.Entity.CameraPos))
+            .ThenBy(light => light.X).ThenBy(light => light.Y).ThenBy(light => light.Z)
+            .Take(MaximumLightCount).ToArray();
+        if (!readyLights.SequenceEqual(selected))
+        {
+            readyLights = selected;
+            liveLightsUploadPending = true;
+        }
+    }
+
+    /// <summary>Publishes direct emitter/caster updates only into their matching geometry generation.</summary>
+    internal bool TryConsumeLiveLights(int publishedGeneration, out VoxelLight[] lights)
+    {
+        lights = readyLights;
+        if (building || !liveLightsUploadPending || generation != publishedGeneration) return false;
+        liveLightsUploadPending = false;
+        return true;
+    }
+
+    /// <summary>Publishes a completed indirect field only into the matching immutable generation.</summary>
+    internal bool TryConsumeLiveRadiance(int publishedGeneration, out VoxelRadianceField field)
+    {
+        field = default;
+        if (building || !liveRadianceUploadPending || generation != publishedGeneration) return false;
+        field = new VoxelRadianceField(readyIrradiance, readyIrradianceDirection);
+        liveRadianceUploadPending = false;
+        return true;
+    }
+
+    /// <summary>Builds GI on detached data; rejects results superseded by edits or recentering.</summary>
+    private void PollRadianceRefresh()
+    {
+        if (radianceRefreshTask is { IsCompleted: true })
+        {
+            if (radianceRefreshTask.IsCompletedSuccessfully)
+            {
+                if (radianceTaskGeneration == generation && radianceTaskRevision == readyGeometryRevision)
+                {
+                    VoxelRadianceField field = radianceRefreshTask.Result;
+                    readyIrradiance = field.Irradiance;
+                    readyIrradianceDirection = field.Direction;
+                    liveRadianceUploadPending = true;
+                }
+            }
+            else
+            {
+                api.Logger.Warning("[VintageRTX] Deferred irradiance refresh failed: {0}",
+                    radianceRefreshTask.Exception?.GetBaseException().Message ?? "cancelled");
+            }
+            radianceRefreshTask = null;
+        }
+        if (!radianceRefreshRequested || radianceRefreshTask is not null || generation == 0) return;
+        byte[] material = (byte[])readyVoxels.Clone();
+        VoxelLight[] lights = (VoxelLight[])readyLights.Clone();
+        int x = originX, y = originY, z = originZ;
+        Vec3d camera = api.World.Player.Entity.CameraPos;
+        float daylight = Math.Clamp((api.World.Calendar as IClientGameCalendar)?
+            .GetDayLightStrength(camera.X, camera.Z) ?? 0f, 0f, 1f);
+        Vec3f sky = new(0.0025f + daylight * 0.068f, 0.0045f + daylight * 0.096f, 0.0100f + daylight * 0.142f);
+        radianceTaskGeneration = generation;
+        radianceTaskRevision = readyGeometryRevision;
+        radianceRefreshRequested = false;
+        radianceRefreshTask = Task.Run(() => BuildRadianceField(material, lights, x, y, z, sky));
+    }
+
+    /// <summary>Consumes at most sixteen queued edits and invalidates their dependent light data.</summary>
     private void ProcessDirtyBlocks()
     {
         const int maximumUpdatesPerTick = 16;
@@ -1214,7 +1306,12 @@ internal sealed class VoxelScene : IDisposable
             {
                 continue;
             }
+            instanceMeshOccupancyByPosition.Remove(
+                (position.X, position.Y, position.Z, samplePosition.dimension));
             UpdateReadyVoxel(position.X, position.Y, position.Z);
+            RefreshReadyEmitter(position.X, position.Y, position.Z);
+            readyGeometryRevision++;
+            radianceRefreshRequested = true;
             UpdateReadyFluidSurface(position.X, position.Z);
             UpdateReadySunOccupancy(position.X, position.Y, position.Z);
             UpdateReadyRainSurface(position.X, position.Z);
@@ -4617,43 +4714,11 @@ internal sealed class VoxelScene : IDisposable
             return;
         }
 
-        int rgb = ColorUtil.HsvToRgb(
-            Math.Min(lightHsv[0] * ColorUtil.HueMul, 255),
-            Math.Min(lightHsv[1] * ColorUtil.SatMul, 255),
-            Math.Min(lightHsv[2] * ColorUtil.BrightMul, 255));
-        float red = ColorUtil.ColorR(rgb) / 255.0f;
-        float green = ColorUtil.ColorG(rgb) / 255.0f;
-        float blue = ColorUtil.ColorB(rgb) / 255.0f;
+        if (!EmitterAppearance.TryResolve(block.Code, block.Attributes, lightHsv,
+            emitterPhotometryByCodeRoot, out EmitterAppearance appearance)) return;
         string blockCode = block.Code?.ToString() ?? "unknown";
-        bool hasAuthoredPhotometry = EmitterPhotometry.TryRead(
-                block.Attributes,
-                lightHsv[2],
-                out EmitterPhotometry photometry)
-            || EmitterPhotometryCatalog.TryResolve(
-                block.Code,
-                lightHsv[2],
-                emitterPhotometryByCodeRoot,
-                out photometry);
-        if (!hasAuthoredPhotometry)
-        {
-            photometry = EmitterPhotometry.FromGameLight(blockCode, lightHsv[2]);
-        }
-
-        if (photometry.TryGetSrgb(out float measuredRed, out float measuredGreen, out float measuredBlue))
-        {
-            red = measuredRed;
-            green = measuredGreen;
-            blue = measuredBlue;
-        }
-        else if (IsWarmEmitter(blockCode))
-        {
-            // Vanilla lanterns intentionally use a low-saturation lightHsv.
-            // Unprofiled mod emitters retain a bounded warm fallback. Authored
-            // emitters instead use their measured CIE chromaticity above.
-            red = red * 0.22f + 0.78f;
-            green = green * 0.22f + 0.507f;
-            blue = blue * 0.22f + 0.265f;
-        }
+        float red = appearance.Red, green = appearance.Green, blue = appearance.Blue;
+        EmitterPhotometry photometry = appearance.Photometry;
         CachedBlockOccupancy occupancy = GetCachedBlockOccupancy(block);
         CachedLightCaster caster = GetLightCaster(block, occupancy);
         buildLights.Add(new VoxelLight(
@@ -5448,8 +5513,8 @@ internal sealed class VoxelScene : IDisposable
     /// <param name="position">Changed block position.</param><param name="oldBlock">Previous solid block.</param>
     private void OnBlockChanged(BlockPos position, Block oldBlock)
     {
-        instanceMeshOccupancyByPosition.Remove(
-            (position.X, position.Y, position.Z, position.dimension));
+        if (api.World.Player?.Entity is not { } player
+            || position.dimension != player.Pos.Dimension) return;
         (bool insideMainVolume, bool insideSunVolume) = ClassifyDirtyBlockVolumes(
             position.X,
             position.Y,
@@ -5470,25 +5535,6 @@ internal sealed class VoxelScene : IDisposable
         if (!insideMainVolume && !insideFluidSurface && !insideSunVolume)
         {
             return;
-        }
-
-        if (insideMainVolume)
-        {
-            Block? currentSolid = api.World.BlockAccessor.GetBlock(
-                position,
-                BlockLayersAccess.Solid);
-            Block? currentFluid = api.World.BlockAccessor.GetBlock(
-                position,
-                BlockLayersAccess.Fluid);
-            if (BlockEmitsLight(oldBlock, position)
-                || BlockEmitsLight(currentSolid, position)
-                || (!ReferenceEquals(currentFluid, currentSolid)
-                    && BlockEmitsLight(currentFluid, position)))
-            {
-                rebuildRequested = true;
-                dirtyBlocks.Clear();
-                return;
-            }
         }
 
         dirtyBlocks.TryAdd((position.X, position.Y, position.Z), 0);

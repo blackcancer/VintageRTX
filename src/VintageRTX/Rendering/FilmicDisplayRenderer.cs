@@ -76,6 +76,9 @@ internal sealed class FilmicDisplayRenderer : IRenderer
     ];
 
     private readonly ICoreClientAPI api;
+    private EntityLightCollector? entityLightCollector;
+    private readonly byte[] liveCasterUpload = new byte[VoxelScene.LightCasterVoxelCount * VoxelScene.MaximumLightCount];
+
     private readonly Func<VintageRtxConfig> getConfig;
     private readonly VoxelScene voxelScene;
     private readonly FrameCaptureService captureService;
@@ -3386,16 +3389,7 @@ internal sealed class FilmicDisplayRenderer : IRenderer
                 VintageRtxRenderProfile.Cinematic => 8,
                 _ => 4
             };
-            int maximumVoxelLights = adaptiveQualityLevel switch
-            {
-                // Keep at least three independently shadowed emitters at every
-                // tier. Performance is bounded by one hard-shadow ray per
-                // source below; dropping to a single dominant light produces
-                // physically impossible rooms when several lanterns overlap.
-                1 => 3,
-                2 => 3,
-                _ => Math.Min(VoxelScene.MaximumLightCount, highQualityMaximumVoxelLights)
-            };
+            int maximumVoxelLights = VoxelScene.MaximumLightCount;
             BindVoxelUniforms(config, maximumVoxelLights);
             shader.Uniform(
                 "denseDynamicLightCluster",
@@ -3436,7 +3430,9 @@ internal sealed class FilmicDisplayRenderer : IRenderer
                 && effectiveDebugView == VintageRtxDebugView.Final
                 ? config.TemporalHistoryWeight
                 : 0.0f;
-            shader.Uniform("temporalBlend", temporalBlend);
+            // Final RGB has no previous-position/object contract. Retain only independently
+            // validated shadow history; do not ghost moving geometry or reflection silhouettes.
+            shader.Uniform("temporalBlend", 0.0f);
 
             GL.BindVertexArray(fullscreenVertexArray);
             int shadowWidth = shadowTextureWidth;
@@ -4167,11 +4163,51 @@ internal sealed class FilmicDisplayRenderer : IRenderer
         };
     }
 
-    /// <summary>Binds voxel transforms/volumes and selects a stable mixed static/dynamic light set.</summary>
-    /// <param name="config">Normalized voxel/light settings.</param>
-    /// <param name="maximumVoxelLights">Shader array capacity for this quality tier.</param>
+    /// <summary>Updates small light/caster tables independently from full geometry publication.</summary>
+    private void UpdateLiveEmitterTextures()
+    {
+        if (!voxelTextureReady) return;
+        if (voxelScene.TryConsumeLiveLights(voxelSnapshot.Generation, out VoxelLight[] lights))
+        {
+            voxelSnapshot = voxelSnapshot with { Lights = lights };
+            Array.Clear(liveCasterUpload);
+            for (int i = 0; i < Math.Min(lights.Length, VoxelScene.MaximumLightCount); i++)
+                if (lights[i].CasterMask.Length == VoxelScene.LightCasterVoxelCount)
+                    Array.Copy(lights[i].CasterMask, 0, liveCasterUpload, i * VoxelScene.LightCasterVoxelCount, VoxelScene.LightCasterVoxelCount);
+            GL.PixelStore(PixelStoreParameter.UnpackAlignment, 1);
+            GL.ActiveTexture(TextureUnit.Texture6);
+            GL.BindTexture(TextureTarget.Texture3D, voxelLightCasterTexture);
+            GL.TexSubImage3D(TextureTarget.Texture3D, 0, 0, 0, 0,
+                VoxelScene.LightCasterScale, VoxelScene.LightCasterScale,
+                VoxelScene.LightCasterScale * VoxelScene.MaximumLightCount,
+                PixelFormat.Red, PixelType.UnsignedByte, liveCasterUpload);
+            temporalHistoryValid = false;
+            shadowHistoryValid = false;
+        }
+        if (voxelScene.TryConsumeLiveRadiance(voxelSnapshot.Generation, out VoxelRadianceField field))
+        {
+            GL.PixelStore(PixelStoreParameter.UnpackAlignment, 1);
+            GL.ActiveTexture(TextureUnit.Texture9);
+            GL.BindTexture(TextureTarget.Texture3D, voxelIrradianceTexture);
+            GL.TexSubImage3D(TextureTarget.Texture3D, 0, 0, 0, 0,
+                voxelSnapshot.Width, voxelSnapshot.Height, voxelSnapshot.Depth,
+                PixelFormat.Rgb, PixelType.UnsignedByte, field.Irradiance);
+            GL.ActiveTexture(TextureUnit.Texture10);
+            GL.BindTexture(TextureTarget.Texture3D, voxelIrradianceDirectionTexture);
+            GL.TexSubImage3D(TextureTarget.Texture3D, 0, 0, 0, 0,
+                voxelSnapshot.Width, voxelSnapshot.Height, voxelSnapshot.Depth,
+                PixelFormat.Rgb, PixelType.UnsignedByte, field.Direction);
+            temporalHistoryValid = false;
+        }
+    }
+
+    /// <summary>Binds one coherent scene and light selection after incremental light uploads.</summary>
+    /// <param name="config">Current normalized rendering options.</param>
+    /// <param name="maximumVoxelLights">Maximum simultaneous light slots.</param>
     private void BindVoxelUniforms(VintageRtxConfig config, int maximumVoxelLights)
     {
+        UpdateLiveEmitterTextures();
+
         bool enabled = config.VoxelLightingEnabled
             && voxelTextureReady
             && gBufferAvailable;
@@ -4335,11 +4371,15 @@ internal sealed class FilmicDisplayRenderer : IRenderer
     /// <returns>Closest duplicate index or -1.</returns>
     private int FindDuplicateDynamicLight(VoxelLight light, int lightCount)
     {
+        // Explicit entities may legitimately stand beside a placed lamp. Never collapse them
+        // using the legacy proximity-only static/engine-light association below.
+
         const float duplicateDistanceSquared = 0.85f * 0.85f;
         int closestIndex = -1;
         float closestDistanceSquared = duplicateDistanceSquared;
         for (int index = 0; index < lightCount; index++)
         {
+            if (index < lastSelectedDynamicSourceCount && lastSelectedDynamicSourceIndices[index] >= 1_000_000) continue;
             if (voxelLightCasterLayers[index] >= -0.5f)
             {
                 continue;
@@ -4601,9 +4641,9 @@ internal sealed class FilmicDisplayRenderer : IRenderer
                 continue;
             }
 
-            currentPositions[currentOffset] = previousPositions[previousOffset];
-            currentPositions[currentOffset + 1] = previousPositions[previousOffset + 1];
-            currentPositions[currentOffset + 2] = previousPositions[previousOffset + 2];
+
+
+
         }
 
         return stable;
@@ -4650,52 +4690,68 @@ internal sealed class FilmicDisplayRenderer : IRenderer
                 pointLightColors.Length / 3));
         availableDynamicLightCount = availableCount;
         int candidateCount = 0;
-        int candidateLimit = Math.Min(availableCount, dynamicLightCandidates.Length);
+        entityLightCollector ??= new EntityLightCollector(api);
+        IReadOnlyList<TrackedEntityLight> entities = entityLightCollector.Collect(originX, originY, originZ, config.PointLightRadius);
+        HashSet<int> matched = new();
+        Dictionary<int, VoxelLight> entityDefinitions = new();
+        foreach (TrackedEntityLight entity in entities) entityDefinitions[entity.SourceIndex] = entity.Light;
         Array.Clear(selectedDynamicLightViewPositions);
-        for (int index = 0; index < candidateLimit; index++)
+        for (int index = 0; index < Math.Min(availableCount, dynamicLightCandidates.Length); index++)
         {
-            int sourceOffset = index * 3;
-            float redRange = pointLightColors[sourceOffset];
-            float greenRange = pointLightColors[sourceOffset + 1];
-            float blueRange = pointLightColors[sourceOffset + 2];
-            float range = MathF.Sqrt(
-                redRange * redRange + greenRange * greenRange + blueRange * blueRange);
-            if (!float.IsFinite(range) || range < 0.25f)
+            int offset = index * 3;
+            float r = pointLightColors[offset], g = pointLightColors[offset + 1], b = pointLightColors[offset + 2];
+            float range = MathF.Sqrt(r * r + g * g + b * b);
+            if (!float.IsFinite(range) || range < 0.25f) continue;
+            float vx = pointLights[offset], vy = pointLights[offset + 1], vz = pointLights[offset + 2];
+            if (!float.IsFinite(vx + vy + vz)) continue;
+            TransformViewToWorld(vx, vy, vz, originX, originY, originZ, out float wx, out float wy, out float wz);
+            TrackedEntityLight? owner = null;
+            double closest = double.PositiveInfinity;
+            foreach (TrackedEntityLight entity in entities)
             {
-                continue;
+                if (matched.Contains(entity.SourceIndex)) continue;
+                VoxelLight light = entity.Light;
+                double dx = wx - light.X, dy = wy - light.Y, dz = wz - light.Z;
+                double distanceSquared = dx * dx + dy * dy + dz * dz;
+                // The public light arrays have no owner IDs. This one-to-one association only
+                // substitutes photometry/identity; unmatched entity sources remain explicit.
+                double tolerance = entity.LocalPlayer ? 2.0 : 0.65;
+                if (distanceSquared < tolerance * tolerance && distanceSquared < closest)
+                { closest = distanceSquared; owner = entity; }
             }
+            if (owner is TrackedEntityLight known)
+            {
+                matched.Add(known.SourceIndex);
+                AddEntity(known, wx, wy, wz, vx, vy, vz);
+            }
+            else
+            {
+                dynamicLightCandidates[candidateCount++] = new DynamicLightCandidate(index, vx, vy, vz, wx, wy, wz,
+                    r / range, g / range, b / range, Math.Min(range, config.PointLightRadius),
+                    EmitterPhotometry.CandelaAtCutoffRange(range, EmitterPhotometry.DefaultCutoffIlluminanceLux),
+                    range / (1f + (vx * vx + vy * vy + vz * vz) * 0.35f));
+            }
+        }
+        foreach (TrackedEntityLight entity in entities.OrderByDescending(e => e.Light.Intensity /
+            (1.0 + Math.Pow(e.Light.X - originX, 2) + Math.Pow(e.Light.Y - originY, 2) + Math.Pow(e.Light.Z - originZ, 2))))
+        {
+            if (matched.Contains(entity.SourceIndex) || candidateCount >= dynamicLightCandidates.Length) continue;
+            VoxelLight light = entity.Light;
+            float x = (float)(light.X - originX), y = (float)(light.Y - originY), z = (float)(light.Z - originZ);
+            float vx = viewMatrix[0] * x + viewMatrix[4] * y + viewMatrix[8] * z + viewMatrix[12];
+            float vy = viewMatrix[1] * x + viewMatrix[5] * y + viewMatrix[9] * z + viewMatrix[13];
+            float vz = viewMatrix[2] * x + viewMatrix[6] * y + viewMatrix[10] * z + viewMatrix[14];
+            AddEntity(entity, light.X, light.Y, light.Z, vx, vy, vz);
+        }
+        availableDynamicLightCount = candidateCount;
 
-            float viewX = pointLights[sourceOffset];
-            float viewY = pointLights[sourceOffset + 1];
-            float viewZ = pointLights[sourceOffset + 2];
-            float viewDistanceSquared = viewX * viewX + viewY * viewY + viewZ * viewZ;
-            float inverseRange = 1.0f / range;
-            TransformViewToWorld(
-                viewX,
-                viewY,
-                viewZ,
-                originX,
-                originY,
-                originZ,
-                out float worldX,
-                out float worldY,
-                out float worldZ);
-            dynamicLightCandidates[candidateCount++] = new DynamicLightCandidate(
-                index,
-                viewX,
-                viewY,
-                viewZ,
-                worldX,
-                worldY,
-                worldZ,
-                redRange * inverseRange,
-                greenRange * inverseRange,
-                blueRange * inverseRange,
-                Math.Min(range, config.PointLightRadius),
-                EmitterPhotometry.CandelaAtCutoffRange(
-                    range,
-                    EmitterPhotometry.DefaultCutoffIlluminanceLux),
-                range / (1.0f + viewDistanceSquared * 0.35f));
+        void AddEntity(TrackedEntityLight entity, float x, float y, float z, float vx, float vy, float vz)
+        {
+            VoxelLight light = entity.Light;
+            float range = Math.Min(light.TraceRadiusMetres(), config.PointLightRadius);
+            dynamicLightCandidates[candidateCount++] = new DynamicLightCandidate(entity.SourceIndex,
+                vx, vy, vz, x, y, z, light.Red, light.Green, light.Blue, range, light.Intensity,
+                range * light.Intensity / (1f + (vx * vx + vy * vy + vz * vz) * 0.35f));
         }
 
         Span<int> candidateSourceIndices = stackalloc int[64];
@@ -4728,6 +4784,13 @@ internal sealed class FilmicDisplayRenderer : IRenderer
             voxelLightPhotometry[copiedOffset + 2] =
                 EmitterPhotometry.DefaultCutoffIlluminanceLux;
             voxelLightPhotometry[copiedOffset + 3] = 0.0f;
+            if (entityDefinitions.TryGetValue(candidate.SourceIndex, out VoxelLight definition))
+            {
+                voxelLightPhotometry[copiedOffset] = definition.SourceHalfWidthMetres;
+                voxelLightPhotometry[copiedOffset + 1] = definition.SourceHalfHeightMetres;
+                voxelLightPhotometry[copiedOffset + 2] = definition.CutoffIlluminanceLux;
+                voxelLightPhotometry[copiedOffset + 3] = 1.0f;
+            }
             voxelLightSelectionScores[copiedIndex] = candidate.Score;
             currentShadowLightSlotKeys[copiedIndex] = DynamicShadowLightSlotKey(
                 candidate.SourceIndex);

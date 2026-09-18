@@ -166,9 +166,9 @@ void main() {
     float unlitLuminance = dot(unlitLinear, vec3(0.2126, 0.7152, 0.0722));
     int roughnessBits = int(round(clamp(surfaceRoughness, 0.0, 1.0) * 31.0));
     int albedoBits = int(round(clamp(unlitLuminance, 0.0, 1.0) * 31.0));
-    float packedSurface = vintagertxEntitySurface
-        ? -float(1 + roughnessBits * 32 + albedoBits) / 1025.0
-        : 0.0;
+    // Entity identity and unlit luminance exist even when this skin has no PBR sidecars.
+    // The first-person depth-offset branch below still clears this marker deliberately.
+    float packedSurface = -float(1 + roughnessBits * 32 + albedoBits) / 1025.0;
     outGNormal = vec4(viewShadingNormal, packedSurface);
 #endif
 

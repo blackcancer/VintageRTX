@@ -164,6 +164,24 @@ const int MAX_LIGHT_CASTER_STEPS = 24;
 const float LIGHT_CASTER_SCALE = 16.0;
 const float ALPHA_CAGE_VISIBILITY = 0.46;
 
+
+// Packed surface payloads and visibility guides must never be interpolated across objects.
+vec4 readGBufferTexel(sampler2D source, vec2 coord)
+{
+    ivec2 size = textureSize(source, 0);
+    ivec2 pixel = clamp(ivec2(floor(coord * vec2(size))), ivec2(0), size - ivec2(1));
+    return texelFetch(source, pixel, 0);
+}
+
+// This is the above-water branch only; submerged optics must have their own medium/IOR contract.
+float aboveWaterVisibility(float cameraY, float surfaceY, float rayY, float surfaceDepth, float opaqueDepth)
+{
+    if (isnan(cameraY + surfaceY + rayY + surfaceDepth + opaqueDepth)
+        || isinf(cameraY + surfaceY + rayY + surfaceDepth + opaqueDepth)) return 0.0;
+    return cameraY > surfaceY + 0.0001 && rayY < -0.00001
+        && surfaceDepth >= 0.0 && surfaceDepth < 1.0 && surfaceDepth < opaqueDepth ? 1.0 : 0.0;
+}
+
 vec3 srgbToLinear(vec3 color)
 {
     return pow(max(color, vec3(0.0)), vec3(2.2));
@@ -2089,7 +2107,7 @@ float deferredFirstPersonOverlayEvidence(
     vec2 sampleUv,
     vec3 cleanViewPosition)
 {
-    vec3 directViewPosition = texture(gDirectPosition, sampleUv).xyz;
+    vec3 directViewPosition = readGBufferTexel(gDirectPosition, sampleUv).xyz;
     float directDistanceSquared = dot(directViewPosition, directViewPosition);
     if (directDistanceSquared < 0.0001)
     {
@@ -2144,8 +2162,8 @@ vec4 maskedPlanarFallbackSample(
         inverseFrameSize * 0.5,
         vec2(1.0) - inverseFrameSize * 0.5);
     vec3 fallbackViewPosition = opaquePositionEnabled != 0
-        ? texture(gOpaquePosition, fallbackUv).xyz
-        : texture(gPosition, fallbackUv).xyz;
+        ? readGBufferTexel(gOpaquePosition, fallbackUv).xyz
+        : readGBufferTexel(gPosition, fallbackUv).xyz;
     // The colour source was captured before held-item rendering. Do not gate
     // its stable scenery fallback on the later live G-buffer: alpha-tested
     // foliage and OIT silhouettes may have colour without a trustworthy
@@ -2370,7 +2388,7 @@ vec3 samplePointLightSurface(
     int pairCount = max((sampleCount - centreSampleCount) / 2, 1);
     float pairSide = float(pairedSampleIndex & 1) * 3.14159265359;
     float angle = (float(pairIndex) + 0.5) * 2.39996322973
-        + float(lightIndex) * 1.32471795724
+        + 0.0 // A light-slot reorder must not rotate its finite-source quadrature.
         + pairSide;
     float radius = sqrt((float(pairIndex) + 0.5) / float(pairCount));
     return lightPosition
@@ -2789,8 +2807,7 @@ void traceRawPointShadowVisibilities(
         {
             lightSampleCount = 1;
         }
-        bool cameraAlignedLight = voxelLightCasterLayer[lightIndex] < -0.5
-            && distance(lightPositionIntensity.xyz, floatingWorldOrigin) < 0.75;
+        bool cameraAlignedLight = false; // Every emitter traces world visibility, including held lights.
         // A held/camera-aligned emitter shares the unobstructed primary-view
         // segment and is resolved per source in the final pass. Excluding it
         // here prevents its guaranteed visibility from brightening the
@@ -2907,8 +2924,8 @@ void filterShadowVisibilities(
             uv + shadowFilterOffset(index) * shadowInverseFrameSize,
             shadowInverseFrameSize * 0.5,
             vec2(1.0) - shadowInverseFrameSize * 0.5);
-        vec3 neighborPosition = texture(gPosition, sampleUv).xyz;
-        vec3 encodedNeighborNormal = texture(gNormal, sampleUv).xyz;
+        vec3 neighborPosition = readGBufferTexel(gPosition, sampleUv).xyz;
+        vec3 encodedNeighborNormal = readGBufferTexel(gNormal, sampleUv).xyz;
         float neighborNormalLength = length(encodedNeighborNormal);
         if (dot(neighborPosition, neighborPosition) <= 0.0001
             || neighborNormalLength <= 0.1)
@@ -3099,8 +3116,7 @@ VoxelLightingResult traceVoxelPointLight(
             continue;
         }
 
-        bool cameraAlignedLight = voxelLightCasterLayer[lightIndex] < -0.5
-            && distance(lightPositionIntensity.xyz, floatingWorldOrigin) < 0.75;
+        bool cameraAlignedLight = false; // Every emitter traces world visibility, including held lights.
         // Each half-resolution channel belongs to exactly one world-space
         // lamp. A camera-aligned held emitter remains independently
         // unobstructed because it shares the primary-view origin.
@@ -3369,7 +3385,7 @@ LightingResult traceScreenSpaceLighting(vec3 origin, vec3 normal)
                 break;
             }
 
-            vec3 scenePosition = texture(gPosition, hitUv).xyz;
+            vec3 scenePosition = readGBufferTexel(gPosition, hitUv).xyz;
             if (dot(scenePosition, scenePosition) < 0.0001)
             {
                 continue;
@@ -3382,7 +3398,7 @@ LightingResult traceScreenSpaceLighting(vec3 origin, vec3 normal)
                 continue;
             }
 
-            vec4 hitNormalRoughness = texture(gNormal, hitUv);
+            vec4 hitNormalRoughness = readGBufferTexel(gNormal, hitUv);
             // Animated entities have no motion vectors or previous geometry
             // identity in this screen-space transport buffer. Treating them as
             // diffuse bounce sources made one passing animal relight broad,
@@ -3792,7 +3808,7 @@ ReflectionResult traceScreenSpaceReflection(
     // Consult the immutable late-opaque snapshot taken before transparent
     // liquids. Unlike the pre-entity snapshot, this contains alpha-tested
     // crossed vegetation and other non-full meshes as well as opaque terrain.
-    vec3 opaqueViewPosition = texture(gOpaquePosition, uv).xyz;
+    vec3 opaqueViewPosition = readGBufferTexel(gOpaquePosition, uv).xyz;
     float opaquePositionValid = step(
         0.0001,
         dot(opaqueViewPosition, opaqueViewPosition));
@@ -3827,7 +3843,7 @@ ReflectionResult traceScreenSpaceReflection(
             / max(interfaceNearClip.w, 0.0001)
         * 0.5
         + 0.5;
-    float opaqueSceneDepth = texture(gOpaqueDepth, uv).r;
+    float opaqueSceneDepth = readGBufferTexel(gOpaqueDepth, uv).r;
     float opaqueDepthVisibility = step(interfaceNearDepth, opaqueSceneDepth);
     liquidInterfaceDepthVisibility *= mix(
         1.0,
@@ -3901,7 +3917,7 @@ ReflectionResult traceScreenSpaceReflection(
         // This uniform branch is coherent for the complete draw, so screen
         // derivatives remain defined while unavailable standalone/compatibility
         // paths never evaluate an unbound depth texture or inverse matrix.
-        float resolvedLiquidDepth = texture(gLiquidDepth, uv).r;
+        float resolvedLiquidDepth = readGBufferTexel(gLiquidDepth, uv).r;
         vec4 liquidClipPosition = vec4(
             uv * 2.0 - 1.0,
             resolvedLiquidDepth * 2.0 - 1.0,
@@ -4230,11 +4246,9 @@ ReflectionResult traceScreenSpaceReflection(
                     0.0,
                     liquidDepthSearchPixels[searchIndex]
                         * inverseFrameSize.y);
-                float positiveDepth = texture(
-                    gLiquidDepth,
+                float positiveDepth = readGBufferTexel(gLiquidDepth,
                     clamp(uv + screenOffset, vec2(0.0), vec2(1.0))).r;
-                float negativeDepth = texture(
-                    gLiquidDepth,
+                float negativeDepth = readGBufferTexel(gLiquidDepth,
                     clamp(uv - screenOffset, vec2(0.0), vec2(1.0))).r;
                 float positiveSupport = step(positiveDepth, 0.99999);
                 float negativeSupport = step(negativeDepth, 0.99999);
@@ -4427,6 +4441,23 @@ ReflectionResult traceScreenSpaceReflection(
         {
             planarFluidSurfaceWorldY = displacedSurfaceWorldY;
         }
+        vec4 interfaceClip = projection * viewMatrix
+            * vec4(planarWorldPosition - floatingWorldOrigin, 1.0);
+        float strictSurfaceDepth = interfaceClip.w > 0.00001
+            ? interfaceClip.z / interfaceClip.w * 0.5 + 0.5 : 2.0;
+        float strictOpaqueDepth = opaqueDepthEnabled != 0
+            ? readGBufferTexel(gOpaqueDepth, uv).r : 1.0;
+        float strictSupport = aboveWaterVisibility(cameraWorldPosition.y, planarFluidSurfaceWorldY,
+            cameraRayWorld.y, strictSurfaceDepth, strictOpaqueDepth);
+        if (opaqueDepthEnabled == 0)
+            strictSupport *= surfaceDistance > 0.0 && surfaceDistance < opaqueDistance ? 1.0 : 0.0;
+        // A column is not proof that a liquid face exists at this pixel. Do not copy a neighbouring
+        // water pixel over an opaque silhouette. Containers retain their explicit surface contract.
+        if (liquidDepthEnabled != 0 && containedSurfaceEvidence <= 0.001)
+            strictSupport *= readGBufferTexel(gLiquidDepth, uv).r < 0.99999 ? 1.0 : 0.0;
+        waterEvidence *= strictSupport;
+        result.waterEvidence = waterEvidence;
+        horizontalReflector *= strictSupport;
         liquidSurfaceNormal = profileDrivenLiquidNormal(
             planarWorldPosition,
             liquidProfile,
@@ -4520,8 +4551,7 @@ ReflectionResult traceScreenSpaceReflection(
         float refractedProjectionValid = projectToScreen(
             refractedViewTarget,
             refractedUv) ? 1.0 : 0.0;
-        vec3 refractedSourceViewPosition = texture(
-            gPosition,
+        vec3 refractedSourceViewPosition = readGBufferTexel(gPosition,
             refractedUv).xyz;
         float refractedSourceHasGeometry = step(
             0.0001,
@@ -4764,10 +4794,9 @@ ReflectionResult traceScreenSpaceReflection(
             mix(0.18, 0.32, 1.0 - liquidInterfaceRoughness),
             mix(0.035, 0.080, 1.0 - liquidInterfaceRoughness),
             screenSceneConfidence);
-        result.color = mix(
-            result.color,
-            reflectedSky,
-            unresolvedEnvironmentBlend);
+        // Sky is already the fallback for unsupported samples above; never add it twice
+        // around the boundary of a resolved reflected object.
+
         float environmentConfidence = mix(
             0.44,
             0.94,
@@ -4803,7 +4832,7 @@ ReflectionResult traceScreenSpaceReflection(
                 break;
             }
 
-            vec3 scenePosition = texture(gPosition, hitUv).xyz;
+            vec3 scenePosition = readGBufferTexel(gPosition, hitUv).xyz;
             if (dot(scenePosition, scenePosition) < 0.0001)
             {
                 continue;
@@ -4816,7 +4845,7 @@ ReflectionResult traceScreenSpaceReflection(
                 continue;
             }
 
-            vec3 hitNormal = normalize(texture(gNormal, hitUv).xyz);
+            vec3 hitNormal = normalize(readGBufferTexel(gNormal, hitUv).xyz);
             if (planarFallback > 0.001 && dot(hitNormal, normal) > 0.90)
             {
                 // Do not let a horizontal fluid ray immediately hit the
@@ -5129,8 +5158,8 @@ vec3 denoiseTemporalHistory(
         luminanceSum += neighborLuminance;
         luminanceSquaredSum += neighborLuminance * neighborLuminance;
 
-        vec3 neighborPosition = texture(gPosition, sampleUv).xyz;
-        vec3 encodedNeighborNormal = texture(gNormal, sampleUv).xyz;
+        vec3 neighborPosition = readGBufferTexel(gPosition, sampleUv).xyz;
+        vec3 encodedNeighborNormal = readGBufferTexel(gNormal, sampleUv).xyz;
         float neighborNormalLength = length(encodedNeighborNormal);
         if (dot(neighborPosition, neighborPosition) < 0.0001
             || neighborNormalLength <= 0.1)
@@ -5193,6 +5222,49 @@ vec3 denoiseTemporalHistory(
         currentColor + vec3(clippingRadius));
 }
 
+
+void resolveSurfaceShadow(vec3 centerPosition, vec3 centerNormal, vec3 geometricViewNormal,
+    out vec4 pointA, out vec4 pointB, out float sunlight)
+{
+    ivec2 size = textureSize(shadowPointHistoryA, 0);
+    vec2 grid = uv * vec2(size) - vec2(0.5);
+    ivec2 basePixel = ivec2(floor(grid));
+    vec2 fraction = fract(grid);
+    pointA = vec4(0.0); pointB = vec4(0.0); sunlight = 0.0;
+    float weightSum = 0.0;
+    for (int i = 0; i < 4; ++i)
+    {
+        ivec2 corner = ivec2(i & 1, i >> 1);
+        ivec2 pixel = clamp(basePixel + corner, ivec2(0), size - ivec2(1));
+        vec2 sampleUv = (vec2(pixel) + vec2(0.5)) / vec2(size);
+        vec3 position = readGBufferTexel(gPosition, sampleUv).xyz;
+        vec3 normal = readGBufferTexel(gNormal, sampleUv).xyz;
+        if (dot(position, position) < 0.0001 || dot(normal, normal) < 0.01) continue;
+        float planeError = abs(dot(geometricViewNormal, position - centerPosition));
+        float tolerance = max(0.015, abs(centerPosition.z) * 0.0005);
+        float normalAgreement = dot(centerNormal, normalize(normal));
+        if (planeError > tolerance * 3.0 || normalAgreement < 0.6) continue;
+        vec2 w = mix(vec2(1.0) - fraction, fraction, vec2(corner));
+        float weight = w.x * w.y * exp(-planeError / tolerance) * smoothstep(0.6, 0.95, normalAgreement);
+        pointA += texelFetch(shadowPointHistoryA, pixel, 0) * weight;
+        pointB += texelFetch(shadowPointHistoryB, pixel, 0) * weight;
+        sunlight += texelFetch(shadowSunHistory, pixel, 0).r * weight;
+        weightSum += weight;
+    }
+    if (weightSum > 0.05)
+    {
+        pointA /= weightSum; pointB /= weightSum; sunlight /= weightSum;
+    }
+    else
+    {
+        vec3 relativePosition = (inverseViewMatrix * vec4(centerPosition, 1.0)).xyz;
+        vec3 worldPosition = relativePosition + floatingWorldOrigin;
+        vec3 worldNormal = normalize(mat3(inverseViewMatrix) * geometricViewNormal);
+        traceRawPointShadowVisibilities(worldPosition, worldNormal, pointA, pointB);
+        sunlight = traceRawSunShadowVisibility(worldPosition, relativePosition, worldNormal);
+    }
+}
+
 void main()
 {
     vec3 position = vec3(0.0);
@@ -5209,8 +5281,8 @@ void main()
         || debugView != 0;
     if (deferredGeometryRequired)
     {
-        position = texture(gPosition, uv).xyz;
-        encodedNormalRoughness = texture(gNormal, uv);
+        position = readGBufferTexel(gPosition, uv).xyz;
+        encodedNormalRoughness = readGBufferTexel(gNormal, uv);
     }
     vec3 encodedNormal = encodedNormalRoughness.xyz;
     float normalLength = length(encodedNormal);
@@ -5225,85 +5297,8 @@ void main()
     // G-buffer reads on every sky fragment and traced synthetic receivers.
     // The final pass already owns this repair and inherits the temporally
     // filtered RG visibility of the exact coherent neighbours below.
-    if (!hasGeometry && deferredGeometryRequired && shadowPass == 0)
-    {
-        vec3 filledPosition = vec3(0.0);
-        vec3 filledNormal = vec3(0.0);
-        vec3 referencePosition = vec3(0.0);
-        vec3 referenceNormal = vec3(0.0);
-        float filledRoughness = 0.0;
-        int consistentNeighbours = 0;
-        for (int index = 0; index < 4; index++)
-        {
-            vec2 neighbourUv = clamp(
-                uv + temporalDenoiseOffset(index) * inverseFrameSize,
-                inverseFrameSize * 0.5,
-                vec2(1.0) - inverseFrameSize * 0.5);
-            vec3 candidatePosition = texture(gPosition, neighbourUv).xyz;
-            vec4 candidateNormalRoughness = texture(gNormal, neighbourUv);
-            float candidateNormalLength = length(candidateNormalRoughness.xyz);
-            if (dot(candidatePosition, candidatePosition) <= 0.0001
-                || candidateNormalLength <= 0.1)
-            {
-                continue;
-            }
+    // Missing geometry remains missing; no outline-growing G-buffer dilation.
 
-            vec3 candidateNormal = candidateNormalRoughness.xyz
-                / candidateNormalLength;
-            if (consistentNeighbours > 0
-                && (dot(candidateNormal, referenceNormal) < 0.92
-                    || abs(candidatePosition.z - referencePosition.z)
-                        > max(0.05, abs(referencePosition.z) * 0.006)))
-            {
-                continue;
-            }
-
-            if (consistentNeighbours == 0)
-            {
-                referencePosition = candidatePosition;
-                referenceNormal = candidateNormal;
-            }
-            filledPosition += candidatePosition;
-            filledNormal += candidateNormal;
-            filledRoughness += candidateNormalRoughness.a;
-            if (prefilteredShadowVisibility != 0)
-            {
-                // Every point-light slot and the sun inherit only the same
-                // coherent receiver neighbours. Linear sampling performs the
-                // intended half-resolution mask reconstruction without
-                // collapsing physically independent sources.
-                repairedPointVisibilityA += clamp(
-                    texture(shadowPointHistoryA, neighbourUv),
-                    0.0,
-                    1.0);
-                repairedPointVisibilityB += clamp(
-                    texture(shadowPointHistoryB, neighbourUv),
-                    0.0,
-                    1.0);
-                repairedSunVisibility += clamp(
-                    texture(shadowSunHistory, neighbourUv).r,
-                    0.0,
-                    1.0);
-                repairedShadowVisibilityCount++;
-            }
-            consistentNeighbours++;
-        }
-
-        // Repair only a surrounded one-pixel hole. A silhouette has at
-        // most one coherent neighbour in the cross, so sky and foliage
-        // outlines are not grown by this conservative G-buffer dilation.
-        if (consistentNeighbours >= 2)
-        {
-            position = filledPosition / float(consistentNeighbours);
-            encodedNormal = normalize(filledNormal);
-            encodedNormalRoughness = vec4(
-                encodedNormal,
-                filledRoughness / float(consistentNeighbours));
-            normalLength = 1.0;
-            hasGeometry = true;
-            geometryWasRepaired = true;
-        }
-    }
     vec3 normal = hasGeometry
         ? encodedNormal / normalLength
         : vec3(0.0, 0.0, 1.0);
@@ -5569,10 +5564,9 @@ void main()
     // combine that carrier with the liquid through dielectric Fresnel and
     // Beer-Lambert transmission. Replacing it outright exposes a black lake-bed
     // stripe; retaining the late face outright leaves an opaque turquoise wall.
-    float partialLiquidRecovery = clamp(
-        reflection.liquidPartialGeometryFace,
-        0.0,
-        1.0);
+    // The underlying engine composite is authoritative where no real interface was proved.
+    // Old shoreline recovery copied colour from other pixels through solid silhouettes.
+    float partialLiquidRecovery = 0.0;
     if (partialLiquidRecovery > 0.001)
     {
         LiquidOpticalProfile fallbackShoreProfile = defaultWaterOpticalProfile();
@@ -5728,18 +5722,9 @@ void main()
                     }
                     else
                     {
-                        resolvedPointVisibilityA = clamp(
-                            texture(shadowPointHistoryA, uv),
-                            0.0,
-                            1.0);
-                        resolvedPointVisibilityB = clamp(
-                            texture(shadowPointHistoryB, uv),
-                            0.0,
-                            1.0);
-                        resolvedSunVisibility = clamp(
-                            texture(shadowSunHistory, uv).r,
-                            0.0,
-                            1.0);
+                        resolveSurfaceShadow(position, normal,
+                            normalize(mat3(viewMatrix) * worldGeometricNormal),
+                            resolvedPointVisibilityA, resolvedPointVisibilityB, resolvedSunVisibility);
                     }
                 }
                 voxelLighting = traceVoxelPointLight(
@@ -6681,7 +6666,10 @@ void main()
     // reflections of objects that have since sunk and makes item/wind waves
     // flip against stale normals. Resolve animated liquid from the current
     // height field; opaque stationary receivers retain temporal denoising.
+    // Runtime currently supplies zero until motion/previous-geometry reprojection is available.
+    // Keep the shader ABI live so uniform bindings and standalone diagnostic contexts stay valid.
     float surfaceTemporalBlend = temporalBlend
+        * (1.0 - dynamicSurface)
         * (1.0 - smoothstep(0.001, 0.02, planarResponse));
     if (surfaceTemporalBlend > 0.001)
     {

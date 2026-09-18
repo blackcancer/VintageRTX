@@ -44,6 +44,10 @@ internal readonly record struct EmitterAppearance(float Red, float Green, float 
     }
 
     /// <summary>Recognizes legacy fire-family calibration without overriding authored chromaticity.</summary>
-    private static bool IsWarmSource(string code) => new[] { "lantern", "torch", "candle", "fire", "flame", "ember", "forge", "bloomery" }
-        .Any(part => code.Contains(part, StringComparison.OrdinalIgnoreCase));
+    private static readonly string[] WarmFamilies =
+        ["lantern", "torch", "candle", "fire", "flame", "ember", "forge", "bloomery"];
+
+    /// <summary>Tests reusable family names without a per-source string-array allocation.</summary>
+    private static bool IsWarmSource(string code) =>
+        WarmFamilies.Any(part => code.Contains(part, StringComparison.OrdinalIgnoreCase));
 }
