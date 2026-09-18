@@ -213,30 +213,30 @@ public sealed class VintageRtxConfig
     /// <summary>Clamps every configurable scalar and restores an invalid debug enumeration.</summary>
     public void Clamp()
     {
-        Exposure = Math.Clamp(Exposure, -2.0f, 2.0f);
-        Contrast = Math.Clamp(Contrast, 0.5f, 1.5f);
-        Saturation = Math.Clamp(Saturation, 0.0f, 2.0f);
-        Vibrance = Math.Clamp(Vibrance, -0.5f, 0.5f);
-        Vignette = Math.Clamp(Vignette, 0.0f, 0.5f);
-        GpuBudgetMilliseconds = Math.Clamp(GpuBudgetMilliseconds, 0.75f, 40.0f);
-        TemporalHistoryWeight = Math.Clamp(TemporalHistoryWeight, 0.0f, 0.95f);
-        IndirectLightStrength = Math.Clamp(IndirectLightStrength, 0.0f, 1.5f);
-        RelightingStrength = Math.Clamp(RelightingStrength, 0.0f, 1.0f);
-        SkyLightStrength = Math.Clamp(SkyLightStrength, 0.0f, 2.0f);
-        EmissiveLightStrength = Math.Clamp(EmissiveLightStrength, 0.0f, 2.5f);
-        ContactShadowStrength = Math.Clamp(ContactShadowStrength, 0.0f, 1.0f);
-        ReflectionStrength = Math.Clamp(ReflectionStrength, 0.0f, 1.5f);
-        ReflectionDistance = Math.Clamp(ReflectionDistance, 1.0f, 48.0f);
-        PointLightShadowStrength = Math.Clamp(PointLightShadowStrength, 0.0f, 1.0f);
-        PointLightBounceStrength = Math.Clamp(PointLightBounceStrength, 0.0f, 1.5f);
-        VoxelBounceDistance = Math.Clamp(VoxelBounceDistance, 2.0f, 24.0f);
+        Exposure = Math.Clamp(float.IsFinite(Exposure) ? Exposure : 0.0f, -2.0f, 2.0f);
+        Contrast = Math.Clamp(float.IsFinite(Contrast) ? Contrast : 1.0f, 0.5f, 1.5f);
+        Saturation = Math.Clamp(float.IsFinite(Saturation) ? Saturation : 1.0f, 0.0f, 2.0f);
+        Vibrance = Math.Clamp(float.IsFinite(Vibrance) ? Vibrance : 0.0f, -0.5f, 0.5f);
+        Vignette = Math.Clamp(float.IsFinite(Vignette) ? Vignette : 0.04f, 0.0f, 0.5f);
+        GpuBudgetMilliseconds = Math.Clamp(float.IsFinite(GpuBudgetMilliseconds) ? GpuBudgetMilliseconds : 2.00f, 0.75f, 40.0f);
+        TemporalHistoryWeight = Math.Clamp(float.IsFinite(TemporalHistoryWeight) ? TemporalHistoryWeight : 0.92f, 0.0f, 0.95f);
+        IndirectLightStrength = Math.Clamp(float.IsFinite(IndirectLightStrength) ? IndirectLightStrength : 0.82f, 0.0f, 1.5f);
+        RelightingStrength = Math.Clamp(float.IsFinite(RelightingStrength) ? RelightingStrength : 0.88f, 0.0f, 1.0f);
+        SkyLightStrength = Math.Clamp(float.IsFinite(SkyLightStrength) ? SkyLightStrength : 0.78f, 0.0f, 2.0f);
+        EmissiveLightStrength = Math.Clamp(float.IsFinite(EmissiveLightStrength) ? EmissiveLightStrength : 1.25f, 0.0f, 2.5f);
+        ContactShadowStrength = Math.Clamp(float.IsFinite(ContactShadowStrength) ? ContactShadowStrength : 0.38f, 0.0f, 1.0f);
+        ReflectionStrength = Math.Clamp(float.IsFinite(ReflectionStrength) ? ReflectionStrength : 0.72f, 0.0f, 1.5f);
+        ReflectionDistance = Math.Clamp(float.IsFinite(ReflectionDistance) ? ReflectionDistance : 10.0f, 1.0f, 48.0f);
+        PointLightShadowStrength = Math.Clamp(float.IsFinite(PointLightShadowStrength) ? PointLightShadowStrength : 0.72f, 0.0f, 1.0f);
+        PointLightBounceStrength = Math.Clamp(float.IsFinite(PointLightBounceStrength) ? PointLightBounceStrength : 0.90f, 0.0f, 1.5f);
+        VoxelBounceDistance = Math.Clamp(float.IsFinite(VoxelBounceDistance) ? VoxelBounceDistance : 6.0f, 2.0f, 24.0f);
         VoxelBounceRayCount = Math.Clamp(VoxelBounceRayCount, 1, 4);
-        PointLightRadius = Math.Clamp(PointLightRadius, 4.0f, 32.0f);
-        PointLightSourceRadius = Math.Clamp(PointLightSourceRadius, 0.0f, 0.5f);
+        PointLightRadius = Math.Clamp(float.IsFinite(PointLightRadius) ? PointLightRadius : 18.0f, 4.0f, 32.0f);
+        PointLightSourceRadius = Math.Clamp(float.IsFinite(PointLightSourceRadius) ? PointLightSourceRadius : 0.025f, 0.0f, 0.5f);
         PointLightShadowSamples = Math.Clamp(PointLightShadowSamples, 1, 8);
-        SunLightStrength = Math.Clamp(SunLightStrength, 0.0f, 2.5f);
-        SunShadowDistance = Math.Clamp(SunShadowDistance, 16.0f, 640.0f);
-        RayDistance = Math.Clamp(RayDistance, 0.25f, 8.0f);
+        SunLightStrength = Math.Clamp(float.IsFinite(SunLightStrength) ? SunLightStrength : 1.10f, 0.0f, 2.5f);
+        SunShadowDistance = Math.Clamp(float.IsFinite(SunShadowDistance) ? SunShadowDistance : 64.0f, 16.0f, 640.0f);
+        RayDistance = Math.Clamp(float.IsFinite(RayDistance) ? RayDistance : 2.4f, 0.25f, 8.0f);
         RayCount = Math.Clamp(RayCount, 1, 8);
         RaySteps = Math.Clamp(RaySteps, 4, 24);
 

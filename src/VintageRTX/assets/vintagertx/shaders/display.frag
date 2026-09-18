@@ -33,6 +33,8 @@ uniform sampler2D voxelRainSurface;
 uniform sampler2D dynamicLiquidSurface;
 uniform mat4 projection;
 uniform mat4 inverseProjection;
+// Inverse of the active mirror projection, which may have an oblique near plane.
+uniform mat4 inverseEntityMirrorProjection;
 uniform mat4 viewMatrix;
 uniform mat4 inverseViewMatrix;
 uniform mat4 nativeShadowMatrixFar;
@@ -1341,81 +1343,133 @@ float traceLightCasterVisibility(vec3 rayOrigin, vec3 rayTarget, int lightIndex)
     return 1.0;
 }
 
-float traceFineBlockVisibility(
-    vec3 rayOrigin,
-    vec3 worldRayDirection,
-    float entryDistance,
-    float exitDistance)
+// All t values are distances in blocks along a normalized world-space ray.
+// 0 = clear through the requested interval; 1 = hit; 2 = outside known volume;
+// 3 = traversal budget exhausted. Unknown coverage is never a confirmed miss.
+int traceVoxelSurface(
+    vec3 rayOrigin, vec3 rayDirection, float maximumDistance, int maximumSteps,
+    out float hitDistance, out vec3 hitNormal, out vec4 hitMaterial);
+
+bool traceFineBlockHit(
+    vec3 rayOrigin, vec3 worldRayDirection, float entryDistance, float exitDistance,
+    out float hitDistance, out vec3 hitNormal)
 {
-    vec3 occupancySize = voxelSize * occupancyScale;
-    float safeEntry = max(entryDistance + 0.001, 0.0);
-    float safeExit = max(exitDistance - 0.001, safeEntry);
-    vec3 gridOrigin = (rayOrigin + worldRayDirection * safeEntry - voxelOrigin)
-        * occupancyScale;
-    vec3 gridTarget = (rayOrigin + worldRayDirection * safeExit - voxelOrigin)
-        * occupancyScale;
-    vec3 rayVector = gridTarget - gridOrigin;
-    float maximumDistance = length(rayVector);
-    if (maximumDistance < 0.001)
+    hitDistance = max(entryDistance, 0.0);
+    hitNormal = vec3(0.0);
+    if (exitDistance <= hitDistance || occupancyScale <= 0.0)
     {
-        vec3 sampleCenter = floor(gridOrigin) + vec3(0.5);
-        return texture(voxelOccupancy, sampleCenter / occupancySize).r >= 0.50
-            ? 0.0
-            : 1.0;
+        return false;
     }
-
-    vec3 fineDirection = rayVector / maximumDistance;
-    vec3 cell = floor(gridOrigin);
-    vec3 targetCell = floor(gridTarget);
-    vec3 stepDirection = sign(fineDirection);
-    vec3 inverseDirection = 1.0 / max(abs(fineDirection), vec3(0.00001));
-    vec3 nextBoundary = mix(cell, cell + vec3(1.0), greaterThan(stepDirection, vec3(0.0)));
-    vec3 sideDistance = abs((nextBoundary - gridOrigin) * inverseDirection);
-    vec3 deltaDistance = inverseDirection;
-    sideDistance = mix(sideDistance, vec3(1e20), lessThan(abs(fineDirection), vec3(0.00001)));
-
-    // A segment crossing one 4x block can visit at most 10 fine cells
-    // (including edge/corner ties). Twelve keeps the loop bounded with
-    // headroom while retaining the exact non-cubic silhouette.
+    vec3 scaledOrigin = (rayOrigin - voxelOrigin) * occupancyScale;
+    vec3 scaledDirection = worldRayDirection * occupancyScale;
+    // Probe only to select the cell, never to bias the returned intersection.
+    float entryProbe = min(0.00001 / occupancyScale,
+        (exitDistance - hitDistance) * 0.25);
+    vec3 cell = floor(scaledOrigin + scaledDirection * (hitDistance + entryProbe));
+    vec3 gridSize = voxelSize * occupancyScale;
+    vec3 stepDirection = sign(worldRayDirection);
     for (int stepIndex = 0; stepIndex < 12; stepIndex++)
     {
-        vec3 cellCenter = cell + vec3(0.5);
-        if (texture(voxelOccupancy, cellCenter / occupancySize).r >= 0.50)
+        if (any(lessThan(cell, vec3(0.0))) || any(greaterThanEqual(cell, gridSize)))
         {
-            return 0.0;
+            return false;
         }
-        if (all(equal(cell, targetCell)))
+        vec3 entry = vec3(-1e30);
+        vec3 boundary = vec3(1e30);
+        for (int axis = 0; axis < 3; axis++)
         {
-            return 1.0;
+            if (abs(scaledDirection[axis]) > 1e-20)
+            {
+                float nearT = (cell[axis] - scaledOrigin[axis]) / scaledDirection[axis];
+                float farT = (cell[axis] + 1.0 - scaledOrigin[axis]) / scaledDirection[axis];
+                entry[axis] = min(nearT, farT);
+                boundary[axis] = max(nearT, farT);
+            }
         }
-
-        float traveled = min(sideDistance.x, min(sideDistance.y, sideDistance.z));
-        // Edge/corner ties have zero volume in the skipped axis-aligned
-        // neighbours. Visiting them would thicken anvils, fences and other
-        // non-cubic blockers by one fine cell.
-        if (sideDistance.x <= traveled + 0.00001)
+        float cellEntry = max(entry.x, max(entry.y, entry.z));
+        float cellExit = min(boundary.x, min(boundary.y, boundary.z));
+        // A face/corner touched over a zero-length interval is not occupied volume.
+        if (cellExit > max(cellEntry, hitDistance)
+            && max(cellEntry, hitDistance) < exitDistance
+            && texelFetch(voxelOccupancy, ivec3(cell), 0).r >= 0.50)
         {
-            sideDistance.x += deltaDistance.x;
-            cell.x += stepDirection.x;
+            hitDistance = max(cellEntry, hitDistance);
+            int entryAxis = entry.x >= entry.y && entry.x >= entry.z ? 0
+                : entry.y >= entry.z ? 1 : 2;
+            hitNormal[entryAxis] = -stepDirection[entryAxis];
+            return true;
         }
-        if (sideDistance.y <= traveled + 0.00001)
+        if (cellExit >= exitDistance)
         {
-            sideDistance.y += deltaDistance.y;
-            cell.y += stepDirection.y;
+            return false;
         }
-        if (sideDistance.z <= traveled + 0.00001)
-        {
-            sideDistance.z += deltaDistance.z;
-            cell.z += stepDirection.z;
-        }
-
-        if (traveled >= maximumDistance)
-        {
-            return 1.0;
-        }
+        // Advance exact ties together. No absolute epsilon that skips a thin interval.
+        if (boundary.x <= cellExit) cell.x += stepDirection.x;
+        if (boundary.y <= cellExit) cell.y += stepDirection.y;
+        if (boundary.z <= cellExit) cell.z += stepDirection.z;
+        hitDistance = max(hitDistance, cellExit);
     }
+    return false;
+}
 
-    return 1.0;
+float traceFineBlockVisibility(
+    vec3 rayOrigin, vec3 worldRayDirection, float entryDistance, float exitDistance)
+{
+    float hitDistance;
+    vec3 hitNormal;
+    return traceFineBlockHit(rayOrigin, worldRayDirection, entryDistance, exitDistance,
+        hitDistance, hitNormal) ? 0.0 : 1.0;
+}
+
+int traceVoxelSurface(
+    vec3 rayOrigin, vec3 rayDirection, float maximumDistance, int maximumSteps,
+    out float hitDistance, out vec3 hitNormal, out vec4 hitMaterial)
+{
+    hitDistance = 0.0;
+    hitNormal = vec3(0.0);
+    hitMaterial = vec4(0.0);
+    vec3 localOrigin = rayOrigin - voxelOrigin;
+    if (any(lessThan(localOrigin, vec3(0.0)))
+        || any(greaterThanEqual(localOrigin, voxelSize))) return 2;
+    if (maximumDistance <= 0.0) return 0;
+    if (dot(rayDirection, rayDirection) < 0.5) return 3;
+    vec3 cell = floor(localOrigin);
+    vec3 stepDirection = sign(rayDirection);
+    for (int stepIndex = 0; stepIndex < MAX_VOXEL_STEPS; stepIndex++)
+    {
+        if (stepIndex >= maximumSteps) return 3;
+        if (any(lessThan(cell, vec3(0.0))) || any(greaterThanEqual(cell, voxelSize))) return 2;
+        vec3 boundary = vec3(1e30);
+        for (int axis = 0; axis < 3; axis++)
+        {
+            if (abs(rayDirection[axis]) > 1e-20)
+            {
+                float nextFace = cell[axis] + (rayDirection[axis] > 0.0 ? 1.0 : 0.0);
+                boundary[axis] = (nextFace - localOrigin[axis]) / rayDirection[axis];
+            }
+        }
+        float cellExit = min(boundary.x, min(boundary.y, boundary.z));
+        vec4 material = texelFetch(voxelVolume, ivec3(cell), 0);
+        if (material.a >= 0.45)
+        {
+            float fineDistance;
+            vec3 fineNormal;
+            if (traceFineBlockHit(rayOrigin, rayDirection, hitDistance,
+                min(cellExit, maximumDistance), fineDistance, fineNormal))
+            {
+                hitDistance = fineDistance;
+                hitNormal = fineNormal;
+                hitMaterial = material;
+                return 1;
+            }
+        }
+        if (cellExit >= maximumDistance) { hitDistance = maximumDistance; return 0; }
+        if (boundary.x <= cellExit) cell.x += stepDirection.x;
+        if (boundary.y <= cellExit) cell.y += stepDirection.y;
+        if (boundary.z <= cellExit) cell.z += stepDirection.z;
+        hitDistance = max(hitDistance, cellExit);
+    }
+    return 3;
 }
 
 float traceVoxelVisibility(vec3 rayOrigin, vec3 rayTarget, int lightIndex)
@@ -2398,94 +2452,21 @@ vec3 voxelBounceDirection(vec3 normal, int rayIndex)
 }
 
 bool traceVoxelBounceSurface(
-    vec3 rayOrigin,
-    vec3 rayDirection,
-    out vec3 hitPosition,
-    out vec3 hitNormal,
-    out vec3 hitAlbedo,
-    out float hitDistance)
+    vec3 rayOrigin, vec3 rayDirection, out vec3 hitPosition, out vec3 hitNormal,
+    out vec3 hitAlbedo, out float hitDistance)
 {
-    for (int stepIndex = 0; stepIndex < MAX_VOXEL_BOUNCE_STEPS; stepIndex++)
-    {
-        if (stepIndex >= voxelBounceSteps)
-        {
-            break;
-        }
-        float progress = float(stepIndex + 1) / float(max(voxelBounceSteps, 1));
-        float distanceAlongRay = voxelBounceDistance * pow(progress, 1.25);
-        vec3 samplePosition = rayOrigin + rayDirection * distanceAlongRay;
-        if (!isInsideVoxelVolume(samplePosition))
-        {
-            break;
-        }
-
-        vec4 material = sampleVoxelAtWorld(samplePosition);
-        if (material.a < 0.45)
-        {
-            continue;
-        }
-
-        hitNormal = dominantAxisNormal(rayDirection);
-        vec3 hitCell = floor(samplePosition);
-        hitPosition = samplePosition;
-        // Fixed-distance probing can land near the centre of a solid
-        // voxel. Reconstruct the entry face on the dominant axis so
-        // the secondary visibility ray starts outside that voxel
-        // instead of immediately self-occluding its own bounce.
-        if (abs(hitNormal.x) > 0.5)
-        {
-            hitPosition.x = hitNormal.x > 0.0
-                ? hitCell.x + 1.02
-                : hitCell.x - 0.02;
-        }
-        else if (abs(hitNormal.y) > 0.5)
-        {
-            hitPosition.y = hitNormal.y > 0.0
-                ? hitCell.y + 1.02
-                : hitCell.y - 0.02;
-        }
-        else
-        {
-            hitPosition.z = hitNormal.z > 0.0
-                ? hitCell.z + 1.02
-                : hitCell.z - 0.02;
-        }
-        hitAlbedo = material.rgb;
-        hitDistance = distanceAlongRay;
-        return true;
-    }
-
-    hitPosition = vec3(0.0);
-    hitNormal = vec3(0.0, 1.0, 0.0);
-    hitAlbedo = vec3(0.0);
-    hitDistance = voxelBounceDistance;
-    return false;
+    vec4 hitMaterial;
+    int status = traceVoxelSurface(rayOrigin, rayDirection, voxelBounceDistance,
+        voxelBounceSteps, hitDistance, hitNormal, hitMaterial);
+    hitPosition = rayOrigin + rayDirection * hitDistance;
+    hitAlbedo = hitMaterial.rgb;
+    return status == 1;
 }
 
 float traceCoarseBounceVisibility(vec3 rayOrigin, vec3 rayTarget)
 {
-    vec3 segment = rayTarget - rayOrigin;
-    for (int stepIndex = 0; stepIndex < MAX_VOXEL_BOUNCE_SHADOW_STEPS; stepIndex++)
-    {
-        if (stepIndex >= voxelBounceShadowSteps)
-        {
-            break;
-        }
-        // Do not sample either endpoint: the first is the bounced
-        // surface and the last can be an emissive block/cage.
-        float progress = float(stepIndex + 1)
-            / float(max(voxelBounceShadowSteps, 1) + 1);
-        vec3 samplePosition = rayOrigin + segment * progress;
-        if (!isInsideVoxelVolume(samplePosition))
-        {
-            return 1.0;
-        }
-        if (sampleVoxelAtWorld(samplePosition).a >= 0.45)
-        {
-            return 0.0;
-        }
-    }
-    return 1.0;
+    // Reuse hierarchical occupancy instead of sparse probes that tunnel through walls.
+    return traceVoxelVisibility(rayOrigin, rayTarget, -1);
 }
 
 vec3 traceVoxelDiffuseBounce(
@@ -3357,7 +3338,11 @@ LightingResult traceScreenSpaceLighting(vec3 origin, vec3 normal)
             break;
         }
 
-        float rayAngle = (float(rayIndex) + 0.5) * 1.57079632679;
+        // Preserve the first four directions, then interleave four distinct azimuths.
+        int quadrant = rayIndex % 4;
+        int layer = rayIndex / 4;
+        float rayAngle = (float(quadrant) + 0.5) * 1.57079632679
+            + float(layer) * 0.78539816339;
         vec2 diskDirection = vec2(cos(rayAngle), sin(rayAngle));
         diskDirection = mat2(rotationCos, -rotationSin, rotationSin, rotationCos) * diskDirection;
 
@@ -3421,7 +3406,7 @@ LightingResult traceScreenSpaceLighting(vec3 origin, vec3 normal)
             // snapshot. The post-processed source can already contain a moving
             // entity at a pixel whose retained G-buffer still describes terrain,
             // which incorrectly turns that entity into wall-bounce radiance.
-            result.indirect += sampleReflectionSource(hitUv) * confidence;
+            result.indirect += srgbToLinear(sampleReflectionSource(hitUv)) * confidence;
             result.occlusion += receiverTerm * distanceFade * distanceFade;
             result.confidence += confidence;
             break;
@@ -3449,10 +3434,15 @@ vec3 shadeVoxelReflectionHit(
     // hit-local, adds no lookup and cannot create a global specular veil.
     vec3 reflectedColor = hitAlbedo * 0.115;
     float sunReceiver = max(dot(hitNormal, sunDirection), 0.0);
+    float reflectedSunVisibility = sunReceiver > 0.0
+        ? traceSunVisibility(hitPosition - floatingWorldOrigin,
+            hitPosition + hitNormal * 0.02 + sunDirection * 0.005)
+        : 0.0;
     reflectedColor += hitAlbedo
         * sunColorStrength.rgb
         * sunColorStrength.w
         * sunReceiver
+        * reflectedSunVisibility
         * 0.42;
 
     for (int lightIndex = 0; lightIndex < MAX_VOXEL_LIGHTS; lightIndex++)
@@ -3482,9 +3472,14 @@ vec3 shadeVoxelReflectionHit(
             lightIndex,
             lightPositionIntensity.w,
             distanceToLight);
+        float reflectedLightVisibility = receiver > 0.0
+            ? traceVoxelVisibility(hitPosition + hitNormal * 0.02 + lightDirection * 0.005,
+                lightPositionIntensity.xyz, lightIndex)
+            : 0.0;
         reflectedColor += hitAlbedo
             * lightColorRadius.rgb
             * receiver
+            * reflectedLightVisibility
             * radiusFade
             * incidentRadiance
             * 0.75;
@@ -3569,98 +3564,26 @@ ReflectionResult traceVoxelReflection(
         return result;
     }
 
-    vec3 gridOrigin = rayOrigin - voxelOrigin;
-    vec3 cell = floor(gridOrigin);
-    vec3 stepDirection = sign(rayDirection);
-    vec3 inverseDirection = 1.0 / max(abs(rayDirection), vec3(0.00001));
-    vec3 nextBoundary = mix(
-        cell,
-        cell + vec3(1.0),
-        greaterThan(stepDirection, vec3(0.0)));
-    vec3 sideDistance = abs((nextBoundary - gridOrigin) * inverseDirection);
-    vec3 deltaDistance = inverseDirection;
-    sideDistance = mix(
-        sideDistance,
-        vec3(1e20),
-        lessThan(abs(rayDirection), vec3(0.00001)));
     float maximumDistance = reflectionDistance * mix(1.0, 0.52, roughness);
-
-    for (int stepIndex = 0; stepIndex < MAX_VOXEL_REFLECTION_STEPS; stepIndex++)
+    float traveled;
+    vec3 hitNormal;
+    vec4 hitMaterial;
+    int hitStatus = traceVoxelSurface(rayOrigin, rayDirection, maximumDistance,
+        voxelReflectionSteps, traveled, hitNormal, hitMaterial);
+    if (hitStatus != 1)
     {
-        if (stepIndex >= voxelReflectionSteps)
-        {
-            break;
-        }
-
-        float traveled = min(sideDistance.x, min(sideDistance.y, sideDistance.z));
-        // Reflection rays obey the same measure-zero boundary rule as shadow
-        // rays; otherwise a diagonal contact reports a neighbouring full
-        // block that the ray never enters.
-        if (sideDistance.x <= traveled + 0.00001)
-        {
-            sideDistance.x += deltaDistance.x;
-            cell.x += stepDirection.x;
-        }
-        if (sideDistance.y <= traveled + 0.00001)
-        {
-            sideDistance.y += deltaDistance.y;
-            cell.y += stepDirection.y;
-        }
-        if (sideDistance.z <= traveled + 0.00001)
-        {
-            sideDistance.z += deltaDistance.z;
-            cell.z += stepDirection.z;
-        }
-
-        if (traveled >= maximumDistance)
-        {
-            break;
-        }
-
-        vec3 cellCenter = cell + vec3(0.5);
-        if (any(lessThan(cellCenter, vec3(0.0)))
-            || any(greaterThanEqual(cellCenter, voxelSize)))
-        {
-            break;
-        }
-
-        vec4 hitMaterial = texture(voxelVolume, cellCenter / voxelSize);
-        if (hitMaterial.a < 0.45)
-        {
-            continue;
-        }
-
-        float exitDistance = min(sideDistance.x, min(sideDistance.y, sideDistance.z));
-        if (traceFineBlockVisibility(
-            rayOrigin,
-            rayDirection,
-            traveled,
-            min(exitDistance, maximumDistance)) >= 0.5)
-        {
-            continue;
-        }
-
-        vec3 hitPosition = rayOrigin + rayDirection * (traveled + 0.025);
-        vec3 hitNormal = dominantAxisNormal(rayDirection);
-        float distanceFade = 1.0 - smoothstep(
-            maximumDistance * 0.55,
-            maximumDistance,
-            traveled);
-        float grazingConfidence = 0.35
-            + 0.65 * (1.0 - abs(dot(worldNormal, incidentDirection)));
-        result.voxelColor = shadeVoxelReflectionHit(
-            hitPosition,
-            hitNormal,
-            hitMaterial.rgb);
-        result.voxelConfidence = clamp(
-            distanceFade * grazingConfidence * (1.0 - roughness * 0.55),
-            0.0,
-            1.0);
-        result.color = result.voxelColor;
-        result.confidence = result.voxelConfidence;
+        // Exhausted budget and unknown coverage have no fabricated geometry or radiance.
         return result;
     }
-
+    vec3 hitPosition = rayOrigin + rayDirection * traveled;
+    float distanceFade = 1.0 - smoothstep(maximumDistance * 0.55, maximumDistance, traveled);
+    float grazingConfidence = 0.35
+        + 0.65 * (1.0 - abs(dot(worldNormal, incidentDirection)));
+    result.voxelColor = shadeVoxelReflectionHit(hitPosition, hitNormal, hitMaterial.rgb);
+    result.voxelConfidence = clamp(
+        distanceFade * grazingConfidence * (1.0 - roughness * 0.55), 0.0, 1.0);
+    result.color = result.voxelColor;
+    result.confidence = result.voxelConfidence;
     return result;
 }
 
@@ -4781,7 +4704,7 @@ ReflectionResult traceScreenSpaceReflection(
                 entityMirrorUv * 2.0 - 1.0,
                 reflectedEntityDepth * 2.0 - 1.0,
                 1.0);
-            vec4 reflectedEntityViewHomogeneous = inverseProjection
+            vec4 reflectedEntityViewHomogeneous = inverseEntityMirrorProjection
                 * reflectedEntityClipPosition;
             vec3 reflectedEntityViewPosition = reflectedEntityViewHomogeneous.xyz
                 / max(abs(reflectedEntityViewHomogeneous.w), 0.0001);
@@ -5950,7 +5873,9 @@ void main()
 
     if (debugView == 3)
     {
-        outColor = vec4(lighting.indirect + vec3(lighting.occlusion * 0.35), 1.0);
+        outColor = vec4(
+            linearToSrgb(lighting.indirect) + vec3(lighting.occlusion * 0.35),
+            1.0);
         return;
     }
 
@@ -6217,7 +6142,7 @@ void main()
         + directionalIrradiance
             * pointLightBounceStrength * 1.15
         + voxelLighting.bounce * pointLightBounceStrength * 0.90
-        + srgbToLinear(lighting.indirect)
+        + lighting.indirect
             * indirectLightStrength * (0.38 + 0.32 * lighting.confidence))
         * ambientVisibility;
     // Visibility was already integrated per emitter above. Shadow opacity is
@@ -6400,11 +6325,9 @@ void main()
             cameraWorldPosition - reflection.planarWorldPosition);
         normalView = clamp(abs(planarViewDirection.y), 0.0, 1.0);
     }
-    // Dark raster albedo is not a valid conductor F0. Iron, steel and
-    // other metals still reflect a broad environment lobe even when
-    // their diffuse texture is nearly black; a bounded floor prevents
-    // anvils from disappearing while retaining authored tint.
-    vec3 metallicReflectance = max(surfaceAlbedo * 1.55, vec3(0.50));
+    // The metalness base colour is a reflectance, never an artistic amplification.
+    // Legacy specular gains elsewhere remain a separate BSDF migration; this prevents F0 > 1.
+    vec3 metallicReflectance = clamp(surfaceAlbedo, vec3(0.0), vec3(1.0));
     vec3 baseReflectance = mix(vec3(0.04), metallicReflectance, metallic);
     baseReflectance = mix(
         baseReflectance,

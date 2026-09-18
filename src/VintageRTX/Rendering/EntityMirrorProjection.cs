@@ -37,6 +37,10 @@ internal sealed class EntityMirrorProjection : IDisposable
     private int entityEvidenceFramebufferId;
     /// <summary>Owned OpenGL projection whose near plane is the active liquid interface.</summary>
     private readonly double[] obliqueProjectionMatrix = new double[16];
+    /// <summary>Projection shared by all producers of the current mirror depth.</summary>
+    private readonly float[] mirrorDepthProjectionMatrix = new float[16];
+    /// <summary>Inverse paired with the current mirror depth projection.</summary>
+    private readonly float[] inverseMirrorDepthProjectionMatrix = new float[16];
     /// <summary>Reusable inverse-view scratch used while transforming the world clip plane.</summary>
     private readonly double[] inverseMirrorViewScratch = new double[16];
     /// <summary>Reusable inverse-projection scratch used to locate the opposite clip-space corner.</summary>
@@ -61,6 +65,12 @@ internal sealed class EntityMirrorProjection : IDisposable
 
     /// <summary>Gets reflected world depth for reconstructing and clipping source geometry.</summary>
     internal int DepthTextureId => depthTextureId;
+
+    /// <summary>
+    /// Gets the inverse projection paired with DepthTextureId after successful Render.
+    /// The ordinary inverse view reconstructs reflected geometry, not the original source point.
+    /// </summary>
+    internal float[] InverseDepthProjectionMatrix => inverseMirrorDepthProjectionMatrix;
 
     /// <summary>Gets the owned framebuffer used for raw entity-only evidence readback.</summary>
     internal int FramebufferId => framebufferId;
@@ -171,6 +181,35 @@ internal sealed class EntityMirrorProjection : IDisposable
             obliqueProjectionMatrix,
             inverseMirrorViewScratch,
             inverseProjectionScratch);
+
+        // The replay and the projected supplement write one depth attachment.
+        // A failed oblique construction retains a consistent ordinary fallback pair.
+        if (!mirrorProjectionReady)
+        {
+            if (projectionMatrix.Length < 16)
+            {
+                throw new ArgumentException("A complete fallback projection is required.", nameof(projectionMatrix));
+            }
+            for (int index = 0; index < 16; index++)
+            {
+                obliqueProjectionMatrix[index] = projectionMatrix[index];
+            }
+        }
+        if (Mat4d.Invert(inverseProjectionScratch, obliqueProjectionMatrix) is null)
+        {
+            throw new InvalidOperationException("The mirror depth projection is singular.");
+        }
+        for (int index = 0; index < 16; index++)
+        {
+            float forward = (float)obliqueProjectionMatrix[index];
+            float backward = (float)inverseProjectionScratch[index];
+            if (!float.IsFinite(forward) || !float.IsFinite(backward))
+            {
+                throw new InvalidOperationException("The mirror depth matrices are not finite.");
+            }
+            mirrorDepthProjectionMatrix[index] = forward;
+            inverseMirrorDepthProjectionMatrix[index] = backward;
+        }
         if (mirrorProjectionReady)
         {
             _ = EntityMirrorGeometryReplayPatch.TryReplay(
@@ -197,7 +236,7 @@ internal sealed class EntityMirrorProjection : IDisposable
             cleanColorTextureId,
             cleanPositionTextureId,
             terrainPositionTextureId,
-            projectionMatrix,
+            mirrorDepthProjectionMatrix,
             viewMatrix,
             inverseViewMatrix,
             floatingOriginX,
@@ -215,7 +254,7 @@ internal sealed class EntityMirrorProjection : IDisposable
                 cleanColorTextureId,
                 cleanPositionTextureId,
                 terrainPositionTextureId,
-                projectionMatrix,
+                mirrorDepthProjectionMatrix,
                 viewMatrix,
                 inverseViewMatrix,
                 floatingOriginX,

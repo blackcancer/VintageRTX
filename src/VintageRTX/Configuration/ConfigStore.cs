@@ -1,3 +1,4 @@
+using Newtonsoft.Json;
 using Vintagestory.API.Common;
 
 namespace VintageRTX.Configuration;
@@ -26,6 +27,27 @@ internal sealed class ConfigStore
 
     /// <summary>Gets the last successfully normalized configuration snapshot.</summary>
     public VintageRtxConfig Current { get; private set; }
+
+    /// <summary>Persists a normalized detached candidate before replacing live configuration.</summary>
+    /// <param name="draft">UI draft; never retained by reference.</param>
+    /// <returns>The newly published configuration.</returns>
+    /// <exception cref="InvalidOperationException">Future-schema data is protected against overwrites.</exception>
+    public VintageRtxConfig Apply(VintageRtxConfig draft)
+    {
+        ArgumentNullException.ThrowIfNull(draft);
+        if (futureSchemaReadOnly)
+        {
+            throw new InvalidOperationException("The configuration was written by a newer VintageRTX version.");
+        }
+        VintageRtxConfig candidate = JsonConvert.DeserializeObject<VintageRtxConfig>(
+            JsonConvert.SerializeObject(draft))
+            ?? throw new InvalidOperationException("Could not clone the configuration draft.");
+        candidate.Clamp();
+        candidate.SchemaVersion = VintageRtxConfig.CurrentSchemaVersion;
+        api.StoreModConfig(candidate, FileName);
+        Current = candidate;
+        return candidate;
+    }
 
     /// <summary>Re-reads disk state, applies migrations and bounds, then replaces <see cref="Current"/>.</summary>
     /// <returns>The normalized replacement instance.</returns>

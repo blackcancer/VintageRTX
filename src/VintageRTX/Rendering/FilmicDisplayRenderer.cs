@@ -3055,6 +3055,11 @@ internal sealed class FilmicDisplayRenderer : IRenderer
                     : sourceColorTexture,
                 23);
             shader.Uniform("entityMirrorEnabled", entityMirrorReady ? 1 : 0);
+            shader.UniformMatrix(
+                "inverseEntityMirrorProjection",
+                entityMirrorReady
+                    ? entityMirrorProjection.InverseDepthProjectionMatrix
+                    : inverseProjectionMatrix);
             shader.BindTexture2D("historyColor", temporalHistoryTextures[temporalHistoryIndex], 5);
             shader.BindTexture2D("gNormal", gBufferAvailable ? gBuffer.NormalTextureId : sourceColorTexture, 1);
             shader.BindTexture2D("gPosition", gBufferAvailable ? gBuffer.PositionTextureId : sourceColorTexture, 2);
@@ -3176,11 +3181,6 @@ internal sealed class FilmicDisplayRenderer : IRenderer
             shader.Uniform("reflectionDistance", config.ReflectionDistance);
             shader.Uniform("rainWetness", smoothedRainWetness);
             UpdateAdaptiveQuality(config, captureFrame);
-            bool voxelReflectionDiagnosticCapture = captureFrame
-                && effectiveDebugView == VintageRtxDebugView.VoxelReflection;
-            bool reflectionDiagnosticCapture = captureFrame
-                && effectiveDebugView is VintageRtxDebugView.Reflection
-                    or VintageRtxDebugView.VoxelReflection;
             bool denseMultiLightCluster = IsDenseMultiLightCluster(
                 adaptiveQualityLevel, availableDynamicLightCount, voxelSnapshot.Lights);
             shader.Uniform(
@@ -3219,13 +3219,9 @@ internal sealed class FilmicDisplayRenderer : IRenderer
             // which makes indirect light decay and then spike on the next traced frame.
             // Profiles reduce ray count/steps instead; every displayed frame remains coherent.
             shader.Uniform("secondaryBounceCadence", 1);
-            bool voxelBounceDiagnosticCapture = captureFrame
-                && effectiveDebugView == VintageRtxDebugView.VoxelBounce;
             denseMultiLightCluster = IsDenseMultiLightCluster(
                 adaptiveQualityLevel, availableDynamicLightCount, voxelSnapshot.Lights);
-            int effectiveVoxelBounceRayCount = voxelBounceDiagnosticCapture
-                ? Math.Max(1, config.VoxelBounceRayCount)
-                : adaptiveQualityLevel switch
+            int effectiveVoxelBounceRayCount = adaptiveQualityLevel switch
                 {
                     1 => Math.Min(config.VoxelBounceRayCount, 1),
                     // The CPU-built directional irradiance field is the stable
@@ -3347,9 +3343,7 @@ internal sealed class FilmicDisplayRenderer : IRenderer
                 VintageRtxRenderProfile.Cinematic => 24,
                 _ => 10
             };
-            int effectiveReflectionSteps = reflectionDiagnosticCapture
-                ? Math.Max(10, highQualityReflectionSteps)
-                : adaptiveQualityLevel switch
+            int effectiveReflectionSteps = adaptiveQualityLevel switch
                 {
                     1 => 6,
                     2 => 1,
@@ -3362,9 +3356,7 @@ internal sealed class FilmicDisplayRenderer : IRenderer
                 VintageRtxRenderProfile.Cinematic => 64,
                 _ => 32
             };
-            int effectiveVoxelReflectionSteps = voxelReflectionDiagnosticCapture
-                ? Math.Max(32, highQualityVoxelReflectionSteps)
-                : adaptiveQualityLevel switch
+            int effectiveVoxelReflectionSteps = adaptiveQualityLevel switch
                 {
                     1 => 18,
                     // Keep a short off-screen reflection at the minimum tier. A

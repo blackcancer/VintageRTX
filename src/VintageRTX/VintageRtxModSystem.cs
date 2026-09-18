@@ -19,6 +19,7 @@ public sealed class VintageRtxModSystem : ModSystem
     private readonly System.Func<ICoreAPI, PbrSidecarAssetStore> capturePbrAssets;
     private ICoreClientAPI? api;
     private ConfigStore? configStore;
+    private GuiDialogVintageRtxSettings? settingsDialog;
     private PbrSidecarAssetStore? pbrSidecarAssets;
     private VoxelScene? voxelScene;
     private PbrTerrainRenderer? pbrTerrainRenderer;
@@ -126,6 +127,14 @@ public sealed class VintageRtxModSystem : ModSystem
             EnumRenderStage.Opaque,
             "vintagertx-reflection-source");
         clientApi.Event.RegisterRenderer(renderer, EnumRenderStage.AfterBlit, "vintagertx-display");
+        settingsDialog = new GuiDialogVintageRtxSettings(clientApi, configStore, () => renderer.ResetFault());
+        clientApi.Input.RegisterHotKey("vintagertx-settings", "VintageRTX settings",
+            GlKeys.R, HotkeyType.GUIOrOtherControls, altPressed: true, ctrlPressed: true);
+        clientApi.Input.SetHotKeyHandler("vintagertx-settings", _ =>
+        {
+            settingsDialog?.Toggle();
+            return true;
+        });
         RegisterCommands(clientApi);
 
         clientApi.Logger.Notification("[VintageRTX] Clean renderer bootstrap complete.");
@@ -218,6 +227,13 @@ public sealed class VintageRtxModSystem : ModSystem
     {
         clientApi.ChatCommands.Create("vrtx")
             .WithDescription("VintageRTX rendering controls")
+            .BeginSubCommand("settings")
+                .HandleWith(_ =>
+                {
+                    settingsDialog?.Toggle();
+                    return TextCommandResult.Success();
+                })
+            .EndSubCommand()
             .BeginSubCommand("status")
                 .HandleWith(_ => TextCommandResult.Success(BuildStatus()))
             .EndSubCommand()
@@ -448,6 +464,9 @@ public sealed class VintageRtxModSystem : ModSystem
     /// <summary>Unregisters handlers/renderers, deletes owned resources, persists config, and clears patches.</summary>
     public override void Dispose()
     {
+        settingsDialog?.Dispose();
+        settingsDialog = null;
+        api?.Input.SetHotKeyHandler("vintagertx-settings", _ => false);
         if (api is not null
             && renderer is not null
             && pbrTerrainRenderer is not null
