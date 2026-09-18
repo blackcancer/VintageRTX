@@ -1,0 +1,51 @@
+name: Publish reviewed recovery sources
+on:
+  push:
+    branches: [dev/renderer-recovery-20260918]
+    paths: ['tools/recovery/publish-request.json', '.github/workflows/publish-reviewed-recovery.yml']
+permissions:
+  contents: write
+concurrency:
+  group: reviewed-recovery-source-publication
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.repository == 'blackcancer/VintageRTX' && github.ref == 'refs/heads/dev/renderer-recovery-20260918'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: true
+      - name: Materialize exactly reviewed source changes
+        run: python3 tools/recovery/publish_recovery_sources.py
+      - name: Install isolated GLSL test dependencies
+        run: |
+          python3 -m venv "$RUNNER_TEMP/ray-tests"
+          "$RUNNER_TEMP/ray-tests/bin/pip" install 'numpy>=2,<3' 'moderngl>=5.12,<6'
+      - name: Execute production GLSL against independent ray-box oracles
+        env:
+          LIBGL_ALWAYS_SOFTWARE: '1'
+        run: |
+          "$RUNNER_TEMP/ray-tests/bin/python" -m unittest discover -s tests/recovery -v
+      - name: Commit ordinary source files to the development branch only
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/VintageRTX/Rendering/EntityMirrorProjection.cs \
+            src/VintageRTX/Rendering/FilmicDisplayRenderer.cs \
+            src/VintageRTX/assets/vintagertx/shaders/display.frag \
+            src/VintageRTX/Configuration/ConfigStore.cs \
+            src/VintageRTX/Configuration/VintageRtxConfig.cs \
+            src/VintageRTX/VintageRtxModSystem.cs \
+            src/VintageRTX/assets/vintagertx/lang/en.json \
+            src/VintageRTX/assets/vintagertx/lang/fr.json
+          git diff --cached --stat
+          git commit -m 'fix(rendering): pair mirror depth, return exact voxel hits and expose native settings'
+          # Non-fast-forward changes stop publication rather than overwriting other work.
+          git push origin HEAD:refs/heads/dev/renderer-recovery-20260918
+          git rev-parse HEAD
