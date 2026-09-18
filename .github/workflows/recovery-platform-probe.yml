@@ -1,0 +1,55 @@
+name: Recovery platform probe
+on:
+  push:
+    branches: [dev/renderer-recovery-20260918]
+    paths: ['.github/workflows/recovery-platform-probe.yml']
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9
+        with:
+          dotnet-version: '10.0.401'
+      - name: Inspect public game integration assemblies
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          mkdir -p platform-evidence server probe deb
+          curl -fL --retry 2 'https://cdn.vintagestory.at/gamefiles/stable/vs_server_linux-x64_1.22.7.tar.gz' -o server.tar.gz
+          echo 'a7d4a520604590a96de812ee6c6baf4404d43d86cf1ec4fbac1b3a580b52c847  server.tar.gz' | sha256sum -c -
+          tar -xzf server.tar.gz -C server
+          game_root=$(dirname "$(find server -name VintagestoryAPI.dll -print -quit)")
+          cp "$game_root/VintagestoryLib.dll" platform-evidence/
+          cat > probe/Probe.csproj <<EOF
+          <Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings></PropertyGroup><ItemGroup><Reference Include="Mono.Cecil"><HintPath>$RUNNER_TEMP/$game_root/Lib/Mono.Cecil.dll</HintPath></Reference></ItemGroup></Project>
+          EOF
+          cat > probe/Program.cs <<'EOF'
+          using Mono.Cecil;
+          using Mono.Cecil.Cil;
+          using var module = ModuleDefinition.ReadModule(args[0]);
+          foreach (var type in module.Types.Where(t => t.Name.Contains("Settings") || t.Name.Contains("Options") || t.Name.Contains("Pause") || t.Name.Contains("Escape") || t.Name.Contains("MainMenu"))) {
+            Console.WriteLine($"TYPE {type.FullName} BASE {type.BaseType}");
+            foreach (var f in type.Fields) Console.WriteLine($" FIELD {f.FullName}");
+            foreach (var p in type.Properties) Console.WriteLine($" PROPERTY {p.FullName}");
+            foreach (var m in type.Methods) {
+              Console.WriteLine($" METHOD {m.FullName}");
+              if (m.HasBody && (m.Name.Contains("Compose") || m.Name.Contains("Tab") || m.Name.Contains("Graphics") || m.Name.Contains("Render")))
+                foreach (var instruction in m.Body.Instructions) Console.WriteLine("  " + instruction);
+            }
+          }
+          EOF
+          dotnet run --project probe/Probe.csproj -- "$game_root/VintagestoryLib.dll" > platform-evidence/ui-contract.txt
+          (cd deb && apt-get download libglfw3 && dpkg-deb -x ./*.deb unpack)
+          find deb/unpack -type f -name '*glfw*.so*' -exec cp '{}' platform-evidence/ \;
+          curl -IL --max-time 30 'https://cdn.vintagestory.at/gamefiles/stable/vs_client_linux-x64_1.22.7.tar.gz' > platform-evidence/client-public-availability.txt 2>&1 || true
+          sha256sum platform-evidence/* > platform-evidence/SHA256SUMS.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: recovery-platform-evidence
+          path: ${{ runner.temp }}/platform-evidence/
+          retention-days: 1
+          if-no-files-found: error
