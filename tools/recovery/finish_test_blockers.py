@@ -43,3 +43,56 @@ edit('tests/VintageRTX.Test/RuntimeCoverageProbeWorldTests.cs',
             layer == BlockLayersAccess.Fluid ? harness.Air
                 : Math.Abs(x) <= 1 && Math.Abs(z) <= 1 && (y == 82 || y == 80) ? harness.Solid
                 : y == 78 ? ground : harness.Air;''')
+
+# A missing calendar resolves to the documented world-up fallback. It cannot prove a
+# real exterior shadow direction any more than the explicitly vertical-sun case can.
+edit('tests/VintageRTX.Test/RuntimeCoverageProbeWorldTests.cs',
+'''        Assert.IsTrue((bool)Invoke(fallbackSun, "TryApplyExteriorRoofCamera")!);
+        fallbackSun.Dispose();''',
+'''        Assert.IsFalse((bool)Invoke(fallbackSun, "TryApplyExteriorRoofCamera")!,
+            "An absent calendar must not fabricate a real exterior shadow witness.");
+        Assert.IsFalse(GetField<bool>(fallbackSun, "exteriorPositionLocked"));
+        Assert.IsFalse(noClientCalendar.ChatMessages.Any(static text => text.StartsWith("/tp =", StringComparison.Ordinal)));
+        Assert.IsTrue(noClientCalendar.Logs.Any(static entry => entry.Message.Contains(
+            "vertical sun has no exposed horizontal shadow witness", StringComparison.Ordinal)));
+        fallbackSun.Dispose();''')
+
+p='tests/VintageRTX.Test/PreflightSuite.cs'
+edit(p,
+'''        Assert(
+            renderer.Contains("reflectionDiagnosticCapture", StringComparison.Ordinal)
+                && renderer.Contains("effectiveReflectionSteps = reflectionDiagnosticCapture", StringComparison.Ordinal)
+                && renderer.Contains("effectiveVoxelReflectionSteps = voxelReflectionDiagnosticCapture", StringComparison.Ordinal),
+            "performance-tier reflection diagnostics must temporarily restore their full trace length");''',
+'''        Assert(
+            !renderer.Contains("reflectionDiagnosticCapture", StringComparison.Ordinal)
+                && !renderer.Contains("voxelReflectionDiagnosticCapture", StringComparison.Ordinal)
+                && !renderer.Contains("voxelBounceDiagnosticCapture", StringComparison.Ordinal)
+                && renderer.Contains("effectiveReflectionSteps = adaptiveQualityLevel switch", StringComparison.Ordinal)
+                && renderer.Contains("effectiveVoxelReflectionSteps = adaptiveQualityLevel switch", StringComparison.Ordinal)
+                && renderer.Contains("effectiveVoxelBounceRayCount = adaptiveQualityLevel switch", StringComparison.Ordinal),
+            "native diagnostics must use exactly the runtime profile's reflection and bounce budgets");''')
+edit(p,
+'''                && renderer.Contains("VintageRtxRenderProfile.Extreme => 6", StringComparison.Ordinal)
+                && renderer.Contains("VintageRtxRenderProfile.Cinematic => 8", StringComparison.Ordinal),''',
+'''                && renderer.Contains("int maximumVoxelLights = VoxelScene.MaximumLightCount;", StringComparison.Ordinal),''')
+edit(p,
+'''                && renderer.Contains("range / (1.0f + viewDistanceSquared * 0.35f)", StringComparison.Ordinal)''',
+'''                && renderer.Contains("EntityLightCollector", StringComparison.Ordinal)
+                && renderer.Contains("entity.SourceIndex", StringComparison.Ordinal)''')
+edit(p,
+'''                    "result.indirect += sampleReflectionSource(hitUv) * confidence;",''',
+'''                    "result.indirect += srgbToLinear(sampleReflectionSource(hitUv)) * confidence;",''')
+edit(p,
+'''                < renderer.IndexOf("bool voxelReflectionDiagnosticCapture", StringComparison.Ordinal),''',
+'''                >= 0
+                && renderer.IndexOf("UpdateAdaptiveQuality(config, captureFrame);", StringComparison.Ordinal)
+                    < renderer.IndexOf("int effectiveReflectionSteps = adaptiveQualityLevel switch", StringComparison.Ordinal),''')
+# Preserve all existing mathematical stable-selection assertions below the wiring checks.
+# Profiles change quadrature quality, not the maximum represented number of local sources.
+edit(p,
+'''            "performance tier must preserve three sources with a stationary centre-balanced emitter sequence");''',
+'''            "performance tier must retain stationary centre-balanced emitter sampling");
+        Assert(renderer.Contains("int maximumVoxelLights = VoxelScene.MaximumLightCount;", StringComparison.Ordinal)
+            && VoxelScene.MaximumLightCount == 8,
+            "profile changes must not shrink the represented source set");''')
