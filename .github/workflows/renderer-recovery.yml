@@ -11,7 +11,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   source-checks:
-    name: Mod compilation and GLSL oracles (not in-game acceptance)
+    name: Compilation, blocker smoke and GLSL (not in-game acceptance)
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -21,14 +21,14 @@ jobs:
       - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9
         with:
           dotnet-version: '10.0.401'
-      - name: Prepare reference identity and Mesa
+      - name: Prepare reference identity, Mesa and hidden GL display
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/recovery-evidence" "$RUNNER_TEMP/vs-client"
           git rev-parse HEAD > "$RUNNER_TEMP/recovery-evidence/source-commit.txt"
           sudo apt-get update -qq
-          sudo apt-get install -y -qq libegl1-mesa-dev libgl1-mesa-dri libgl-dev
+          sudo apt-get install -y -qq libegl1-mesa-dev libgl1-mesa-dri libgl-dev libglfw3 xvfb libxinerama1 libxcursor1
           curl --fail --location --retry 2 --max-time 180 \
             'https://cdn.vintagestory.at/gamefiles/stable/vs_client_linux-x64_1.22.7.tar.gz' \
             -o "$RUNNER_TEMP/vs-client.tar.gz"
@@ -37,11 +37,27 @@ jobs:
           api_dll=$(find "$RUNNER_TEMP/vs-client" -name VintagestoryAPI.dll -print -quit)
           test -n "$api_dll"
           echo "VINTAGE_STORY=$(dirname "$api_dll")" >> "$GITHUB_ENV"
-      - name: Compile the mod against the official client references
+      - name: Compile mod and actual MSTest project against official client references
         shell: bash
         run: |
           set -euo pipefail
-          dotnet build src/VintageRTX/VintageRTX.csproj -c Release 2>&1 | tee "$RUNNER_TEMP/recovery-evidence/build.log"
+          dotnet restore tests/VintageRTX.Test/VintageRTX.Test.csproj --source https://api.nuget.org/v3/index.json
+          dotnet build tests/VintageRTX.Test/VintageRTX.Test.csproj -c Release --no-restore 2>&1 | tee "$RUNNER_TEMP/recovery-evidence/build.log"
+      - name: Execute the shared short blocker campaign without launching the game
+        shell: bash
+        env:
+          LIBGL_ALWAYS_SOFTWARE: '1'
+        run: |
+          set -euo pipefail
+          export LD_LIBRARY_PATH="$VINTAGE_STORY/Lib:${LD_LIBRARY_PATH:-}"
+          code=0
+          xvfb-run -a dotnet test tests/VintageRTX.Test/VintageRTX.Test.csproj -c Release --no-build --no-restore \
+            --settings tests/blocker-smoke.runsettings --logger 'trx;LogFileName=blocker-smoke.trx' \
+            --results-directory "$RUNNER_TEMP/recovery-evidence" \
+            > "$RUNNER_TEMP/recovery-evidence/blocker-smoke.log" 2>&1 || code=$?
+          if [ "$code" -ne 0 ]; then tail -80 "$RUNNER_TEMP/recovery-evidence/blocker-smoke.log"; exit "$code"; fi
+          python3 tools/recovery/check_blocker_smoke.py "$RUNNER_TEMP/recovery-evidence/blocker-smoke.trx" \
+            | tee "$RUNNER_TEMP/recovery-evidence/blocker-smoke-summary.json"
       - name: Execute production GLSL against independent ray-box oracles
         shell: bash
         env:
@@ -51,14 +67,14 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/ray-tests"
           "$RUNNER_TEMP/ray-tests/bin/pip" install 'numpy>=2,<3' 'moderngl>=5.12,<6'
           "$RUNNER_TEMP/ray-tests/bin/python" -m unittest discover -s tests/recovery -v 2>&1 | tee "$RUNNER_TEMP/recovery-evidence/shader-tests.log"
-      - name: Execute first-feedback visibility and metadata checks
+      - name: Execute visibility, metadata and exact grid-corner checks
         shell: bash
         env:
           LIBGL_ALWAYS_SOFTWARE: '1'
         run: |
           set -euo pipefail
           "$RUNNER_TEMP/ray-tests/bin/python" -m unittest discover -s tests/feedback -v 2>&1 | tee "$RUNNER_TEMP/recovery-evidence/feedback-tests.log"
-      - name: Archive text evidence only
+      - name: Archive text and test-report evidence only
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:

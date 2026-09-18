@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RunSettings>
+  <RunConfiguration>
+    <!-- No Vintage Story scenario launch. Includes one real hidden OpenGL context. -->
+    <TestCaseFilter>FullyQualifiedName~MirrorDepthRegressionTests|FullyQualifiedName~RuntimeCoverageModSystemTests|FullyQualifiedName~PreFinalDisplayPassUsesRealHiddenContextAndRestoresState|FullyQualifiedName~ExteriorRoofCameraCoversLowSunNoCandidateAndOpenGroundSuccess|FullyQualifiedName~RealRuntimeLocalBodyCarrierRetainsMeasuredComponents|FullyQualifiedName~RealFixtureSurvivesUnicodePathAndRejectsChangedBytes|FullyQualifiedName~VoxelShadowTraversalAdvancesEveryTiedAxis|FullyQualifiedName~ShaderUsesNativeVegetationLocallyAndVoxelVisibilityBeyondCascadeExit|FullyQualifiedName~VisualStudioExplorerTests.PreflightContract</TestCaseFilter>
+  </RunConfiguration>
+</RunSettings>
