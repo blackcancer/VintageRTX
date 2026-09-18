@@ -203,7 +203,7 @@ internal static class PreflightSuite
         string shader = DisplayShaderSource.LoadFromFileSystem(Path.Combine(
             TestPaths.FindRepositoryRoot(),
             "src",
-            "VintageRTX")).Fragment;
+            "VintageRTX")).Fragment.ReplaceLineEndings("\n");
         Assert(shader.Contains("traceSunVisibility", StringComparison.Ordinal), "hybrid long sun trace missing");
         Assert(shader.Contains("voxelLighting.sunDirect * sunLightStrength", StringComparison.Ordinal), "visible sun transport is not applied to the final frame");
         Assert(shader.Contains("diagnostic mask normalized across the day", StringComparison.Ordinal), "sun shadow debug normalization missing");
@@ -441,9 +441,17 @@ internal static class PreflightSuite
             && shader.Contains("albedoDetailSamples", StringComparison.Ordinal),
             "adaptive full-screen texture-fetch budget missing");
         Assert(shader.Contains("Variance clipping", StringComparison.Ordinal), "temporal variance clipping missing");
-        Assert(shader.Contains("consistentNeighbours >= 2", StringComparison.Ordinal)
-            && shader.Contains("conservative G-buffer dilation", StringComparison.Ordinal),
-            "one-pixel opaque G-buffer seam repair missing");
+        // The old two-neighbour dilation invented receivers at silhouettes. The replacement
+        // preserves missing geometry and resolves shadow visibility against the true receiver.
+        // Executable GPU witnesses live in tests/feedback/test_feedback_contracts.py.
+        Assert(!shader.Contains("consistentNeighbours >= 2", StringComparison.Ordinal)
+            && !shader.Contains("geometryWasRepaired = true", StringComparison.Ordinal)
+            && shader.Contains("readGBufferTexel(gPosition, uv)", StringComparison.Ordinal)
+            && shader.Contains("readGBufferTexel(gNormal, uv)", StringComparison.Ordinal)
+            && shader.Contains("resolveSurfaceShadow(position, normal,", StringComparison.Ordinal)
+            && shader.Contains("float planeError = abs(dot(geometricViewNormal, position - centerPosition))", StringComparison.Ordinal)
+            && shader.Contains("traceRawPointShadowVisibilities(worldPosition, worldNormal, pointA, pointB)", StringComparison.Ordinal),
+            "exact receiver geometry or depth-guided shadow reconstruction missing");
         Assert(shader.Contains("opaqueGeometryFallback", StringComparison.Ordinal)
             && shader.Contains("&& isInsideVoxelVolume(worldPosition) ? 0.86 : 0.0", StringComparison.Ordinal)
             && shader.Contains("riskyReliability", StringComparison.Ordinal),
@@ -516,9 +524,9 @@ internal static class PreflightSuite
         Assert(shader.Contains("worldGeometricNormal", StringComparison.Ordinal)
             && shader.Contains("derivativeNormal = cross", StringComparison.Ordinal),
             "geometric-normal ray bias missing");
-        Assert(shader.Contains("cameraAlignedLight", StringComparison.Ordinal)
-            && shader.Contains("floatingWorldOrigin) < 0.75", StringComparison.Ordinal),
-            "camera-aligned held-light self-intersection guard missing");
+        Assert(!shader.Contains("floatingWorldOrigin) < 0.75", StringComparison.Ordinal)
+            && shader.Contains("visibility += traceVoxelVisibility", StringComparison.Ordinal),
+            "held emitters must trace world occlusion, not receive unconditional visibility");
         Assert(shader.Contains("boundedMultiLightCluster", StringComparison.Ordinal)
             && shader.Contains("denseDynamicLightCluster", StringComparison.Ordinal)
             && shader.Contains("visibility += traceVoxelVisibility", StringComparison.Ordinal)
@@ -935,21 +943,24 @@ internal static class PreflightSuite
             renderer.Contains("GpuBudgetMilliseconds * 1.02", StringComparison.Ordinal),
             "adaptive frame-pacing tolerance must stay close to the configured budget");
         Assert(
-            renderer.Contains("reflectionDiagnosticCapture", StringComparison.Ordinal)
-                && renderer.Contains("effectiveReflectionSteps = reflectionDiagnosticCapture", StringComparison.Ordinal)
-                && renderer.Contains("effectiveVoxelReflectionSteps = voxelReflectionDiagnosticCapture", StringComparison.Ordinal),
-            "performance-tier reflection diagnostics must temporarily restore their full trace length");
+            !renderer.Contains("reflectionDiagnosticCapture", StringComparison.Ordinal)
+                && !renderer.Contains("voxelReflectionDiagnosticCapture", StringComparison.Ordinal)
+                && !renderer.Contains("voxelBounceDiagnosticCapture", StringComparison.Ordinal)
+                && renderer.Contains("effectiveReflectionSteps = adaptiveQualityLevel switch", StringComparison.Ordinal)
+                && renderer.Contains("effectiveVoxelReflectionSteps = adaptiveQualityLevel switch", StringComparison.Ordinal)
+                && renderer.Contains("effectiveVoxelBounceRayCount = adaptiveQualityLevel switch", StringComparison.Ordinal),
+            "native diagnostics must use exactly the runtime profile's reflection and bounce budgets");
         Assert(
             renderer.Contains("VintageRtxRenderProfile.Extreme => 16", StringComparison.Ordinal)
                 && renderer.Contains("VintageRtxRenderProfile.Cinematic => 24", StringComparison.Ordinal)
                 && renderer.Contains("VintageRtxRenderProfile.Extreme => 48", StringComparison.Ordinal)
                 && renderer.Contains("VintageRtxRenderProfile.Cinematic => 64", StringComparison.Ordinal)
-                && renderer.Contains("VintageRtxRenderProfile.Extreme => 6", StringComparison.Ordinal)
-                && renderer.Contains("VintageRtxRenderProfile.Cinematic => 8", StringComparison.Ordinal),
+                && renderer.Contains("int maximumVoxelLights = VoxelScene.MaximumLightCount;", StringComparison.Ordinal),
             "fixed maximum-fidelity profiles must reach their authored reflection and light budgets");
         Assert(
             renderer.Contains("DynamicLightCandidate", StringComparison.Ordinal)
-                && renderer.Contains("range / (1.0f + viewDistanceSquared * 0.35f)", StringComparison.Ordinal)
+                && renderer.Contains("EntityLightCollector", StringComparison.Ordinal)
+                && renderer.Contains("entity.SourceIndex", StringComparison.Ordinal)
                 && renderer.Contains("SelectStableLightCandidates", StringComparison.Ordinal)
                 && renderer.Contains("retained ? 1.08f : 1.0f", StringComparison.Ordinal)
                 && renderer.Contains("FindDuplicateDynamicLight", StringComparison.Ordinal),
@@ -997,7 +1008,7 @@ internal static class PreflightSuite
             renderer.Contains("shader.Uniform(\"shadowTemporalBlend\", 0.0f)", StringComparison.Ordinal)
                 && shader.Contains("if (hitNormalRoughness.a < -0.0005)", StringComparison.Ordinal)
                 && shader.Contains(
-                    "result.indirect += sampleReflectionSource(hitUv) * confidence;",
+                    "result.indirect += srgbToLinear(sampleReflectionSource(hitUv)) * confidence;",
                     StringComparison.Ordinal)
                 && !shader.Contains(
                     "result.indirect += texture(sourceColor, hitUv).rgb * confidence;",
@@ -1016,7 +1027,9 @@ internal static class PreflightSuite
             "performance tier must use voxel/environment reflection without the screen-depth walk");
         Assert(
             renderer.IndexOf("UpdateAdaptiveQuality(config, captureFrame);", StringComparison.Ordinal)
-                < renderer.IndexOf("bool voxelReflectionDiagnosticCapture", StringComparison.Ordinal),
+                >= 0
+                && renderer.IndexOf("UpdateAdaptiveQuality(config, captureFrame);", StringComparison.Ordinal)
+                    < renderer.IndexOf("int effectiveReflectionSteps = adaptiveQualityLevel switch", StringComparison.Ordinal),
             "adaptive quality must resolve atomically before any tier-dependent transport uniform");
         Assert(
             !renderer.Contains("!denseMultiLightCluster", StringComparison.Ordinal)
@@ -1037,7 +1050,10 @@ internal static class PreflightSuite
                 && shader.Contains("if (sampleCount <= 1)", StringComparison.Ordinal)
                 && shader.Contains("float pairSide = float(pairedSampleIndex & 1)", StringComparison.Ordinal)
                 && !shader.Contains("frame * 0.75487766625", StringComparison.Ordinal),
-            "performance tier must preserve three sources with a stationary centre-balanced emitter sequence");
+            "performance tier must retain stationary centre-balanced emitter sampling");
+        Assert(renderer.Contains("int maximumVoxelLights = VoxelScene.MaximumLightCount;", StringComparison.Ordinal)
+            && VoxelScene.MaximumLightCount == 8,
+            "profile changes must not shrink the represented source set");
         Assert(
             renderer.Contains("AdaptiveUpgradeFrames = 7200", StringComparison.Ordinal),
             "adaptive promotion must require sustained headroom");
@@ -1568,7 +1584,9 @@ internal static class PreflightSuite
 
         Assert(displayShader.Contains("bool deferredGeometryRequired = voxelLightingEnabled != 0", StringComparison.Ordinal)
             && displayShader.Contains("if (deferredGeometryRequired)", StringComparison.Ordinal)
-            && displayShader.Contains("if (!hasGeometry && deferredGeometryRequired && shadowPass == 0)", StringComparison.Ordinal),
+            && displayShader.Contains("position = readGBufferTexel(gPosition, uv).xyz", StringComparison.Ordinal)
+            && displayShader.Contains("encodedNormalRoughness = readGBufferTexel(gNormal, uv)", StringComparison.Ordinal)
+            && displayShader.Contains("if (debugView == 0 && !hasGeometry)", StringComparison.Ordinal),
             "performance-tier voxel lighting can bypass the terrain G-buffer and all PBR maps");
         Assert(displayShader.Contains("vec4 deferredMaterial = texelFetch(gMaterial", StringComparison.Ordinal)
             && displayShader.Contains("float packedSurfaceValue = abs(packedSurfaceAlpha)", StringComparison.Ordinal)

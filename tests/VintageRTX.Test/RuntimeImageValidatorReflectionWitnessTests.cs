@@ -17,8 +17,7 @@ public sealed class RuntimeImageValidatorReflectionWitnessTests
             "VintageRTX.Test",
             "Fixtures",
             "entity-mirror-local-body-real.png");
-        using SKBitmap bitmap = SKBitmap.Decode(path)
-            ?? throw new InvalidDataException($"Could not decode real entity-mirror fixture '{path}'.");
+        using SKBitmap bitmap = LoadRealMirrorFixture(path);
 
         IReadOnlyList<RuntimeImageValidator.EntityMirrorComponentAssessment> components =
             RuntimeImageValidator.AssessEntityMirrorComponents(bitmap);
@@ -83,6 +82,55 @@ public sealed class RuntimeImageValidatorReflectionWitnessTests
             @"C:\capture\20260901-local-body-entity-mirror-raw.png",
             match.Groups[1].Value);
         Assert.AreEqual(1, regex.Matches(log).Count);
+    }
+
+    /// <summary>Preserves the real fixture through Unicode filesystem paths without native path decoding.</summary>
+    [TestMethod]
+    public void RealFixtureSurvivesUnicodePathAndRejectsChangedBytes()
+    {
+        string source = Path.Combine(TestPaths.FindRepositoryRoot(), "tests", "VintageRTX.Test",
+            "Fixtures", "entity-mirror-local-body-real.png");
+        string directory = Path.Combine(Path.GetTempPath(), "VintageRTX-Développement-é-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            byte[] data = File.ReadAllBytes(source);
+            string path = Path.Combine(directory, "réflexion-corps.png");
+            File.WriteAllBytes(path, data);
+            using (SKBitmap decoded = LoadRealMirrorFixture(path))
+            {
+                Assert.AreEqual(960, decoded.Width);
+                Assert.AreEqual(505, decoded.Height);
+                var components = RuntimeImageValidator.AssessEntityMirrorComponents(decoded);
+                Assert.AreEqual(3, components.Count);
+                Assert.AreEqual(2404, components[0].Area);
+            }
+            data[0] ^= 1;
+            File.WriteAllBytes(path, data);
+            InvalidDataException error = Assert.ThrowsException<InvalidDataException>(() =>
+            {
+                using SKBitmap rejected = LoadRealMirrorFixture(path);
+            });
+            StringAssert.Contains(error.Message, "SHA256");
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    /// <summary>Loads verified real capture bytes via managed Unicode file IO before Skia decoding.</summary>
+    /// <param name="path">Path of the unchanged real mirror PNG.</param>
+    /// <returns>Owned bitmap with the exact captured pixels.</returns>
+    private static SKBitmap LoadRealMirrorFixture(string path)
+    {
+        const string expected = "40CBFF450C6F9A8D8B8082F2CC712A0D4F168E9AB5A08A364F59E8FA8AA8DD3E";
+        byte[] data = File.ReadAllBytes(path);
+        string actual = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(data));
+        if (!string.Equals(actual, expected, StringComparison.Ordinal))
+            throw new InvalidDataException($"Real mirror fixture changed: '{path}', bytes={data.Length}, SHA256={actual}, expected={expected}.");
+        return SKBitmap.Decode(data)
+            ?? throw new InvalidDataException($"Could not decode verified real mirror PNG bytes: '{path}', SHA256={actual}.");
     }
 
     /// <summary>Accepts a compact lower-frame local body alongside the two remote witnesses.</summary>

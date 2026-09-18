@@ -369,19 +369,47 @@ public sealed class ShadowFilterPipelineTests
     public void VoxelShadowTraversalAdvancesEveryTiedAxis()
     {
         string shader = ReadFragmentShader();
-        const string MinimumBoundary =
-            "float traveled = min(sideDistance.x, min(sideDistance.y, sideDistance.z));";
-        const string AdvanceX = "if (sideDistance.x <= traveled + 0.00001)";
-        const string AdvanceY = "if (sideDistance.y <= traveled + 0.00001)";
-        const string AdvanceZ = "if (sideDistance.z <= traveled + 0.00001)";
+        // Inspect each live kernel, not the global number of copies of one old DDA spelling.
+        foreach (string name in new[] { "float traceLightCasterVisibility(", "float traceVoxelVisibility(", "float traceSunClipmapVisibility(" })
+        {
+            string body = ShaderKernelBody(shader, name);
+            foreach (string axis in new[] { "x", "y", "z" })
+                StringAssert.Contains(body, $"if (sideDistance.{axis} <= traveled + 0.00001)");
+            Assert.IsFalse(body.Contains("else if", StringComparison.Ordinal), name);
+        }
+        foreach (string name in new[] { "bool traceFineBlockHit(", "int traceVoxelSurface(" })
+        {
+            string body = ShaderKernelBody(shader, name);
+            foreach (string axis in new[] { "x", "y", "z" })
+                StringAssert.Contains(body, $"if (boundary.{axis} <= cellExit) cell.{axis} += stepDirection.{axis};");
+            Assert.IsFalse(body.Contains("else if", StringComparison.Ordinal), name);
+        }
+    }
 
-        Assert.AreEqual(5, CountOccurrences(shader, MinimumBoundary));
-        Assert.AreEqual(5, CountOccurrences(shader, AdvanceX));
-        Assert.AreEqual(5, CountOccurrences(shader, AdvanceY));
-        Assert.AreEqual(5, CountOccurrences(shader, AdvanceZ));
-        Assert.IsFalse(shader.Contains(
-            "if (sideDistance.x <= sideDistance.y && sideDistance.x <= sideDistance.z)",
-            StringComparison.Ordinal));
+    /// <summary>Extracts a defined GLSL kernel, skipping a possible forward declaration.</summary>
+    /// <param name="source">Shader source.</param><param name="signature">Exact function signature prefix.</param>
+    /// <returns>The complete function body.</returns>
+    private static string ShaderKernelBody(string source, string signature)
+    {
+        int start = -1;
+        int opening;
+        do
+        {
+            start = source.IndexOf(signature, start + 1, StringComparison.Ordinal);
+            Assert.IsTrue(start >= 0, signature);
+            opening = source.IndexOf('{', start);
+            int semicolon = source.IndexOf(';', start);
+            if (opening >= 0 && (semicolon < 0 || opening < semicolon)) break;
+        } while (true);
+        int depth = 1, end = opening + 1;
+        while (depth > 0 && end < source.Length)
+        {
+            if (source[end] == '{') depth++;
+            if (source[end] == '}') depth--;
+            end++;
+        }
+        Assert.AreEqual(0, depth, signature);
+        return source[opening..end];
     }
 
     /// <summary>

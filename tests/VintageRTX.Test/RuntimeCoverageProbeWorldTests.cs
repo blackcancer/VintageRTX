@@ -127,7 +127,8 @@ public sealed class RuntimeCoverageProbeWorldTests
     }
 
     /// <summary>
-    /// Verifies the exterior Roof Camera Covers Low Sun No Candidate And Open Ground Success regression contract against deterministic fixture data.
+    /// Verifies usable exterior shadow witnesses and rejects low/vertical sun or missing terrain.
+    /// The historical vertical-sun success assertion contradicted the exposed-ground contract.
     /// </summary>
     [TestMethod]
     public void ExteriorRoofCameraCoversLowSunNoCandidateAndOpenGroundSuccess()
@@ -154,13 +155,25 @@ public sealed class RuntimeCoverageProbeWorldTests
         RuntimeCoverageProbeHarness verticalSun = CreateExteriorHarness();
         verticalSun.SunDirection = new Vintagestory.API.MathTools.Vec3f(0.0f, 1.0f, 0.0f);
         RuntimeScenarioProbe verticalProbe = verticalSun.CreateProbe("exterior-roof");
-        Assert.IsTrue((bool)Invoke(verticalProbe, "TryApplyExteriorRoofCamera")!);
+        Assert.IsFalse((bool)Invoke(verticalProbe, "TryApplyExteriorRoofCamera")!,
+            "A vertical solar ray cannot supply the exposed horizontal witness required by this scenario.");
+        Assert.IsFalse(GetField<bool>(verticalProbe, "exteriorPositionLocked"));
+        Assert.IsFalse(verticalSun.ChatMessages.Any(static text => text.StartsWith("/tp =", StringComparison.Ordinal)));
+        Assert.IsTrue(verticalSun.Logs.Any(static entry => entry.Message.Contains(
+            "vertical sun has no exposed horizontal shadow witness", StringComparison.Ordinal)));
+        Assert.AreEqual(0.0, RuntimeScenarioProbe.CalculateProjectedSunShadowDistance(
+            83.0, 79.0, verticalSun.SunDirection), 0.0);
         verticalProbe.Dispose();
 
         RuntimeCoverageProbeHarness noClientCalendar = CreateExteriorHarness();
         noClientCalendar.CalendarAvailable = false;
         RuntimeScenarioProbe fallbackSun = noClientCalendar.CreateProbe("exterior-roof");
-        Assert.IsTrue((bool)Invoke(fallbackSun, "TryApplyExteriorRoofCamera")!);
+        Assert.IsFalse((bool)Invoke(fallbackSun, "TryApplyExteriorRoofCamera")!,
+            "An absent calendar must not fabricate a real exterior shadow witness.");
+        Assert.IsFalse(GetField<bool>(fallbackSun, "exteriorPositionLocked"));
+        Assert.IsFalse(noClientCalendar.ChatMessages.Any(static text => text.StartsWith("/tp =", StringComparison.Ordinal)));
+        Assert.IsTrue(noClientCalendar.Logs.Any(static entry => entry.Message.Contains(
+            "vertical sun has no exposed horizontal shadow witness", StringComparison.Ordinal)));
         fallbackSun.Dispose();
     }
 
@@ -469,13 +482,19 @@ public sealed class RuntimeCoverageProbeWorldTests
         RuntimeCoverageProbeHarness harness = new();
         harness.Solid.BlockMaterial = EnumBlockMaterial.Wood;
         harness.Solid.Code = new AssetLocation("game:slantedroofing-oak");
+        // A real ground receiver must not be mislabeled as another roofing block.
+        Block ground = new()
+        {
+            BlockId = 2,
+            Code = new AssetLocation("game:rock-granite"),
+            BlockMaterial = EnumBlockMaterial.Stone,
+            LightAbsorption = 32
+        };
         harness.RainHeightAt = static (x, z) => Math.Abs(x) <= 1 && Math.Abs(z) <= 1 ? 82 : 78;
         harness.FallbackBlockAt = (x, y, z, layer) =>
-            layer != BlockLayersAccess.Fluid
-                && (y == harness.RainHeightAt(x, z)
-                    || (Math.Abs(x) <= 1 && Math.Abs(z) <= 1 && y == 80))
-                ? harness.Solid
-                : harness.Air;
+            layer == BlockLayersAccess.Fluid ? harness.Air
+                : Math.Abs(x) <= 1 && Math.Abs(z) <= 1 && (y == 82 || y == 80) ? harness.Solid
+                : y == 78 ? ground : harness.Air;
         return harness;
     }
 

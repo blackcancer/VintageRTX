@@ -2788,6 +2788,14 @@ internal sealed class RuntimeScenarioProbe : IRenderer
         double shadowX = -sunDirection.X;
         double shadowZ = -sunDirection.Z;
         double shadowHorizontal = Math.Sqrt(shadowX * shadowX + shadowZ * shadowZ);
+        if (shadowHorizontal <= 0.000001)
+        {
+            // The exterior-roof scenario requires an exposed, horizontally projected witness.
+            // A vertical sun casts underneath the roof, not onto that exterior witness. Reject
+            // this unsuitable scenario setup rather than inventing a distant shadow target.
+            api.Logger.Error("[VintageRTX.Test] Exterior roof camera rejected: vertical sun has no exposed horizontal shadow witness.");
+            return false;
+        }
         if (shadowHorizontal > 0.001)
         {
             shadowX /= shadowHorizontal;

@@ -344,9 +344,14 @@ public sealed class RuntimeCoverageModSystemTests
             system.StartClientSide(api);
 
             Assert.AreEqual(1, fallbackCaptureCalls);
+            Assert.IsNull(GetPrivateField<object?>(system, "settingsDialog"), "Bootstrap must not allocate the GUI.");
+            CollectionAssert.Contains(eventCalls, "RegisterHotKey");
+            CollectionAssert.Contains(eventCalls, "SetHotKeyHandler");
+            // This coordinator fixture deliberately has no GUI/GL context.
+            AssertCommandFailed(commands["settings"](CreateCommandArguments()));
             string[] expectedCommands =
             [
-                "status", "toggle", "reload", "lighting", "voxel", "capture", "debug", "preset", "profile"
+                "settings", "status", "toggle", "reload", "lighting", "voxel", "capture", "debug", "preset", "profile"
             ];
             CollectionAssert.AreEquivalent(expectedCommands, commands.Keys.ToArray());
             Assert.AreEqual(10, eventCalls.Count(static name => name == "RegisterRenderer"));
@@ -551,6 +556,11 @@ public sealed class RuntimeCoverageModSystemTests
                 ? new List<CollectibleObject>()
                 : RuntimeCoverageDispatchProxy.DefaultValue(method.ReturnType));
 
+        IInputAPI input = RuntimeCoverageDispatchProxy.Create<IInputAPI>((method, _) =>
+        {
+            eventCalls.Add(method.Name);
+            return RuntimeCoverageDispatchProxy.DefaultValue(method.ReturnType);
+        });
         ICoreClientAPI? api = null;
         IChatCommandApi chatApi = RuntimeCoverageDispatchProxy.Create<IChatCommandApi>((method, _) => method.Name switch
         {
@@ -560,6 +570,7 @@ public sealed class RuntimeCoverageModSystemTests
         });
         api = RuntimeCoverageDispatchProxy.Create<ICoreClientAPI>((method, _) => method.Name switch
         {
+            "get_Input" => input,
             "get_Event" => eventApi,
             "get_Logger" => logger,
             "get_World" => world,

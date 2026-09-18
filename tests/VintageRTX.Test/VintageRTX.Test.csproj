@@ -96,14 +96,18 @@
       <HintPath>$(VintageStoryPath)\Lib\SQLitePCLRaw.provider.e_sqlite3.dll</HintPath>
       <Private>true</Private>
     </Reference>
-    <None Include="$(VintageStoryPath)\Lib\libSkiaSharp.dll"
+    <None Include="$(VintageStoryPath)\Lib\libSkiaSharp.dll" Condition="Exists('$(VintageStoryPath)/Lib/libSkiaSharp.dll')"
           Link="libSkiaSharp.dll"
           CopyToOutputDirectory="PreserveNewest" />
-    <None Include="$(VintageStoryPath)\Lib\glfw3.dll"
+    <None Include="$(VintageStoryPath)\Lib\glfw3.dll" Condition="Exists('$(VintageStoryPath)/Lib/glfw3.dll')"
           Link="glfw3.dll"
           CopyToOutputDirectory="PreserveNewest" />
-    <None Include="$(VintageStoryPath)\Lib\e_sqlite3.dll"
+    <None Include="$(VintageStoryPath)\Lib\e_sqlite3.dll" Condition="Exists('$(VintageStoryPath)/Lib/e_sqlite3.dll')"
           Link="e_sqlite3.dll"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+  <ItemGroup Condition="$([MSBuild]::IsOSPlatform('Linux'))">
+    <None Include="$(VintageStoryPath)/Lib/*.so*" Link="%(Filename)%(Extension)"
           CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

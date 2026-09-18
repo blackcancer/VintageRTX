@@ -127,14 +127,17 @@ public sealed class VintageRtxModSystem : ModSystem
             EnumRenderStage.Opaque,
             "vintagertx-reflection-source");
         clientApi.Event.RegisterRenderer(renderer, EnumRenderStage.AfterBlit, "vintagertx-display");
-        settingsDialog = new GuiDialogVintageRtxSettings(clientApi, configStore, () => renderer.ResetFault());
-        clientApi.Input.RegisterHotKey("vintagertx-settings", "VintageRTX settings",
-            GlKeys.R, HotkeyType.GUIOrOtherControls, altPressed: true, ctrlPressed: true);
-        clientApi.Input.SetHotKeyHandler("vintagertx-settings", _ =>
+        // The panel is created only on first use, not during renderer bootstrap.
+        if (clientApi.Input is { } input)
         {
-            settingsDialog?.Toggle();
-            return true;
-        });
+            input.RegisterHotKey("vintagertx-settings", "VintageRTX settings",
+                GlKeys.R, HotkeyType.GUIOrOtherControls, altPressed: true, ctrlPressed: true);
+            input.SetHotKeyHandler("vintagertx-settings", _ =>
+            {
+                ToggleSettings();
+                return true;
+            });
+        }
         RegisterCommands(clientApi);
 
         clientApi.Logger.Notification("[VintageRTX] Clean renderer bootstrap complete.");
@@ -228,11 +231,7 @@ public sealed class VintageRtxModSystem : ModSystem
         clientApi.ChatCommands.Create("vrtx")
             .WithDescription("VintageRTX rendering controls")
             .BeginSubCommand("settings")
-                .HandleWith(_ =>
-                {
-                    settingsDialog?.Toggle();
-                    return TextCommandResult.Success();
-                })
+                .HandleWith(_ => ToggleSettings())
             .EndSubCommand()
             .BeginSubCommand("status")
                 .HandleWith(_ => TextCommandResult.Success(BuildStatus()))
@@ -264,6 +263,17 @@ public sealed class VintageRtxModSystem : ModSystem
                 .WithArgs(clientApi.ChatCommands.Parsers.Word("name"))
                 .HandleWith(SetRenderProfile)
             .EndSubCommand();
+    }
+
+    /// <summary>Opens settings only after the client GUI and renderer are available.</summary>
+    /// <returns>A command error rather than a bootstrap fault when no GUI exists.</returns>
+    private TextCommandResult ToggleSettings()
+    {
+        if (api?.Gui is null || configStore is null || renderer is null)
+            return TextCommandResult.Error("VintageRTX settings require an initialized client GUI.");
+        settingsDialog ??= new GuiDialogVintageRtxSettings(api, configStore, () => renderer?.ResetFault());
+        settingsDialog.Toggle();
+        return TextCommandResult.Success();
     }
 
     /// <summary>Builds one operational snapshot spanning config, renderer, voxel scene, PBR, and debug state.</summary>
@@ -466,7 +476,7 @@ public sealed class VintageRtxModSystem : ModSystem
     {
         settingsDialog?.Dispose();
         settingsDialog = null;
-        api?.Input.SetHotKeyHandler("vintagertx-settings", _ => false);
+        api?.Input?.SetHotKeyHandler("vintagertx-settings", _ => false);
         if (api is not null
             && renderer is not null
             && pbrTerrainRenderer is not null

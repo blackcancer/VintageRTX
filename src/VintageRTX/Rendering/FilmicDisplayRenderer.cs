@@ -3844,7 +3844,7 @@ internal sealed class FilmicDisplayRenderer : IRenderer
         int savedProjectionStackCount = projectionStack.Count;
         try
         {
-            entityMirrorProjection.Render(
+            return entityMirrorProjection.Render(
                 frameWidth,
                 frameHeight,
                 reflectionSourceCapture.TextureId,
@@ -3860,7 +3860,6 @@ internal sealed class FilmicDisplayRenderer : IRenderer
                 config.ReflectionDistance,
                 captureEntityEvidence,
                 MirrorResolutionDivisor(adaptiveQualityLevel));
-            return true;
         }
         finally
         {

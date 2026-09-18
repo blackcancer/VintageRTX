@@ -126,7 +126,7 @@ public sealed class VegetationSunShadowRegressionTests
             "assets",
             "vintagertx",
             "shaders",
-            "display.frag"));
+            "display.frag")).ReplaceLineEndings("\n");
 
         StringAssert.Contains(shader, "uniform sampler2DShadow nativeShadowMapFar;");
         StringAssert.Contains(shader, "uniform sampler2DShadow nativeShadowMapNear;");

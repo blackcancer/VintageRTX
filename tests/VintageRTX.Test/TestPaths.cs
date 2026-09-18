@@ -40,9 +40,18 @@ internal static class TestPaths
             root = Directory.GetParent(root)?.FullName ?? root;
         }
 
-        if (!File.Exists(Path.Combine(root, "Vintagestory.exe")))
+        // Asset/assembly tests use the actual client on both Windows and Linux. Requiring
+        // a Windows .exe on a Linux client prevented language/bootstrap tests from executing.
+        bool hasClient = OperatingSystem.IsWindows()
+            ? File.Exists(Path.Combine(root, "Vintagestory.exe"))
+            : File.Exists(Path.Combine(root, "Vintagestory"))
+                || File.Exists(Path.Combine(root, "Vintagestory.dll"));
+        if (!hasClient
+            || !File.Exists(Path.Combine(root, "VintagestoryAPI.dll"))
+            || !Directory.Exists(Path.Combine(root, "assets")))
         {
-            throw new FileNotFoundException("Vintagestory.exe was not found.", Path.Combine(root, "Vintagestory.exe"));
+            throw new DirectoryNotFoundException(
+                $"A complete Vintage Story client (launcher, API and assets) was not found below '{root}'.");
         }
 
         return root;

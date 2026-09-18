@@ -38,7 +38,7 @@ internal sealed class GuiDialogVintageRtxSettings : GuiDialog
     public override bool DisableMouseGrab => true;
 
     /// <summary>Opens a fresh draft or cancels the currently open draft.</summary>
-    internal void Toggle()
+    public override void Toggle()
     {
         if (disposed) return;
         if (IsOpened()) { TryClose(); return; }

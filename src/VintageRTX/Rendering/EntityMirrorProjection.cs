@@ -116,7 +116,7 @@ internal sealed class EntityMirrorProjection : IDisposable
     /// <param name="maximumDistance">Maximum reflected entity distance in world blocks.</param>
     /// <param name="captureEntityEvidence">Whether to render an isolated entity carrier this frame.</param>
     /// <param name="resolutionDivisor">Full-frame divisor for the owned mirror target.</param>
-    internal void Render(
+    internal bool Render(
         int frameWidth,
         int frameHeight,
         int cleanColorTextureId,
@@ -153,22 +153,6 @@ internal sealed class EntityMirrorProjection : IDisposable
             throw new ArgumentOutOfRangeException(nameof(resolutionDivisor));
         }
 
-        EnsureSize(
-            Math.Max(1, (frameWidth + resolutionDivisor - 1) / resolutionDivisor),
-            Math.Max(1, (frameHeight + resolutionDivisor - 1) / resolutionDivisor));
-        GL.BindFramebuffer(FramebufferTarget.DrawFramebuffer, framebufferId);
-        GL.DrawBuffer(DrawBufferMode.ColorAttachment0);
-        GL.Viewport(0, 0, width, height);
-        GL.Disable(EnableCap.Blend);
-        GL.Disable(EnableCap.CullFace);
-        GL.Disable(EnableCap.ScissorTest);
-        GL.Enable(EnableCap.DepthTest);
-        GL.Enable(EnableCap.ProgramPointSize);
-        GL.DepthMask(true);
-        GL.DepthFunc(DepthFunction.Less);
-        GL.ColorMask(true, true, true, true);
-        GL.ClearBuffer(ClearBuffer.Color, 0, TransparentClear);
-        GL.ClearBuffer(ClearBuffer.Depth, 0, FarDepthClear);
         BuildReflectedViewMatrix(
             api.Render.CameraMatrixOrigin,
             surfaceWorldY - floatingOriginY,
@@ -195,21 +179,35 @@ internal sealed class EntityMirrorProjection : IDisposable
                 obliqueProjectionMatrix[index] = projectionMatrix[index];
             }
         }
-        if (Mat4d.Invert(inverseProjectionScratch, obliqueProjectionMatrix) is null)
+        if (!TryCreateDepthProjectionPair(obliqueProjectionMatrix,
+            mirrorDepthProjectionMatrix, inverseMirrorDepthProjectionMatrix,
+            inverseMirrorViewScratch, inverseProjectionScratch))
         {
-            throw new InvalidOperationException("The mirror depth projection is singular.");
-        }
-        for (int index = 0; index < 16; index++)
-        {
-            float forward = (float)obliqueProjectionMatrix[index];
-            float backward = (float)inverseProjectionScratch[index];
-            if (!float.IsFinite(forward) || !float.IsFinite(backward))
+            if (!clipProjectionFailureLogged)
             {
-                throw new InvalidOperationException("The mirror depth matrices are not finite.");
+                api.Logger.Warning("[VintageRTX] Mirror skipped for this frame: no finite invertible depth projection pair.");
+                clipProjectionFailureLogged = true;
             }
-            mirrorDepthProjectionMatrix[index] = forward;
-            inverseMirrorDepthProjectionMatrix[index] = backward;
+            return false;
         }
+        // Replay and shader must use the same float-representable coefficients.
+        Array.Copy(inverseMirrorViewScratch, obliqueProjectionMatrix, 16);
+        EnsureSize(
+            Math.Max(1, (frameWidth + resolutionDivisor - 1) / resolutionDivisor),
+            Math.Max(1, (frameHeight + resolutionDivisor - 1) / resolutionDivisor));
+        GL.BindFramebuffer(FramebufferTarget.DrawFramebuffer, framebufferId);
+        GL.DrawBuffer(DrawBufferMode.ColorAttachment0);
+        GL.Viewport(0, 0, width, height);
+        GL.Disable(EnableCap.Blend);
+        GL.Disable(EnableCap.CullFace);
+        GL.Disable(EnableCap.ScissorTest);
+        GL.Enable(EnableCap.DepthTest);
+        GL.Enable(EnableCap.ProgramPointSize);
+        GL.DepthMask(true);
+        GL.DepthFunc(DepthFunction.Less);
+        GL.ColorMask(true, true, true, true);
+        GL.ClearBuffer(ClearBuffer.Color, 0, TransparentClear);
+        GL.ClearBuffer(ClearBuffer.Depth, 0, FarDepthClear);
         if (mirrorProjectionReady)
         {
             _ = EntityMirrorGeometryReplayPatch.TryReplay(
@@ -274,6 +272,41 @@ internal sealed class EntityMirrorProjection : IDisposable
                     obliqueProjectionMatrix);
             }
         }
+        return true;
+    }
+
+    /// <summary>
+    /// Pairs the actual float-representable projection with its inverse before any GL work.
+    /// Invalid inputs clear both outputs; an identity inverse is never fabricated on failure.
+    /// </summary>
+    /// <param name="source">Read-only candidate projection.</param>
+    /// <param name="forward">Published float projection, cleared on failure.</param>
+    /// <param name="inverse">Published inverse, cleared on failure.</param>
+    /// <param name="roundedScratch">Detached storage for the float-rounded projection.</param>
+    /// <param name="inverseScratch">Detached inverse storage.</param>
+    /// <returns>True only for a finite invertible float projection/inverse pair.</returns>
+    internal static bool TryCreateDepthProjectionPair(double[] source, float[] forward, float[] inverse,
+        double[] roundedScratch, double[] inverseScratch)
+    {
+        Array.Clear(forward);
+        Array.Clear(inverse);
+        if (source.Length < 16 || forward.Length < 16 || inverse.Length < 16
+            || roundedScratch.Length < 16 || inverseScratch.Length < 16) return false;
+        for (int index = 0; index < 16; index++)
+        {
+            float value = (float)source[index];
+            if (!float.IsFinite(value)) return false;
+            roundedScratch[index] = value;
+        }
+        if (Mat4d.Invert(inverseScratch, roundedScratch) is null) return false;
+        for (int index = 0; index < 16; index++)
+            if (!float.IsFinite((float)inverseScratch[index])) return false;
+        for (int index = 0; index < 16; index++)
+        {
+            forward[index] = (float)roundedScratch[index];
+            inverse[index] = (float)inverseScratch[index];
+        }
+        return true;
     }
 
     /// <summary>Projects the clean late-opaque entity delta into one owned mirror framebuffer.</summary>
@@ -626,13 +659,17 @@ internal sealed class EntityMirrorProjection : IDisposable
             return false;
         }
 
-        return TryWriteObliqueProjection(
-            projectionMatrix,
-            clipX,
-            clipY,
-            clipZ,
-            clipW,
-            destination);
+        if (!TryWriteObliqueProjection(
+            projectionMatrix, clipX, clipY, clipZ, clipW, destination)
+            || Mat4d.Invert(inverseProjection, destination) is null
+            || !IsFiniteMatrix(inverseProjection))
+        {
+            // Finite coefficients alone do not prove invertibility. In particular,
+            // a non-perspective fixture can produce two linearly dependent rows.
+            Array.Clear(destination);
+            return false;
+        }
+        return true;
     }
 
     /// <summary>
