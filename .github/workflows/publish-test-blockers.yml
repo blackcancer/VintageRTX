@@ -1,0 +1,92 @@
+name: Validate and publish test blocker repair
+on:
+  push:
+    branches: [dev/renderer-recovery-20260918]
+    paths: ['tools/recovery/apply_test_blockers.py', 'tools/recovery/inspect_test_blockers.py', 'tests/VintageRTX.Test/MirrorDepthRegressionTests.cs', '.github/workflows/publish-test-blockers.yml']
+permissions:
+  contents: write
+concurrency:
+  group: test-blocker-publication
+  cancel-in-progress: false
+jobs:
+  validate:
+    if: github.repository == 'blackcancer/VintageRTX' && github.ref == 'refs/heads/dev/renderer-recovery-20260918'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: true
+      - name: Apply exact source repair
+        run: |
+          mkdir -p "$RUNNER_TEMP/blocker-evidence"
+          git rev-parse HEAD > "$RUNNER_TEMP/blocker-evidence/staging-commit.txt"
+          python3 tools/recovery/apply_test_blockers.py
+          git diff --check
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9
+        with:
+          dotnet-version: '10.0.401'
+      - name: Set up actual game references and a software GL display
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libegl1-mesa-dev libgl1-mesa-dri libgl-dev libglfw3 xvfb libxinerama1 libxcursor1
+          mkdir -p "$RUNNER_TEMP/vs-client"
+          curl -fL --retry 2 --max-time 180 'https://cdn.vintagestory.at/gamefiles/stable/vs_client_linux-x64_1.22.7.tar.gz' -o "$RUNNER_TEMP/client.tar.gz"
+          sha256sum "$RUNNER_TEMP/client.tar.gz" > "$RUNNER_TEMP/blocker-evidence/client-package.sha256"
+          tar -xzf "$RUNNER_TEMP/client.tar.gz" -C "$RUNNER_TEMP/vs-client"
+          api_dll=$(find "$RUNNER_TEMP/vs-client" -name VintagestoryAPI.dll -print -quit)
+          test -n "$api_dll"
+          echo "VINTAGE_STORY=$(dirname "$api_dll")" >> "$GITHUB_ENV"
+      - name: Restore and compile the actual MSTest project
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet restore tests/VintageRTX.Test/VintageRTX.Test.csproj --source https://api.nuget.org/v3/index.json
+          dotnet build tests/VintageRTX.Test/VintageRTX.Test.csproj -c Release --no-restore 2>&1 | tee "$RUNNER_TEMP/blocker-evidence/build.log"
+      - name: Execute reported fast failures and mirror regressions (no game scenarios)
+        shell: bash
+        env:
+          LIBGL_ALWAYS_SOFTWARE: '1'
+        run: |
+          set -uo pipefail
+          export LD_LIBRARY_PATH="$VINTAGE_STORY/Lib:${LD_LIBRARY_PATH:-}"
+          export BLOCKER_RESULTS="$RUNNER_TEMP/blocker-evidence"
+          filter='FullyQualifiedName~MirrorDepthRegressionTests|FullyQualifiedName~RuntimeCoverageModSystemTests|FullyQualifiedName~PreFinalDisplayPassUsesRealHiddenContextAndRestoresState|FullyQualifiedName~ExteriorRoofCameraCoversLowSunNoCandidateAndOpenGroundSuccess|FullyQualifiedName~RealRuntimeLocalBodyCarrierRetainsMeasuredComponents|FullyQualifiedName~VoxelShadowTraversalAdvancesEveryTiedAxis|FullyQualifiedName~ShaderUsesNativeVegetationLocallyAndVoxelVisibilityBeyondCascadeExit|FullyQualifiedName~VisualStudioExplorerTests.PreflightContract'
+          xvfb-run -a dotnet test tests/VintageRTX.Test/VintageRTX.Test.csproj -c Release --no-build --no-restore --filter "$filter" --logger 'trx;LogFileName=blockers.trx' --results-directory "$BLOCKER_RESULTS" > "$BLOCKER_RESULTS/tests.log" 2>&1
+          code=$?
+          python3 tools/recovery/inspect_test_blockers.py | tee "$BLOCKER_RESULTS/summary.log"
+          if ! test -f "$BLOCKER_RESULTS/blockers.trx"; then tail -60 "$BLOCKER_RESULTS/tests.log"; fi
+          exit "$code"
+      - name: Execute real GLSL ray and visibility tests
+        env:
+          LIBGL_ALWAYS_SOFTWARE: '1'
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/gl-tests"
+          "$RUNNER_TEMP/gl-tests/bin/pip" install 'numpy>=2,<3' 'moderngl>=5.12,<6'
+          "$RUNNER_TEMP/gl-tests/bin/python" -m unittest discover -s tests/recovery -v 2>&1 | tee "$RUNNER_TEMP/blocker-evidence/gl-rays.log"
+          "$RUNNER_TEMP/gl-tests/bin/python" -m unittest discover -s tests/feedback -v 2>&1 | tee "$RUNNER_TEMP/blocker-evidence/gl-feedback.log"
+      - name: Publish only validated ordinary sources and tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          remote=$(git ls-remote origin refs/heads/dev/renderer-recovery-20260918 | cut -f1)
+          test "$remote" = "$GITHUB_SHA"
+          git diff --check
+          git add src/VintageRTX/Rendering/EntityMirrorProjection.cs src/VintageRTX/Rendering/FilmicDisplayRenderer.cs src/VintageRTX/VintageRtxModSystem.cs src/VintageRTX/Configuration/GuiDialogVintageRtxSettings.cs tests/VintageRTX.Test/RuntimeCoverageModSystemTests.cs tests/VintageRTX.Test/ShadowFilterPipelineTests.cs tests/VintageRTX.Test/VegetationSunShadowRegressionTests.cs tests/VintageRTX.Test/PreflightSuite.cs tests/VintageRTX.Test/VintageRTX.Test.csproj
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix: validate mirror inversion before GL and repair test bootstrap contracts'
+          git push origin HEAD:refs/heads/dev/renderer-recovery-20260918
+          git rev-parse HEAD > "$RUNNER_TEMP/blocker-evidence/published-commit.txt"
+      - name: Archive diagnostics (not game acceptance)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: test-blockers-${{ github.sha }}
+          path: ${{ runner.temp }}/blocker-evidence/
+          if-no-files-found: error
+          retention-days: 14
