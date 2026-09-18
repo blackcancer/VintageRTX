@@ -51,6 +51,13 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/ray-tests"
           "$RUNNER_TEMP/ray-tests/bin/pip" install 'numpy>=2,<3' 'moderngl>=5.12,<6'
           "$RUNNER_TEMP/ray-tests/bin/python" -m unittest discover -s tests/recovery -v 2>&1 | tee "$RUNNER_TEMP/recovery-evidence/shader-tests.log"
+      - name: Execute first-feedback visibility and metadata checks
+        shell: bash
+        env:
+          LIBGL_ALWAYS_SOFTWARE: '1'
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/ray-tests/bin/python" -m unittest discover -s tests/feedback -v 2>&1 | tee "$RUNNER_TEMP/recovery-evidence/feedback-tests.log"
       - name: Archive text evidence only
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
