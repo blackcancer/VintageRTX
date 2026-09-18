@@ -1,0 +1,87 @@
+name: Publish tested feedback round one
+on:
+  push:
+    branches: [dev/renderer-recovery-20260918]
+    paths:
+      - '.github/workflows/publish-feedback-round1.yml'
+      - 'tools/recovery/apply_feedback_round1.py'
+      - 'tools/recovery/finish_feedback_round1.py'
+      - 'tests/feedback/**'
+      - 'src/VintageRTX/Rendering/EmitterAppearance.cs'
+      - 'src/VintageRTX/Rendering/EntityLightCollector.cs'
+permissions:
+  contents: write
+concurrency:
+  group: feedback-round-one-publication
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.repository == 'blackcancer/VintageRTX' && github.ref == 'refs/heads/dev/renderer-recovery-20260918'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: true
+      - name: Materialize exact reviewed source changes
+        run: |
+          mkdir -p "$RUNNER_TEMP/feedback-evidence"
+          git rev-parse HEAD > "$RUNNER_TEMP/feedback-evidence/staging-commit.txt"
+          python3 tools/recovery/apply_feedback_round1.py
+          python3 tools/recovery/finish_feedback_round1.py
+          git diff --check
+          git diff --stat > "$RUNNER_TEMP/feedback-evidence/change-stat.txt"
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9
+        with:
+          dotnet-version: '10.0.401'
+      - name: Prepare actual game references and Mesa
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libegl1-mesa-dev libgl1-mesa-dri libgl-dev
+          mkdir -p "$RUNNER_TEMP/vs-client"
+          curl -fL --retry 2 --max-time 180 'https://cdn.vintagestory.at/gamefiles/stable/vs_client_linux-x64_1.22.7.tar.gz' -o "$RUNNER_TEMP/client.tar.gz"
+          sha256sum "$RUNNER_TEMP/client.tar.gz" > "$RUNNER_TEMP/feedback-evidence/client-package.sha256"
+          tar -xzf "$RUNNER_TEMP/client.tar.gz" -C "$RUNNER_TEMP/vs-client"
+          api_dll=$(find "$RUNNER_TEMP/vs-client" -name VintagestoryAPI.dll -print -quit)
+          test -n "$api_dll"
+          echo "VINTAGE_STORY=$(dirname "$api_dll")" >> "$GITHUB_ENV"
+      - name: Compile mod against Vintage Story 1.22.7
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet build src/VintageRTX/VintageRTX.csproj -c Release 2>&1 | tee "$RUNNER_TEMP/feedback-evidence/build.log"
+      - name: Run real GLSL regression tests
+        shell: bash
+        env:
+          LIBGL_ALWAYS_SOFTWARE: '1'
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/feedback-tests"
+          "$RUNNER_TEMP/feedback-tests/bin/pip" install 'numpy>=2,<3' 'moderngl>=5.12,<6'
+          "$RUNNER_TEMP/feedback-tests/bin/python" -m unittest discover -s tests/recovery -v 2>&1 | tee "$RUNNER_TEMP/feedback-evidence/ray-tests.log"
+          "$RUNNER_TEMP/feedback-tests/bin/python" -m unittest discover -s tests/feedback -v 2>&1 | tee "$RUNNER_TEMP/feedback-evidence/feedback-tests.log"
+      - name: Publish ordinary sources without overwriting concurrent work
+        shell: bash
+        run: |
+          set -euo pipefail
+          remote=$(git ls-remote origin refs/heads/dev/renderer-recovery-20260918 | cut -f1)
+          test "$remote" = "$GITHUB_SHA"
+          git diff --check
+          git add src/VintageRTX/Rendering/VoxelScene.cs src/VintageRTX/Rendering/FilmicDisplayRenderer.cs src/VintageRTX/assets/vintagertx/shaders/display.frag src/VintageRTX/assets/game/shaders/entityanimated.fsh src/VintageRTX/Rendering/EmitterAppearance.cs
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix(rendering): decouple emitter updates and constrain water and shadow reconstruction'
+          git push origin HEAD:refs/heads/dev/renderer-recovery-20260918
+          git rev-parse HEAD > "$RUNNER_TEMP/feedback-evidence/published-commit.txt"
+          git ls-tree -r HEAD src/VintageRTX > "$RUNNER_TEMP/feedback-evidence/published-source-tree.txt"
+      - name: Archive text evidence only
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: feedback-round1-${{ github.sha }}
+          path: ${{ runner.temp }}/feedback-evidence/
+          if-no-files-found: error
+          retention-days: 14
