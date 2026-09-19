@@ -68,6 +68,8 @@ edit(p, '''    private static SKBitmap LoadRealMirrorFixture(string path)
 p = 'tests/VintageRTX.Test/RuntimeCoverageModSystemTests.cs'
 edit(p, '            Assert.AreEqual(10, eventCalls.Count(static name => name == "RegisterRenderer"));',
      '            Assert.AreEqual(11, eventCalls.Count(static name => name == "RegisterRenderer"));')
+edit(p, '            Assert.AreEqual(10, eventCalls.Count(static name => name == "UnregisterRenderer"));',
+     '            Assert.AreEqual(11, eventCalls.Count(static name => name == "UnregisterRenderer"));')
 edit(p, '                "RegisterRenderer:vintagertx-pbr-terrain:Opaque",', '''                "RegisterRenderer:vintagertx-raw-albedo:Opaque",
                 "RegisterRenderer:vintagertx-pbr-terrain:Opaque",''')
 
@@ -80,6 +82,8 @@ edit(p, '''        Assert(shader.Contains("environmentAlignment", StringComparis
         // an integrated white furnace. This guard only checks its production wiring.
         Assert(shader.Contains("materialFresnel(f0, vh)", StringComparison.Ordinal)
             && shader.Contains("vec3 directSpecularRadiance = voxelLighting.directSpecular", StringComparison.Ordinal)
+            && shader.Contains("materialF0) * emissiveLightStrength", StringComparison.Ordinal)
+            && shader.Contains("materialF0) * sunLightStrength", StringComparison.Ordinal)
             && !shader.Contains("metallic * 3.80", StringComparison.Ordinal)
             && !shader.Contains("localEnvironmentSpecular", StringComparison.Ordinal),
             "direct conductor lighting must use material Fresnel, not post-hoc metal gains or a diffuse-cache spotlight");''')
