@@ -113,7 +113,7 @@ public sealed class RawAlbedoTargetTests
                 FramebufferAttachment.ColorAttachment4, FramebufferParameterName.FramebufferAttachmentObjectName, out owner);
             Assert.AreEqual(textures[0], owner);
             GL.FramebufferTexture2D(FramebufferTarget.DrawFramebuffer, FramebufferAttachment.ColorAttachment4, TextureTarget.Texture2D, 0, 0);
-            Assert.AreEqual(ErrorCode.NoError, GL.GetError());
+            Assert.AreEqual(OpenTK.Graphics.OpenGL4.ErrorCode.NoError, GL.GetError());
         }
         finally
         {
