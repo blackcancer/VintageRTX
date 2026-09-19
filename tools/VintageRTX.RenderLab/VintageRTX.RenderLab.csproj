@@ -86,11 +86,24 @@
       <HintPath>$(VintageStoryPath)\Lib\0Harmony.dll</HintPath>
       <Private>true</Private>
     </Reference>
+  </ItemGroup>
+
+  <!-- Windows retains its required native dependencies. Linux uses the official .so
+       files when shipped, or the system GLFW already required by its GL context. -->
+  <ItemGroup Condition="$([MSBuild]::IsOSPlatform('Windows'))">
     <None Include="$(VintageStoryPath)\Lib\glfw3.dll"
           Link="glfw3.dll"
           CopyToOutputDirectory="PreserveNewest" />
     <None Include="$(VintageStoryPath)\Lib\libSkiaSharp.dll"
           Link="libSkiaSharp.dll"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+  <ItemGroup Condition="$([MSBuild]::IsOSPlatform('Linux'))">
+    <None Include="$(VintageStoryPath)/Lib/libSkiaSharp.so"
+          Link="libSkiaSharp.so"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="$(VintageStoryPath)/Lib/libglfw.so*"
+          Link="%(Filename)%(Extension)"
           CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>
