@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RunSettings>
+  <RunConfiguration>
+    <!-- Whole classes from the reported failures; no Vintage Story world launch.
+         Some cases require an actual hidden OpenGL context. -->
+    <TestCaseFilter>FullyQualifiedName~CoverageFilmicResidualTests|FullyQualifiedName~DisplayShaderAssetTests|FullyQualifiedName~FilmicDisplayRendererLogicCoverageTests|FullyQualifiedName~LiquidShaderPhysicsTests|FullyQualifiedName~PbrEntityRendererTests|FullyQualifiedName~ShadowFilterPipelineTests|FullyQualifiedName~VoxelSceneCoverageDeepTests</TestCaseFilter>
+  </RunConfiguration>
+</RunSettings>
