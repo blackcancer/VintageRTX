@@ -1,6 +1,6 @@
 """Production secondary-lighting GLSL with explicit, controlled geometry/visibility inputs.
-The fixtures replace world queries, not the production lighting calculation. Existing ray tests
-validate traversal separately. These are not Vintage Story screenshots or performance results.
+The fixtures replace world queries, not production radiometry. Ray tests validate traversal
+separately. These are not Vintage Story screenshots or performance measurements.
 """
 from pathlib import Path
 import os
@@ -43,7 +43,7 @@ uniform float fixtureSkyVisibility;
 uniform float fixtureSunVisibility;
 uniform vec3 fixtureSkyRadiance;
 layout(location=0) out vec4 result;
-// One known diffuse hit for all rays: isolates radiometry from the geometry oracle.
+// One known diffuse hit: isolates radiometry from the independent geometry oracle.
 bool traceVoxelBounceSurface(vec3 o,vec3 d,out vec3 p,out vec3 n,out vec3 a,out float t)
 {p=vec3(0.);n=vec3(0.,1.,0.);a=fixtureAlbedo;t=.5;return true;}
 vec3 skyProbeDirection(int i){return vec3(0.,1.,0.);}
@@ -52,7 +52,6 @@ float traceSkyRay(vec3 o,vec3 d){return fixtureSkyVisibility;}
 float traceSunVisibility(vec3 p,vec3 o){return fixtureSunVisibility;}
 float traceVoxelVisibility(vec3 o,vec3 p,int index)
 {return index>=0 && index<8 ? fixtureVisibility[index] : 1.;}
-// Only retained to execute a deliberate historical mutation below.
 float traceCoarseBounceVisibility(vec3 o,vec3 p){return 1.;}
 '''
 
@@ -90,7 +89,12 @@ void main(){result=vec4(traceVoxelDiffuseBounce(vec3(0.),vec3(0.,1.,0.),vec3(0.,
             if name in program: program[name].value=value
         for name,value in [('voxelLightPositionIntensity',positions),('voxelLightColorRadius',colors),
             ('voxelLightPhotometry',photometry),('fixtureVisibility',visibility)]:
-            if name in program: program[name].write(value.tobytes())
+            if name in program:
+                uniform=program[name]
+                # The intentional two-light mutant optimizes array elements 2..7 away.
+                # Respect its linked ABI while requiring all eight in the real production path.
+                if program is self.program: self.assertEqual(uniform.array_length,8,name)
+                uniform.write(value[:uniform.array_length].tobytes())
         vao=self.ctx.vertex_array(program,[]);target=self.ctx.texture((1,1),4,dtype='f4');fbo=self.ctx.framebuffer([target])
         try:
             fbo.use();self.ctx.viewport=(0,0,1,1);vao.render(vertices=3)
@@ -103,12 +107,13 @@ void main(){result=vec4(traceVoxelDiffuseBounce(vec3(0.),vec3(0.,1.,0.),vec3(0.,
         self.assertGreater(float(first[0]),0.01)
         self.assertGreater(first[0],first[1]);self.assertGreater(first[1],first[2])
         np.testing.assert_allclose(first,last,rtol=1e-6,atol=1e-7)
-        # This test must kill the previous two-source limitation, not merely execute a green path.
         mutant=self.fragment.replace('if (lightIndex >= voxelLightCount) break;',
             'if (lightIndex >= voxelLightCount || lightIndex >= 2) break;')
         self.assertNotEqual(mutant,self.fragment)
         program=self.ctx.program(vertex_shader=VERTEX,fragment_shader=mutant)
-        try:np.testing.assert_array_equal(self.render([(7,warm,1.)],program=program),0.)
+        try:
+            self.assertGreater(self.render([(0,warm,1.)],program=program)[0],.01)
+            np.testing.assert_array_equal(self.render([(7,warm,1.)],program=program),0.)
         finally:program.release()
 
     def test_visibility_remains_owned_by_each_emitter(self):
@@ -142,7 +147,6 @@ void main(){result=vec4(voxelBounceDirection(vec3(0.,1.,0.),int(gl_FragCoord.x))
             data=np.frombuffer(target.read(),dtype='f4').reshape(-1,4)[:,:3]
             np.testing.assert_allclose(np.linalg.norm(data,axis=1),1.,atol=2e-6)
             self.assertTrue(np.all(data[:,1]>=0.))
-            # For a uniform disk projected to a cosine hemisphere, E[r^2]=1/2.
             radii_squared=data[:,0]**2+data[:,2]**2
             self.assertAlmostEqual(float(np.mean(radii_squared)),.5,delta=.001)
             self.assertGreater(float(np.max(radii_squared)),.995)
