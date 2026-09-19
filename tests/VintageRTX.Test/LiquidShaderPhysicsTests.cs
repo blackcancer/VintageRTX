@@ -214,14 +214,20 @@ public sealed class LiquidShaderPhysicsTests
         StringAssert.Contains(shader, "planarFluidSurfaceWorldY = liquidFaceSurfaceWorldY;");
         StringAssert.Contains(shader, "max(layeredPartialWaterEvidence, liquidFaceLayeredEvidence)");
         StringAssert.Contains(shader, "result.liquidPartialGeometryFace = max(\n            liquidDepthPartialGeometrySupport,\n            liquidDepthShoreGeometrySupport)");
-        StringAssert.Contains(shader, "float partialLiquidRecovery = clamp(");
-        StringAssert.Contains(shader, "vec3 shoreTransmittance = exp(");
-        StringAssert.Contains(shader, "float liquidCarrierWeight = shoreFresnel");
-        StringAssert.Contains(shader, "vec3 horizontalLiquidCarrier = mix(");
-        StringAssert.Contains(shader, "vec3 physicalShoreComposite = opaqueShoreLinear");
-        StringAssert.Contains(shader, "float exactPartialOccluder = clamp(");
-        StringAssert.Contains(shader, "vec3 recoveredShoreSource = mix(");
-        StringAssert.Contains(shader, "sampleReflectionSource(uv),\n            exactPartialOccluder");
+        // Only the actual per-pixel liquid interface may receive the resolve.
+        // The removed shoreline colour reconstruction copied neighbours over
+        // partial silhouettes; its old implementation is not an acceptance oracle.
+        StringAssert.Contains(shader, "float strictSupport = aboveWaterVisibility(");
+        StringAssert.Contains(shader, "readGBufferTexel(gOpaqueDepth, uv).r");
+        StringAssert.Contains(shader, "readGBufferTexel(gLiquidDepth, uv).r < 0.99999");
+        StringAssert.Contains(shader, "waterEvidence *= strictSupport;");
+        StringAssert.Contains(shader, "horizontalReflector *= strictSupport;");
+        Assert.IsFalse(shader.Contains("float partialLiquidRecovery = clamp(", StringComparison.Ordinal));
+        // A legacy body is still present but constant-folded away. Require its
+        // gate to stay zero and forbid a later assignment that could revive it.
+        StringAssert.Contains(shader, "float partialLiquidRecovery = 0.0;");
+        Assert.AreEqual(1, System.Text.RegularExpressions.Regex.Matches(
+            shader, @"\bpartialLiquidRecovery\s*=").Count);
         StringAssert.Contains(shader, "* liquidInterfaceDepthVisibility;");
 
         Assert.AreEqual(0.0, InterfaceVisibility(8.0, 7.90), 0.0, "A nearer crossed mesh must occlude water.");
@@ -391,7 +397,7 @@ public sealed class LiquidShaderPhysicsTests
         StringAssert.Contains(shader, "texture(entityMirrorColor, entityMirrorUv)");
         StringAssert.Contains(shader, "if (entityMirrorSupport <= 0.001)");
         StringAssert.Contains(shader, "sampleReflectionSource(fallbackUv)");
-        StringAssert.Contains(shader, "texture(gOpaquePosition, fallbackUv).xyz");
+        StringAssert.Contains(shader, "readGBufferTexel(gOpaquePosition, fallbackUv).xyz");
         StringAssert.Contains(shader, "alpha-tested\n    // foliage and OIT silhouettes");
         StringAssert.Contains(shader, "float fallbackSupport = 1.0 - fallbackRejectedGeometry;");
         StringAssert.Contains(shader, "float filteredSceneSupport = clamp(filteredReflection.a");

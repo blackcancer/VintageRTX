@@ -96,7 +96,11 @@ public sealed class PbrEntityRendererTests
         StringAssert.Contains(shader, "uniform sampler2D entityTex;");
         StringAssert.Contains(shader, "uniform sampler2D vintagertxEntityMaterialTex;");
         StringAssert.Contains(shader, "vec4 unlitTexColor = texture(entityTex, uv);");
-        StringAssert.Contains(shader, "? -float(1 + roughnessBits * 32 + albedoBits) / 1025.0");
+        StringAssert.Contains(shader, "float packedSurface = -float(1 + roughnessBits * 32 + albedoBits) / 1025.0;");
+        StringAssert.Contains(shader, "vintagertxUnlitAlbedo = vec4(unlitLinear, fragPosition.z);");
+        StringAssert.Contains(shader, "outGNormal = vec4(viewShadingNormal, packedSurface);");
+        StringAssert.Contains(shader, "outGNormal.a=0;");
+        StringAssert.Contains(shader, "vintagertxUnlitAlbedo=vec4(0.0);");
         StringAssert.Contains(shader, "float(pbrMaterialBits) / 255.0");
         Assert.IsFalse(shader.Contains(
             "outColor = texture(vintagertxEntityMaterialTex",
@@ -122,8 +126,15 @@ public sealed class PbrEntityRendererTests
 
         StringAssert.Contains(shader, "float dynamicSurface = step(packedSurfaceAlpha, -0.0005);");
         StringAssert.Contains(shader, "float packedSurfaceValue = abs(packedSurfaceAlpha);");
-        StringAssert.Contains(shader, "vec3 dynamicSurfaceAlbedo = authoredAlbedoLuminance >= 0.0");
-        StringAssert.Contains(shader, "? dynamicSurfaceAlbedo");
+        // A valid exact albedo wins; otherwise a dynamic receiver uses its own
+        // raster data and returns before the static voxel reconstruction branch.
+        int helper = shader.IndexOf("vec3 resolveSurfaceBaseColor(", StringComparison.Ordinal);
+        int exact = shader.IndexOf("rawAlbedoMatchesSurface(raw, position, packedAvailable)", helper, StringComparison.Ordinal);
+        int dynamic = shader.IndexOf("if (dynamicSurface > 0.5)", helper, StringComparison.Ordinal);
+        int voxel = shader.IndexOf("return material.a >= 0.05 ? reconstructSurfaceAlbedo", helper, StringComparison.Ordinal);
+        Assert.IsTrue(helper >= 0 && exact > helper && dynamic > exact && voxel > dynamic);
+        StringAssert.Contains(shader[dynamic..voxel], "authoredLuminance >= 0.0");
+        StringAssert.Contains(shader[dynamic..voxel], ": sourceLinear;");
         StringAssert.Contains(shader, "* (1.0 - dynamicSurface)");
     }
 

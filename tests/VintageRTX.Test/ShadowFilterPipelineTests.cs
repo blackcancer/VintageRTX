@@ -195,7 +195,7 @@ public sealed class ShadowFilterPipelineTests
     [TestMethod]
     [TestCategory("Rendering")]
     [TestCategory("Shadow")]
-    public void TemporalHistorySnapsSubCentimetreLightJitterAndRejectsMotion()
+    public void TemporalHistoryPreservesSubCentimetreLightPositionsAndRejectsMotion()
     {
         float[] previous = [10.0f, 20.0f, 30.0f, -2.0f, 4.0f, 8.0f];
         float[] jittered = [10.004f, 20.0f, 30.0f, 1.0f, -2.0f, 4.006f, 8.0f, 1.0f];
@@ -205,8 +205,9 @@ public sealed class ShadowFilterPipelineTests
             2,
             0.01f));
         CollectionAssert.AreEqual(
-            new[] { 10.0f, 20.0f, 30.0f, 1.0f, -2.0f, 4.0f, 8.0f, 1.0f },
-            jittered);
+            new float[] { 10.004f, 20.0f, 30.0f, 1.0f, -2.0f, 4.006f, 8.0f, 1.0f },
+            jittered,
+            "History eligibility must not snap or relocate a physical emitter.");
 
         float[] moved = [10.2f, 20.0f, 30.0f, 1.0f];
         Assert.IsFalse(FilmicDisplayRenderer.StabilizeShadowLightPositions(
@@ -314,14 +315,15 @@ public sealed class ShadowFilterPipelineTests
         StringAssert.Contains(shader, "if (shadowTemporalBlend <= 0.001)");
         StringAssert.Contains(shader, "if (shadowPass == 2)");
         StringAssert.Contains(shader, "if (shadowPass == 1)");
-        StringAssert.Contains(shader, "if (!hasGeometry && deferredGeometryRequired && shadowPass == 0)");
-        StringAssert.Contains(shader, "vec4 repairedPointVisibilityA = vec4(0.0);");
-        StringAssert.Contains(shader, "vec4 repairedPointVisibilityB = vec4(0.0);");
-        StringAssert.Contains(shader, "texture(shadowSunHistory, neighbourUv).r");
-        StringAssert.Contains(shader, "repairedShadowVisibilityCount++;");
-        StringAssert.Contains(shader, "geometryWasRepaired = true;");
-        StringAssert.Contains(shader, "if (geometryWasRepaired");
-        StringAssert.Contains(shader, "&& repairedShadowVisibilityCount >= 2");
+        Assert.IsFalse(shader.Contains("geometryWasRepaired = true;", StringComparison.Ordinal),
+            "Missing geometry must not be grown from neighbouring silhouettes.");
+        string resolve = ShaderKernelBody(shader, "void resolveSurfaceShadow(");
+        StringAssert.Contains(resolve, "planeError > tolerance * 3.0");
+        StringAssert.Contains(resolve, "texelFetch(shadowPointHistoryA, pixel, 0)");
+        StringAssert.Contains(resolve, "texelFetch(shadowPointHistoryB, pixel, 0)");
+        StringAssert.Contains(resolve, "texelFetch(shadowSunHistory, pixel, 0).r");
+        StringAssert.Contains(resolve, "traceRawPointShadowVisibilities(worldPosition, worldNormal, pointA, pointB)");
+        StringAssert.Contains(resolve, "traceRawSunShadowVisibility(worldPosition, relativePosition, worldNormal)");
         StringAssert.Contains(shader, "if (prefilteredShadowVisibility == 0 && !cameraAlignedLight)");
         StringAssert.Contains(shader, "texture(shadowPointHistoryA, uv)");
         StringAssert.Contains(shader, "texture(shadowPointHistoryB, uv)");
@@ -469,7 +471,10 @@ public sealed class ShadowFilterPipelineTests
         StringAssert.Contains(renderer, "EnumRenderStage.Before,\n            \"vintagertx-camera-origin\"");
         StringAssert.Contains(renderer, "api.Event.UnregisterRenderer(this, EnumRenderStage.Before);");
         Assert.IsFalse(renderer.Contains("var floatingOrigin = api.World.Player.Entity.Pos;", StringComparison.Ordinal));
-        StringAssert.Contains(shader, "distance(lightPositionIntensity.xyz, floatingWorldOrigin) < 0.75");
+        Assert.IsFalse(shader.Contains("distance(lightPositionIntensity.xyz, floatingWorldOrigin) < 0.75", StringComparison.Ordinal),
+            "Camera proximity alone must never bypass an emitter visibility query.");
+        StringAssert.Contains(ShaderKernelBody(shader, "void traceRawPointShadowVisibilities("),
+            "bool cameraAlignedLight = false;");
         Assert.IsTrue(CountOccurrences(renderer, "shadowHistoryValid = false;") >= 6);
 
         int filterGateStart = renderer.IndexOf(

@@ -595,7 +595,8 @@ public sealed class FilmicDisplayRendererLogicCoverageTests
         {
             Environment.SetEnvironmentVariable("VINTAGERTX_TEST_RUN_ID", previousRun);
         }
-        Assert.AreEqual(4, GetField<int>(renderer, "availableDynamicLightCount"));
+        Assert.AreEqual(2, GetField<int>(renderer, "availableDynamicLightCount"),
+                "The zero-energy and non-finite entries are not available emitter candidates.");
 
         SetField(renderer, "voxelTextureReady", false);
         SetField(renderer, "gBufferAvailable", false);

@@ -68,7 +68,7 @@ public sealed class DisplayShaderAssetTests
 
     /// <summary>
     /// Verifies that unresolved microfacet peaks are integrated over a finite
-    /// pixel footprint and receive a continuous energy shoulder, while the
+    /// pixel footprint without an empirical post-BRDF energy ceiling, while the
     /// clean reflection behind a first-person overlay remains inspectable.
     /// </summary>
     [TestMethod]
@@ -80,10 +80,12 @@ public sealed class DisplayShaderAssetTests
         StringAssert.Contains(fragment, "float filterSpecularRoughness(");
         StringAssert.Contains(fragment, "float normalFootprintVariance = clamp(");
         StringAssert.Contains(fragment, "authoredVariance + normalFootprintVariance");
-        StringAssert.Contains(fragment, "vec3 softLimitSpecularRadiance(");
-        StringAssert.Contains(fragment, "float specularEnergyCeiling = max(");
-        StringAssert.Contains(fragment, "1.0 - exp(-excess / shoulderRange)");
-        StringAssert.Contains(fragment, "directSpecularRadiance = softLimitSpecularRadiance(");
+        // Numerical GPU tests qualify the real GGX lobe and footprint filter.
+        // Do not require the removed empirical radiance clamp to be restored.
+        StringAssert.Contains(fragment, "materialFresnel(f0, vh)");
+        StringAssert.Contains(fragment, "vec3 directSpecularRadiance = voxelLighting.directSpecular");
+        Assert.IsFalse(fragment.Contains("directSpecularRadiance = softLimitSpecularRadiance(",
+            StringComparison.Ordinal), "Direct transport must not reintroduce an empirical energy ceiling.");
         StringAssert.Contains(fragment, "coherent world reflection behind a detected first-person overlay");
         Assert.IsFalse(fragment.Contains(
             "if (primaryFirstPersonOverlay > 0.001)\n        {\n            outColor = vec4(0.0",

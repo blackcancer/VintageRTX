@@ -293,15 +293,12 @@ public sealed class CoverageFilmicResidualTests
                     _ => RuntimeCoverageDispatchProxy.DefaultValue(method.ReturnType)
                 }));
 
-            TargetInvocationException failure = Assert.ThrowsException<TargetInvocationException>(() =>
-                Invoke(
-                    renderer,
-                    "RenderEntityMirror",
-                    harness.Config,
-                    harness.FrameWidth,
-                    harness.FrameHeight,
-                    false));
-            Assert.IsNotNull(failure.InnerException);
+            // This fixture has no usable mirror depth projection. The public
+            // rendering boundary now rejects it before touching OpenGL instead
+            // of leaking a reflection-wrapped native-context exception.
+            Assert.IsFalse(Invoke<bool>(renderer, "RenderEntityMirror",
+                harness.Config, harness.FrameWidth, harness.FrameHeight, false));
+            Assert.IsFalse(GetField<bool>(renderer, "faulted"));
             Assert.AreEqual(1, projectionStack.Count, "The mirror guard must restore the projection stack.");
         }
         finally

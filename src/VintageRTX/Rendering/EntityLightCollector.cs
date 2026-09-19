@@ -37,10 +37,19 @@ internal sealed class EntityLightCollector
     public IReadOnlyList<TrackedEntityLight> Collect(double cameraX, double cameraY, double cameraZ, float range)
     {
         lights.Clear(); seen.Clear();
-        Entity? player = api.World.Player?.Entity;
-        if (player is null) return lights;
+        // A client world and its entity collection can be absent during startup,
+        // teardown, or a headless render fixture. Engine light arrays remain a
+        // separate fallback; do not dereference a half-initialized world here.
+        IClientWorldAccessor? world = api.World;
+        Entity? player = world?.Player?.Entity;
+        var loadedEntities = world?.LoadedEntities;
+        if (player?.Pos is null || loadedEntities is null)
+        {
+            identities.Clear();
+            return lights;
+        }
         double rangeSquared = (range + 4.0) * (range + 4.0);
-        foreach (Entity entity in api.World.LoadedEntities.Values)
+        foreach (Entity entity in loadedEntities.Values)
         {
             if (entity is null || entity.Pos is null || entity.Pos.Dimension != player.Pos.Dimension) continue;
             double dx = entity.Pos.X - cameraX, dy = entity.Pos.Y - cameraY, dz = entity.Pos.Z - cameraZ;
@@ -74,7 +83,8 @@ internal sealed class EntityLightCollector
                         }
                     }
                 }
-                if (!EmitterAppearance.TryResolve(source?.Collectible?.Code ?? entity.Code,
+                AssetLocation? sourceCode = source?.Collectible?.Code ?? entity.Code;
+                if (sourceCode is null || !EmitterAppearance.TryResolve(sourceCode,
                     source?.Collectible?.Attributes ?? entity.Properties?.Attributes, hsv, catalog, out EmitterAppearance appearance)) continue;
                 seen.Add(entity.EntityId);
                 if (!identities.TryGetValue(entity.EntityId, out int index))
@@ -86,7 +96,7 @@ internal sealed class EntityLightCollector
                 EmitterPhotometry p = appearance.Photometry;
                 VoxelLight light = new((float)entity.Pos.X, (float)(entity.Pos.Y + height), (float)entity.Pos.Z,
                     appearance.Red, appearance.Green, appearance.Blue, p.LuminousIntensityCandela,
-                    (source?.Collectible?.Code ?? entity.Code).ToString(), [], p.SourceHalfWidthMetres,
+                    sourceCode.ToString(), [], p.SourceHalfWidthMetres,
                     p.SourceHalfHeightMetres, p.CutoffIlluminanceLux, p.Basis);
                 lights.Add(new TrackedEntityLight(index, entity.EntityId, entity.EntityId == player.EntityId, light));
             }

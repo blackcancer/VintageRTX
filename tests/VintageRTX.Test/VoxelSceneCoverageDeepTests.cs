@@ -270,31 +270,47 @@ public sealed class VoxelSceneCoverageDeepTests
     /// Verifies the block Change Lifecycle Separates Outside Dirty And Emissive Rebuild Paths regression contract against deterministic fixture data.
     /// </summary>
     [TestMethod]
-    public void BlockChangeLifecycleSeparatesOutsideDirtyAndEmissiveRebuildPaths()
+    public void BlockChangeLifecycleCoalescesSameDimensionEditsAndRefreshesEmitters()
     {
         FixtureBlock old = Block(30, "game:old", EnumBlockMaterial.Stone);
         FixtureBlock current = Block(31, "game:current", EnumBlockMaterial.Stone);
         FixtureBlock torch = Block(32, "game:torch", EnumBlockMaterial.Stone);
         torch.Light = [5, 8, 16];
-        using SceneFixture fixture = new(meshes: new Dictionary<int, MeshData?>
+        using SceneFixture fixture = new(withPlayer: true, meshes: new Dictionary<int, MeshData?>
         {
             [30] = CubeMesh(),
             [31] = CubeMesh(),
             [32] = QuadMesh(0.5f)
         });
         fixture.SetOrigins(0, 0, 0, 0, 0, 0);
+        fixture.SetField("generation", 1);
+        fixture.SetField("rebuildRequested", false);
+        int dimension = fixture.Field<ICoreClientAPI>("api").World.Player.Entity.Pos.Dimension;
+        fixture.Invoke<object>("OnBlockChanged", new BlockPos(2, 2, 2, dimension + 1), old);
+        Assert.AreEqual(0, fixture.Field<ConcurrentDictionary<(int, int, int), byte>>("dirtyBlocks").Count);
         fixture.SetSolid(2, 2, 2, current);
         fixture.Invoke<object>("OnBlockChanged", new BlockPos(999, 999, 999), old);
         Assert.AreEqual(0, fixture.Field<ConcurrentDictionary<(int, int, int), byte>>("dirtyBlocks").Count);
 
-        fixture.Invoke<object>("OnBlockChanged", new BlockPos(2, 2, 2), old);
+        fixture.Invoke<object>("OnBlockChanged", new BlockPos(2, 2, 2, dimension), old);
         Assert.AreEqual(1, fixture.Field<ConcurrentDictionary<(int, int, int), byte>>("dirtyBlocks").Count);
         fixture.SetFluid(2, 2, 2, current);
-        fixture.Invoke<object>("OnBlockChanged", new BlockPos(2, 2, 2), old);
+        fixture.Invoke<object>("OnBlockChanged", new BlockPos(2, 2, 2, dimension), old);
         fixture.SetSolid(2, 2, 2, torch);
-        fixture.Invoke<object>("OnBlockChanged", new BlockPos(2, 2, 2), current);
-        Assert.IsTrue(fixture.Field<bool>("rebuildRequested"));
+        fixture.Invoke<object>("OnBlockChanged", new BlockPos(2, 2, 2, dimension), current);
+        Assert.IsFalse(fixture.Field<bool>("rebuildRequested"),
+            "Changing an emitter must not force a full terrain-volume rebuild.");
+        Assert.AreEqual(1, fixture.Field<ConcurrentDictionary<(int, int, int), byte>>("dirtyBlocks").Count);
+        fixture.Invoke<object>("ProcessDirtyBlocks");
         Assert.AreEqual(0, fixture.Field<ConcurrentDictionary<(int, int, int), byte>>("dirtyBlocks").Count);
+        Assert.AreEqual(1, fixture.Field<VoxelLight[]>("readyLights").Length);
+        Assert.AreEqual("game:torch", fixture.Field<VoxelLight[]>("readyLights")[0].Code);
+        Assert.IsTrue(fixture.Field<bool>("liveLightsUploadPending"));
+        Assert.IsTrue(fixture.Field<bool>("radianceRefreshRequested"));
+        using SceneFixture noPlayer = new();
+        noPlayer.SetOrigins(0, 0, 0, 0, 0, 0);
+        noPlayer.Invoke<object>("OnBlockChanged", new BlockPos(2, 2, 2), old);
+        Assert.AreEqual(0, noPlayer.Field<ConcurrentDictionary<(int, int, int), byte>>("dirtyBlocks").Count);
 
         Assert.IsFalse(fixture.Invoke<bool>("BlockEmitsLight", null, new BlockPos(0)));
         Assert.IsFalse(fixture.Invoke<bool>("BlockEmitsLight", Block(0, "game:air", EnumBlockMaterial.Air), new BlockPos(0)));
@@ -986,7 +1002,9 @@ public sealed class VoxelSceneCoverageDeepTests
         unknownEmitter.Code = null;
         unknownEmitter.Light = [1, 1, 8];
         fixture.Invoke<object>("CollectLight", unknownEmitter, 0, 0, 0);
-        Assert.AreEqual("unknown", fixture.Field<List<VoxelLight>>("buildLights")[1].Code);
+        Assert.AreEqual(1, fixture.Field<List<VoxelLight>>("buildLights").Count,
+            "An emitter without a canonical code is rejected, not published as a fictitious second source.");
+        Assert.AreEqual("game:lantern", fixture.Field<List<VoxelLight>>("buildLights")[0].Code);
 
         FixtureBlock shortLight = Block(54, "game:shortlight", EnumBlockMaterial.Stone);
         shortLight.Light = [1, 2];
