@@ -100,6 +100,21 @@ jobs:
         run: |
           set -euo pipefail
           "$RUNNER_TEMP/ray-tests/bin/python" -m unittest discover -s tests/materials -v 2>&1 | tee "$RUNNER_TEMP/recovery-evidence/material-tests.log"
+      - name: Execute secondary transport and its known-defect mutation
+        shell: bash
+        env:
+          LIBGL_ALWAYS_SOFTWARE: '1'
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/ray-tests/bin/python" - <<'PY' 2>&1 | tee "$RUNNER_TEMP/recovery-evidence/transport-tests.log"
+          import unittest
+          suite = unittest.TestLoader().discover('tests/transport')
+          if suite.countTestCases() < 5:
+              raise SystemExit('The required secondary-transport suite is incomplete.')
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          if result.testsRun < 5 or result.skipped or not result.wasSuccessful():
+              raise SystemExit('Secondary transport was not completely executed and passed.')
+          PY
       - name: Archive text and test-report evidence only
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
