@@ -103,10 +103,10 @@ texelFetch(lights,p,0).xyz,m.a,m.rgb),1.);}''')
         np.testing.assert_array_equal(self.evaluate(n,v,l,np.full(3,.4),np.ones((3,3))),0)
     def test_raw_material_rejects_different_geometry(self):
         source='''#version 330 core
-uniform vec4 raw;uniform vec3 position;uniform float packed;
+uniform vec4 raw;uniform vec3 position;uniform float surfacePresent;
 layout(location=0) out vec4 result;
 '''+function(self.source,'bool rawAlbedoMatchesSurface(')+'''
-void main(){result=vec4(rawAlbedoMatchesSurface(raw,position,packed)?1.:0.);}'''
+void main(){result=vec4(rawAlbedoMatchesSurface(raw,position,surfacePresent)?1.:0.);}'''
         program=self.ctx.program(vertex_shader=VERTEX,fragment_shader=source)
         vao=self.ctx.vertex_array(program,[]);tex=self.ctx.texture((1,1),4,dtype='f4');fbo=self.ctx.framebuffer([tex])
         try:
@@ -114,7 +114,7 @@ void main(){result=vec4(rawAlbedoMatchesSurface(raw,position,packed)?1.:0.);}'''
                 ((.72,.31,.08,0),(0,0,-3),1,0),((.72,.31,.08,-3),(0,0,-3),0,0),
                 ((float('nan'),.3,.1,-3),(0,0,-3),1,0)]
             for raw,position,packed,expected in cases:
-                program['raw'].value=raw;program['position'].value=position;program['packed'].value=packed
+                program['raw'].value=raw;program['position'].value=position;program['surfacePresent'].value=packed
                 fbo.use();self.ctx.viewport=(0,0,1,1);vao.render(vertices=3)
                 self.assertEqual(np.frombuffer(tex.read(),dtype='f4')[0],expected)
         finally:fbo.release();tex.release();vao.release();program.release()
