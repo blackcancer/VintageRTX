@@ -2,15 +2,16 @@ name: Reported renderer regressions
 on:
   push:
     branches: [dev/renderer-recovery-20260918]
-    paths: ['.github/workflows/reported-regressions.yml', 'src/**', 'tests/**', 'tools/recovery/repair_reported_regressions.py', 'tools/VintageRTX.RenderLab/**']
+    paths: ['.github/workflows/reported-regressions.yml', 'src/**', 'tests/**', 'tools/VintageRTX.RenderLab/**']
   workflow_dispatch:
 permissions:
   contents: read
 concurrency:
   group: reported-regressions-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 jobs:
-  reproduce:
+  regressions:
+    name: Reported classes and synthetic RenderLab (not in-game acceptance)
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -26,7 +27,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/evidence" "$RUNNER_TEMP/vs-client"
           git rev-parse HEAD > "$RUNNER_TEMP/evidence/source-commit.txt"
           sudo apt-get update -qq
-          sudo apt-get install -y -qq libegl1-mesa-dev libgl1-mesa-dri libgl-dev libglfw3 xvfb libxinerama1 libxcursor1
+          sudo apt-get install -y -qq libegl1-mesa-dev libgl1-mesa-dri libgl-dev libglfw3 xvfb libxinerama1 libxcursor1 > "$RUNNER_TEMP/evidence/packages.log"
           curl -fsSL --retry 2 --max-time 180 'https://cdn.vintagestory.at/gamefiles/stable/vs_client_linux-x64_1.22.7.tar.gz' -o "$RUNNER_TEMP/client.tar.gz"
           sha256sum "$RUNNER_TEMP/client.tar.gz" > "$RUNNER_TEMP/evidence/client.sha256"
           tar -xzf "$RUNNER_TEMP/client.tar.gz" -C "$RUNNER_TEMP/vs-client"
@@ -40,7 +41,7 @@ jobs:
             dotnet restore "$project" --source https://api.nuget.org/v3/index.json
             dotnet build "$project" -c Release --no-restore
           done
-      - name: Execute complete reported unit and integration classes
+      - name: Execute complete reported classes with the shared local filter
         id: unit
         continue-on-error: true
         env:
@@ -48,9 +49,8 @@ jobs:
         run: |
           set -euo pipefail
           export LD_LIBRARY_PATH="$VINTAGE_STORY/Lib:${LD_LIBRARY_PATH:-}"
-          filter='FullyQualifiedName~CoverageFilmicResidualTests|FullyQualifiedName~DisplayShaderAssetTests|FullyQualifiedName~FilmicDisplayRendererLogicCoverageTests|FullyQualifiedName~LiquidShaderPhysicsTests|FullyQualifiedName~PbrEntityRendererTests|FullyQualifiedName~ShadowFilterPipelineTests|FullyQualifiedName~VoxelSceneCoverageDeepTests'
           code=0
-          xvfb-run -a dotnet test tests/VintageRTX.Test/VintageRTX.Test.csproj -c Release --no-build --no-restore --filter "$filter" --logger 'trx;LogFileName=reported.trx' --results-directory "$RUNNER_TEMP/evidence" > "$RUNNER_TEMP/evidence/reported.log" 2>&1 || code=$?
+          xvfb-run -a dotnet test tests/VintageRTX.Test/VintageRTX.Test.csproj -c Release --no-build --no-restore --settings tests/reported-regressions.runsettings --logger 'trx;LogFileName=reported.trx' --results-directory "$RUNNER_TEMP/evidence" > "$RUNNER_TEMP/evidence/reported.log" 2>&1 || code=$?
           echo "Reported class process exit code: $code"
           exit "$code"
       - name: Execute unchanged RenderLab production acceptance
@@ -92,9 +92,22 @@ jobs:
         with:
           name: reported-regressions-${{ github.sha }}
           path: ${{ runner.temp }}/evidence/
+          if-no-files-found: error
           retention-days: 14
-      - name: Preserve failures as failures
+      - name: Require successful execution and reject empty or skipped campaigns
         if: always()
         run: |
           test '${{ steps.unit.outcome }}' = success
           test '${{ steps.lab.outcome }}' = success
+          python3 - <<'PY'
+          import os, pathlib, xml.etree.ElementTree as E
+          folder=pathlib.Path(os.environ['RUNNER_TEMP'])/'evidence'
+          for name,minimum in [('reported',98),('renderlab',1)]:
+              root=E.parse(folder/(name+'.trx')).getroot()
+              results=[n for n in root.iter() if n.tag.endswith('UnitTestResult')]
+              if len(results)<minimum or any(n.get('outcome')!='Passed' for n in results):
+                  raise SystemExit(f'{name}: required campaign missing, failed or skipped')
+              print(f'{name}: {len(results)} tests executed and passed.')
+              if name=='renderlab' and (len(results)!=1 or results[0].get('testName')!='ProductionShaderCompilesAndRendersHeadlessly'):
+                  raise SystemExit('The requested RenderLab test was not executed.')
+          PY
