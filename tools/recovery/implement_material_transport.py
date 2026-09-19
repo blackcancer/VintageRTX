@@ -25,10 +25,11 @@ code=once(code,'''        api.Event.UnregisterRenderer(rawAlbedoCapture, EnumRen
             api.Event.UnregisterRenderer(rawAlbedoCapture, EnumRenderStage.Opaque);
             rawAlbedoCapture.Dispose();
         }''')
-# Shader creation also occurs during initialization. Only explicit reload invalidates an
-# active opaque transaction: scope the replacement to that method, not both occurrences.
 old="s=once(s,'''            shader = CreateShader();''', '''            rawAlbedoCapture.ReloadShader();\n            shader = CreateShader();''')"
 new="a,o,b=span(s,'    public bool ReloadShader()')\nmethod=once(s[a:b], '            shader = CreateShader();', '            rawAlbedoCapture.ReloadShader();\\n            shader = CreateShader();')\ns=s[:a]+method+s[b:]"
+code=once(code,old,new)
+old='method=once(method,\'\'\'            shader.BindTexture2D("sourceColor", sourceColorTexture, 0);\'\'\', \'\'\'            shader.BindTexture2D("sourceColor", sourceColorTexture, 0);'
+new='method=once(method,\'\'\'            shaderActive = true;\n            shader.BindTexture2D("sourceColor", sourceColorTexture, 0);\'\'\', \'\'\'            shaderActive = true;\n            shader.BindTexture2D("sourceColor", sourceColorTexture, 0);'
 code=once(code,old,new)
 exec(compile(code,str(recipe),'exec'),{'__file__':str(recipe),'__name__':'__main__'})
 p='src/VintageRTX/assets/vintagertx/shaders/display.frag'
