@@ -11,7 +11,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   source-checks:
-    name: Compilation, blocker smoke and GLSL (not in-game acceptance)
+    name: Compilation, blocker smoke, raw MRT and GLSL (not in-game acceptance)
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -58,6 +58,25 @@ jobs:
           if [ "$code" -ne 0 ]; then tail -80 "$RUNNER_TEMP/recovery-evidence/blocker-smoke.log"; exit "$code"; fi
           python3 tools/recovery/check_blocker_smoke.py "$RUNNER_TEMP/recovery-evidence/blocker-smoke.trx" \
             | tee "$RUNNER_TEMP/recovery-evidence/blocker-smoke-summary.json"
+      - name: Execute production raw-albedo target with a real OpenGL context
+        shell: bash
+        env:
+          LIBGL_ALWAYS_SOFTWARE: '1'
+        run: |
+          set -euo pipefail
+          export LD_LIBRARY_PATH="$VINTAGE_STORY/Lib:${LD_LIBRARY_PATH:-}"
+          xvfb-run -a dotnet test tests/VintageRTX.Test/VintageRTX.Test.csproj -c Release --no-build --no-restore \
+            --filter FullyQualifiedName~RawAlbedoTargetTests --logger 'trx;LogFileName=raw-albedo.trx' \
+            --results-directory "$RUNNER_TEMP/recovery-evidence" \
+            2>&1 | tee "$RUNNER_TEMP/recovery-evidence/raw-albedo.log"
+          python3 - <<'PY'
+          import os, pathlib, xml.etree.ElementTree as E
+          report = E.parse(pathlib.Path(os.environ['RUNNER_TEMP'])/'recovery-evidence/raw-albedo.trx')
+          results = [n for n in report.iter() if n.tag.endswith('UnitTestResult')]
+          if len(results) != 1 or results[0].get('outcome') != 'Passed' or results[0].get('testName') != 'RawAttachmentKeepsColourAndRestoresNativeState':
+              raise SystemExit('The required raw-albedo state and colour test was not executed successfully.')
+          print('RawAlbedoTarget: required test executed and passed.')
+          PY
       - name: Execute production GLSL against independent ray-box oracles
         shell: bash
         env:
@@ -74,6 +93,13 @@ jobs:
         run: |
           set -euo pipefail
           "$RUNNER_TEMP/ray-tests/bin/python" -m unittest discover -s tests/feedback -v 2>&1 | tee "$RUNNER_TEMP/recovery-evidence/feedback-tests.log"
+      - name: Execute material Fresnel, energy, albedo and normal-map checks
+        shell: bash
+        env:
+          LIBGL_ALWAYS_SOFTWARE: '1'
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/ray-tests/bin/python" -m unittest discover -s tests/materials -v 2>&1 | tee "$RUNNER_TEMP/recovery-evidence/material-tests.log"
       - name: Archive text and test-report evidence only
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
