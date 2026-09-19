@@ -477,13 +477,18 @@ internal static class PreflightSuite
             && shader.Contains("unresolvedMaterialConfidence", StringComparison.Ordinal)
             && shader.Contains("compositeRadiance += unresolvedMaterialRadiance", StringComparison.Ordinal),
             "bounded unresolved material energy for foliage/conductors missing");
-        Assert(shader.Contains("Performance mode retains a genuine indirect sun path", StringComparison.Ordinal)
-            && shader.Contains("bounceSunDistance", StringComparison.Ordinal),
-            "performance-tier secondary sun bounce missing");
+        // The same solar visibility path is evaluated independently of the sky-ray budget.
+        // tests/transport also executes blocked-sun/visible-sky and converse fixtures.
+        Assert(shader.Contains("float bouncedSunVisibility = traceSunVisibility(", StringComparison.Ordinal)
+            && shader.Contains("bouncedSunReceiver * bouncedSunVisibility * sunLightStrength", StringComparison.Ordinal)
+            && !shader.Contains("bouncedSunVisibility = bouncedSkyVisibility", StringComparison.Ordinal),
+            "secondary solar visibility must be traced independently rather than borrowed from a sky sample");
         Assert(shader.Contains("traceVoxelDiffuseBounce", StringComparison.Ordinal), "off-screen voxel diffuse bounce missing");
         Assert(!shader.Contains("bounceTrace", StringComparison.Ordinal), "temporary voxel-bounce trace instrumentation remains");
         Assert(shader.Contains("secondary radiance", StringComparison.Ordinal), "voxel-bounce radiance diagnostic missing");
-        Assert(shader.Contains("diffuseReflectance", StringComparison.Ordinal), "voxel-bounce diffuse reflectance floor missing");
+        Assert(shader.Contains("accumulated += linearHitAlbedo * incident * distanceFade", StringComparison.Ordinal)
+            && shader.Contains("maximumComponent(linearHitAlbedo) <= 0.0", StringComparison.Ordinal),
+            "secondary transport must preserve material RGB without inventing a neutral reflectance floor");
         Assert(shader.Contains("transparencyRisk", StringComparison.Ordinal), "opaque/transparent relighting split missing");
         Assert(shader.Contains("float daylightRelighting = smoothstep(", StringComparison.Ordinal)
             && shader.Contains("float enclosedPhysicalRelighting = mix(", StringComparison.Ordinal)
