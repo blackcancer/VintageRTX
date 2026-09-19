@@ -2,7 +2,7 @@ name: Validate and publish secondary transport
 on:
   push:
     branches: [dev/renderer-recovery-20260918]
-    paths: ['tools/recovery/apply_secondary_transport.py', 'tests/transport/**', '.github/workflows/publish-secondary-transport.yml']
+    paths: ['tools/recovery/*secondary*', 'tests/transport/**', '.github/workflows/publish-secondary-transport.yml']
 permissions:
   contents: write
 concurrency:
@@ -25,6 +25,7 @@ jobs:
           git rev-parse HEAD > "$RUNNER_TEMP/transport-evidence/staging-commit.txt"
           test "$(git hash-object src/VintageRTX/assets/vintagertx/shaders/display.frag)" = 7176cd73c9415da71898ad4294df5da2749b941a
           python3 tools/recovery/apply_secondary_transport.py
+          python3 tools/recovery/finish_secondary_contracts.py
           git diff --check
           git diff --stat > "$RUNNER_TEMP/transport-evidence/change-stat.txt"
       - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9
@@ -73,14 +74,14 @@ jobs:
           xvfb-run -a dotnet test tests/VintageRTX.Test/VintageRTX.Test.csproj -c Release --no-build --no-restore --filter FullyQualifiedName~RawAlbedoTargetTests --logger 'trx;LogFileName=raw-albedo.trx' --results-directory "$RUNNER_TEMP/transport-evidence" > "$RUNNER_TEMP/transport-evidence/raw-albedo.log" 2>&1 || code=$?
           cat "$RUNNER_TEMP/transport-evidence/raw-albedo.log"
           if [ "$code" -ne 0 ]; then exit "$code"; fi
-      - name: Publish ordinary tested shader without overwriting concurrent commits
+      - name: Publish ordinary tested sources without overwriting concurrent commits
         shell: bash
         run: |
           set -euo pipefail
           remote=$(git ls-remote origin refs/heads/dev/renderer-recovery-20260918 | cut -f1)
           test "$remote" = "$GITHUB_SHA"
           git diff --check
-          git add src/VintageRTX/assets/vintagertx/shaders/display.frag
+          git add src/VintageRTX/assets/vintagertx/shaders/display.frag tests/VintageRTX.Test/PreflightSuite.cs
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git commit -m 'fix(rendering): preserve secondary-light visibility, source ownership and geometric precision'
