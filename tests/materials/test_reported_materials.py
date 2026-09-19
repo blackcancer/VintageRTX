@@ -18,6 +18,7 @@ class ReportedMaterialTests(unittest.TestCase):
         cls.source = (ROOT/'src/VintageRTX/assets/vintagertx/shaders/display.frag').read_text(encoding='utf-8')
         cls.fragment = '''#version 330 core
 const vec3 LUMA=vec3(.2126,.7152,.0722);
+const vec2 inverseFrameSize=vec2(1.0);
 vec2 uv=vec2(.5);uniform sampler2D sourceColor;uniform int albedoDetailSamples;
 uniform int rawAlbedoEnabled;
 uniform vec3 fixtureSource;uniform vec4 fixtureMaterial;uniform float fixtureLuminance;
