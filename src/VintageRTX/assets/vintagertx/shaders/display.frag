@@ -1,6 +1,8 @@
 #version 330 core
 
 uniform sampler2D sourceColor;
+uniform sampler2D gUnlitAlbedo;
+uniform int rawAlbedoEnabled;
 uniform sampler2D reflectionSourceColor;
 uniform sampler2D entityMirrorColor;
 uniform sampler2D entityMirrorDepth;
@@ -2620,42 +2622,34 @@ vec3 traceVoxelDiffuseBounce(
     return accumulated / float(max(voxelBounceRayCount, 1));
 }
 
-vec3 evaluateDirectSpecular(
-    vec3 worldNormal,
-    vec3 viewDirection,
-    vec3 lightDirection,
-    float roughness)
+vec3 materialFresnel(vec3 f0, float cosine)
 {
-    float normalLight = max(dot(worldNormal, lightDirection), 0.0);
-    float normalView = max(dot(worldNormal, viewDirection), 0.001);
-    if (normalLight <= 0.001)
-    {
-        return vec3(0.0);
-    }
-
-    vec3 halfDirection = normalize(viewDirection + lightDirection);
-    float normalHalf = max(dot(worldNormal, halfDirection), 0.0);
-    float viewHalf = max(dot(viewDirection, halfDirection), 0.0);
-    float alpha = max(roughness * roughness, 0.035);
-    float alphaSquared = alpha * alpha;
-    float denominator = normalHalf * normalHalf
-        * (alphaSquared - 1.0) + 1.0;
-    float distribution = alphaSquared
-        / max(3.14159265 * denominator * denominator, 0.0001);
-    float geometryK = (alpha + 1.0) * (alpha + 1.0) * 0.125;
-    float geometryView = normalView
-        / (normalView * (1.0 - geometryK) + geometryK);
-    float geometryLight = normalLight
-        / (normalLight * (1.0 - geometryK) + geometryK);
-    vec3 fresnel = vec3(0.04)
-        + vec3(0.96) * pow(1.0 - viewHalf, 5.0);
-    // Incoming radiance is multiplied by this term; N.L is included
-    // here so the result is the complete reflected light contribution.
-    return min(
-        fresnel * distribution * geometryView * geometryLight
-            * normalLight / max(4.0 * normalView * normalLight, 0.001),
-        vec3(3.0));
+    vec3 reflectance = clamp(f0, vec3(0.0), vec3(1.0));
+    float grazing = pow(1.0 - clamp(cosine, 0.0, 1.0), 5.0);
+    return reflectance + (vec3(1.0) - reflectance) * grazing;
 }
+
+vec3 evaluateDirectSpecular(
+    vec3 worldNormal, vec3 viewDirection, vec3 lightDirection, float roughness, vec3 f0)
+{
+    float nv = dot(worldNormal, viewDirection);
+    float nl = dot(worldNormal, lightDirection);
+    vec3 halfVector = viewDirection + lightDirection;
+    float halfLengthSquared = dot(halfVector, halfVector);
+    if (nv <= 0.0 || nl <= 0.0 || halfLengthSquared <= 1e-12) return vec3(0.0);
+    vec3 h = halfVector * inversesqrt(halfLengthSquared);
+    float nh = clamp(dot(worldNormal, h), 0.0, 1.0);
+    float vh = clamp(dot(viewDirection, h), 0.0, 1.0);
+    float alpha = max(roughness * roughness, 0.0025);
+    float a2 = alpha * alpha;
+    float denominator = nh * nh * (a2 - 1.0) + 1.0;
+    float distribution = a2 / max(3.141592653589793 * denominator * denominator, 1e-12);
+    float lambdaV = nl * sqrt(max(nv * nv * (1.0 - a2) + a2, 0.0));
+    float lambdaL = nv * sqrt(max(nl * nl * (1.0 - a2) + a2, 0.0));
+    float visibility = 0.5 / max(lambdaV + lambdaL, 1e-8);
+    return materialFresnel(f0, vh) * distribution * visibility * nl;
+}
+
 
 float filterSpecularRoughness(
     float authoredRoughness,
@@ -3028,6 +3022,7 @@ VoxelLightingResult traceVoxelPointLight(
     vec3 worldGeometricNormal,
     float surfaceRoughness,
     float authoredMetallicHint,
+    vec3 materialF0,
     vec4 filteredPointVisibilityA,
     vec4 filteredPointVisibilityB,
     float filteredSunVisibility)
@@ -3050,10 +3045,9 @@ VoxelLightingResult traceVoxelPointLight(
     result.skyDirect = vec3(0.0);
     result.material = sampleVoxelAtWorld(
         worldPosition - worldGeometricNormal * 0.08);
-    float voxelMetallicHint = smoothstep(0.66, 0.74, result.material.a);
-    float directSpecularHint = max(
-        max(authoredMetallicHint, voxelMetallicHint),
-        1.0 - smoothstep(0.38, 0.72, surfaceRoughness));
+    // A rough dielectric still reflects light. Evaluate its real material lobe instead
+    // of switching normal-map response off at an arbitrary roughness threshold.
+    float directSpecularHint = 1.0;
     result.shadow = 0.0;
     result.visibility = 1.0;
     result.sunVisibility = 1.0;
@@ -3189,7 +3183,8 @@ VoxelLightingResult traceVoxelPointLight(
                     worldNormal,
                     worldViewDirection,
                     lightDirection,
-                    surfaceRoughness);
+                    surfaceRoughness,
+                    materialF0) * emissiveLightStrength;
         }
         vec3 blockedDirect = unoccludedDirect * (1.0 - visibility);
         result.blockedDirect += blockedDirect;
@@ -3277,7 +3272,8 @@ VoxelLightingResult traceVoxelPointLight(
                     worldNormal,
                     worldViewDirection,
                     sunDirection,
-                    surfaceRoughness);
+                    surfaceRoughness,
+                    materialF0) * sunLightStrength;
         }
         // Keep the diagnostic mask normalized across the day. Lighting
         // energy still uses the PBR normal above, while projected
@@ -3448,22 +3444,23 @@ vec3 shadeVoxelReflectionHit(
     // A confirmed off-screen hit needs enough unresolved indirect
     // radiance to survive Fresnel on dark metals. This remains entirely
     // hit-local, adds no lookup and cannot create a global specular veil.
-    vec3 reflectedColor = hitAlbedo * 0.115;
+    vec3 linearAlbedo = srgbToLinear(clamp(hitAlbedo, 0.0, 1.0));
+    vec3 reflectedColor = linearAlbedo * sampleVoxelIrradiance(hitPosition, hitNormal)
+        * pointLightBounceStrength;
     float sunReceiver = max(dot(hitNormal, sunDirection), 0.0);
     float reflectedSunVisibility = sunReceiver > 0.0
         ? traceSunVisibility(hitPosition - floatingWorldOrigin,
             hitPosition + hitNormal * 0.02 + sunDirection * 0.005)
         : 0.0;
-    reflectedColor += hitAlbedo
-        * sunColorStrength.rgb
+    reflectedColor += linearAlbedo
+        * srgbToLinear(sunColorStrength.rgb)
         * sunColorStrength.w
         * sunReceiver
-        * reflectedSunVisibility
-        * 0.42;
+        * reflectedSunVisibility * sunLightStrength;
 
     for (int lightIndex = 0; lightIndex < MAX_VOXEL_LIGHTS; lightIndex++)
     {
-        if (lightIndex >= voxelLightCount || lightIndex >= 2)
+        if (lightIndex >= voxelLightCount)
         {
             break;
         }
@@ -3492,16 +3489,15 @@ vec3 shadeVoxelReflectionHit(
             ? traceVoxelVisibility(hitPosition + hitNormal * 0.02 + lightDirection * 0.005,
                 lightPositionIntensity.xyz, lightIndex)
             : 0.0;
-        reflectedColor += hitAlbedo
-            * lightColorRadius.rgb
+        reflectedColor += linearAlbedo
+            * emitterColor(lightColorRadius.rgb)
             * receiver
             * reflectedLightVisibility
             * radiusFade
-            * incidentRadiance
-            * 0.75;
+            * incidentRadiance * emissiveLightStrength;
     }
 
-    return clamp(reflectedColor, 0.0, 1.4);
+    return linearToSrgb(max(reflectedColor, vec3(0.0)));
 }
 
 ReflectionResult traceVoxelReflection(
@@ -3552,26 +3548,8 @@ ReflectionResult traceVoxelReflection(
     vec3 incidentDirection = normalize(worldPosition - cameraWorldPosition);
     vec3 rayDirection = normalize(reflect(incidentDirection, worldNormal));
 
-    // One coherent cone sample widens rough reflections. Keep its phase
-    // deterministic: rotating this single sample every frame produces a
-    // sparse point-cloud before history converges and visibly sparkles
-    // whenever camera motion invalidates that history. The authored
-    // normal map already supplies spatial variation at material scale.
-    if (roughness > 0.04)
-    {
-        vec3 helper = abs(rayDirection.y) < 0.95
-            ? vec3(0.0, 1.0, 0.0)
-            : vec3(1.0, 0.0, 0.0);
-        vec3 tangent = normalize(cross(helper, rayDirection));
-        vec3 bitangent = cross(rayDirection, tangent);
-        float phase = 0.0;
-        float coneWidth = roughness * roughness * 0.26;
-        rayDirection = normalize(
-            rayDirection
-            + tangent * cos(phase) * coneWidth
-            + bitangent * sin(phase) * coneWidth);
-    }
-
+    // This compatibility query follows the actual mirror direction. Roughness changes
+    // confidence/range, not a fixed sideways offset of the reflected scene.
     vec3 rayOrigin = worldPosition
         + worldNormal * 0.10
         + rayDirection * 0.045;
@@ -4984,6 +4962,30 @@ vec3 reconstructSurfaceAlbedo(
     return clamp(mix(detailedMaterial, chromaMaterial, chromaWeight), 0.0, 1.0);
 }
 
+
+bool rawAlbedoMatchesSurface(vec4 raw, vec3 viewPosition, float packedAvailable)
+{
+    if (packedAvailable < 0.5 || raw.a >= -0.0001 || viewPosition.z >= -0.0001
+        || any(isnan(raw)) || any(isinf(raw)) || any(lessThan(raw.rgb, vec3(0.0)))) return false;
+    // Both native position and optional albedo use floating attachments. Account for half-float
+    // depth quantization without accepting a nearby foreground object as the old receiver.
+    float tolerance = max(0.002, abs(viewPosition.z) * 0.001);
+    return abs(raw.a - viewPosition.z) <= tolerance;
+}
+
+vec3 resolveSurfaceBaseColor(vec3 source, vec4 material, float authoredLuminance,
+    float dynamicSurface, vec4 raw, vec3 position, float packedAvailable)
+{
+    if (rawAlbedoEnabled != 0 && rawAlbedoMatchesSurface(raw, position, packedAvailable))
+        return clamp(raw.rgb, vec3(0.0), vec3(1.0));
+    vec3 sourceLinear = srgbToLinear(source);
+    if (dynamicSurface > 0.5)
+        return authoredLuminance >= 0.0
+            ? clamp(sourceLinear * authoredLuminance / max(dot(sourceLinear, LUMA), 0.02), 0.0, 1.0)
+            : sourceLinear;
+    return material.a >= 0.05 ? reconstructSurfaceAlbedo(source, material, authoredLuminance) : sourceLinear;
+}
+
 vec3 reconstructSurfaceEmission(vec3 sourceLinear, vec3 worldPosition)
 {
     float proximity = 0.0;
@@ -5658,6 +5660,9 @@ void main()
             partialLiquidRecovery);
     }
 
+    vec4 rawSurfaceAlbedo = rawAlbedoEnabled != 0
+            && all(equal(textureSize(gUnlitAlbedo, 0), textureSize(gPosition, 0)))
+        ? readGBufferTexel(gUnlitAlbedo, uv) : vec4(0.0);
     vec3 worldPosition = earlyWorldPosition;
     vec3 worldNormal = earlyWorldNormal;
     vec3 worldGeometricNormal = vec3(0.0, 1.0, 0.0);
@@ -5727,13 +5732,21 @@ void main()
                             resolvedPointVisibilityA, resolvedPointVisibilityB, resolvedSunVisibility);
                     }
                 }
+                vec4 directMaterial = dynamicSurface > 0.5
+                    ? vec4(0.0) : sampleVoxelAtWorld(worldPosition - worldGeometricNormal * 0.08);
+                float directMetallic = mix((1.0 - dynamicSurface)
+                    * smoothstep(0.66, 0.74, directMaterial.a), authoredMetallic, materialMapPresent);
+                vec3 directAlbedo = resolveSurfaceBaseColor(source, directMaterial, authoredAlbedoLuminance,
+                    dynamicSurface, rawSurfaceAlbedo, position, packedSurfaceAvailable);
+                vec3 materialF0 = mix(vec3(0.04), directAlbedo, directMetallic);
                 voxelLighting = traceVoxelPointLight(
                     worldPosition,
                     earlyRelativeWorldPosition,
                     worldNormal,
                     worldGeometricNormal,
                     specularFilteredSurfaceRoughness,
-                    materialMapPresent * authoredMetallic,
+                    directMetallic,
+                    materialF0,
                     resolvedPointVisibilityA,
                     resolvedPointVisibilityB,
                     resolvedSunVisibility);
@@ -5983,25 +5996,8 @@ void main()
     // removes its scalar baked-light level using the entity's own encoded
     // unlit luminance. It never samples voxel material colour, so an animal or
     // dropped animated entity cannot randomly inherit the block behind it.
-    float sourceLinearLuminance = dot(
-        sourceLinear,
-        vec3(0.2126, 0.7152, 0.0722));
-    vec3 dynamicSurfaceAlbedo = authoredAlbedoLuminance >= 0.0
-        ? clamp(
-            sourceLinear
-                * (authoredAlbedoLuminance
-                    / max(sourceLinearLuminance, 0.02)),
-            0.0,
-            1.0)
-        : sourceLinear;
-    vec3 surfaceAlbedo = dynamicSurface > 0.5
-        ? dynamicSurfaceAlbedo
-        : (materialConfidence > 0.0
-            ? reconstructSurfaceAlbedo(
-                source,
-                voxelLighting.material,
-                authoredAlbedoLuminance)
-            : sourceLinear);
+    vec3 surfaceAlbedo = resolveSurfaceBaseColor(source, voxelLighting.material,
+        authoredAlbedoLuminance, dynamicSurface, rawSurfaceAlbedo, position, packedSurfaceAvailable);
 
     // Alpha is a compact material class supplied by the voxel scene:
     // fluid/glass ~= 0.25, ordinary dielectric ~= 0.50, metal ~= 0.75.
@@ -6142,7 +6138,7 @@ void main()
     // stage; indirect light can be accumulated strongly, while direct
     // light is used as a calibrated local correction instead of being
     // counted a second time over Vintage Story's raster contribution.
-    float diffuseTransportEligibility = (1.0 - metallic * 0.88)
+    float diffuseTransportEligibility = (1.0 - metallic)
         * (1.0 - transmissiveSurface * 0.96)
         * (1.0 - planarResponse * 0.98);
     vec3 indirectDiffuseRadiance = surfaceAlbedo
@@ -6197,62 +6193,11 @@ void main()
     // comes from _r. This direct microfacet path therefore produces
     // localized highlights on hammered metal, wet stone and lantern
     // cages instead of a uniform post-process sheen.
-    vec3 materialSpecularTint = mix(
-        vec3(1.0),
-        max(surfaceAlbedo * 2.6, vec3(0.48)),
-        metallic);
-    float resolvedPbrRoughness = mix(
-        surfaceRoughness,
-        min(surfaceRoughness, 0.42),
-        metallic);
-    // Water films fill dielectric micro-cavities. Retain some authored
-    // roughness so stone stays wet stone rather than becoming chrome.
-    resolvedPbrRoughness = mix(
-        resolvedPbrRoughness,
-        min(resolvedPbrRoughness, 0.18),
-        wetSurface * 0.88);
-    resolvedPbrRoughness = filterSpecularRoughness(
-        resolvedPbrRoughness,
-        worldNormal);
-    float resolvedSpecularEligibility = mix(
-        1.0 - smoothstep(
-            0.38,
-            0.72,
-            resolvedPbrRoughness),
-        1.0,
-        metallic);
-    vec3 worldViewDirection = normalize(
-        cameraWorldPosition - worldPosition);
-    vec3 irradianceSpecularRadiance = vec3(0.0);
-    if (resolvedSpecularEligibility > 0.001)
-    {
-        irradianceSpecularRadiance = voxelLighting.irradianceCache
-            * evaluateDirectSpecular(
-                worldNormal,
-                worldViewDirection,
-                voxelLighting.irradianceDirection,
-                resolvedPbrRoughness)
-            * materialSpecularTint
-            * resolvedSpecularEligibility
-            * (0.45 + metallic * 3.20);
-    }
-    // The aggregate light loop evaluates a dielectric F0 before the
-    // authored material is decoded. Restore a bounded conductor gain
-    // here; it remains tied to the GGX normal/light alignment and never
-    // becomes a screen-wide metallic brightness adjustment.
-    vec3 directSpecularRadiance = voxelLighting.directSpecular
-        * materialSpecularTint
-        * resolvedSpecularEligibility
-        * (0.82 + metallic * 3.80)
-        + irradianceSpecularRadiance;
-    vec3 specularIncidentRadiance = voxelLighting.direct
-        + voxelLighting.sunDirect
-        + voxelLighting.irradianceCache;
-    directSpecularRadiance = softLimitSpecularRadiance(
-        directSpecularRadiance,
-        specularIncidentRadiance,
-        resolvedPbrRoughness,
-        metallic);
+    // Keep authored roughness and material Fresnel; a metal is not automatically polished.
+    float resolvedPbrRoughness = filterSpecularRoughness(surfaceRoughness, worldNormal);
+    float resolvedSpecularEligibility = 1.0;
+    vec3 worldViewDirection = normalize(cameraWorldPosition - worldPosition);
+    vec3 directSpecularRadiance = voxelLighting.directSpecular;
     // Water, ice and glass already contain transmission/refraction in
     // the engine framebuffer. Keep that coherent base and add traced
     // specular energy instead of replacing it with opaque voxel albedo.
@@ -6318,8 +6263,7 @@ void main()
         baseReflectance,
         max(baseReflectance, vec3(0.075)),
         wetSurface * (1.0 - metallic));
-    vec3 fresnelReflectance = baseReflectance
-        + (vec3(1.0) - baseReflectance) * pow(1.0 - normalView, 5.0);
+    vec3 fresnelReflectance = materialFresnel(baseReflectance, normalView);
     float roughnessResponse = mix(
         0.18 + 0.82 * pow(1.0 - resolvedPbrRoughness, 1.45),
         0.94,
@@ -6361,8 +6305,7 @@ void main()
     }
     vec3 reflectedRadiance = reflectedSceneRadiance
         * fresnelReflectance
-        * reflectionVisibility
-        * (1.15 + metallic * 1.25 + planarResponse * 0.85);
+        * reflectionVisibility;
     // Low-cost tiers deliberately shorten SSR and off-screen voxel
     // traces, so a small metal object can miss both and appear matte
     // despite a valid _m/_r/_n payload. Reuse the directional local
@@ -6370,31 +6313,7 @@ void main()
     // lobe. This adds no ray or texture lookup and stays material-,
     // roughness- and Fresnel-gated instead of becoming a screen-wide
     // post-process sheen.
-    vec3 localEnvironmentSpecular = vec3(0.0);
-    if (resolvedSpecularEligibility > 0.001)
-    {
-        vec3 environmentReflectionDirection = reflect(
-            -worldViewDirection,
-            worldNormal);
-        float environmentAlignment = pow(
-            max(dot(
-                environmentReflectionDirection,
-                voxelLighting.irradianceDirection), 0.0),
-            mix(1.5, 10.0, 1.0 - resolvedPbrRoughness));
-        float environmentLobe = mix(
-            0.28,
-            1.0,
-            environmentAlignment);
-        localEnvironmentSpecular = voxelLighting.irradianceCache
-            * fresnelReflectance
-            * resolvedSpecularEligibility
-            * (1.0 - clamp(reflection.confidence, 0.0, 1.0))
-            * (1.0 - resolvedPbrRoughness * 0.65)
-            * environmentLobe
-            * surfaceReliability
-            * (0.035 + metallic * 0.460);
-    }
-    reflectedRadiance += localEnvironmentSpecular;
+    // Unresolved specular directions remain unresolved; diffuse cache is not a fake spotlight.
 
     // The normal map shapes BRDF response, never the footprint of an
     // occluder. Use the geometric receiver for carrier attenuation so
@@ -6429,7 +6348,7 @@ void main()
     vec3 hybridTransport = rasterCarrier
         + indirectDiffuseRadiance * 0.74
         + directDiffuseRadiance * 0.34
-        + directSpecularRadiance * 1.15
+        + directSpecularRadiance
         + emittedRadiance;
     // Opaque terrain now supplies an authored albedo luminance instead
     // of forcing the post pass to infer texture detail from already-lit
@@ -6442,7 +6361,7 @@ void main()
             * ambientVisibility
         + indirectDiffuseRadiance * 0.96
         + directDiffuseRadiance * 0.72
-        + directSpecularRadiance * 1.28
+        + directSpecularRadiance
         + emittedRadiance;
     // Match only broad exposure, never chroma or visibility. This keeps
     // high-frequency authored albedo and the traced sun/sky/light balance,
@@ -6591,9 +6510,7 @@ void main()
     // Reflections keep their own specular path. The luminance shoulder
     // below is still shared with the complete composed radiance so the
     // base exposure stays unchanged and bright transport rolls off.
-    float reflectionAddWeight = 0.82
-        + metallic * 3.00
-        + max(planarResponse, transmissiveSurface) * 0.18;
+    float reflectionAddWeight = 1.0;
     // Opaque/metal reflections remain a localized specular addition.
     // A confirmed water plane instead shares energy between the engine's
     // transmitted lake bed and reflected radiance through Fresnel. Pure

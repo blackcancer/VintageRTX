@@ -110,4 +110,12 @@
     <None Include="$(VintageStoryPath)/Lib/*.so*" Link="%(Filename)%(Extension)"
           CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="Fixtures/entity-mirror-local-body-real.png"
+                      LogicalName="VintageRTX.Test.Fixtures.entity-mirror-local-body-real.png" />
+  </ItemGroup>
+  <Target Name="RequireRealMirrorFixture" BeforeTargets="PrepareForBuild">
+    <Error Condition="!Exists('$(MSBuildProjectDirectory)/Fixtures/entity-mirror-local-body-real.png')"
+           Text="The original real-game mirror fixture is missing. Restore tests/VintageRTX.Test/Fixtures/entity-mirror-local-body-real.png from Git before building. No synthetic replacement is accepted." />
+  </Target>
 </Project>

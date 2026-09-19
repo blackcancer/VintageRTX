@@ -44,6 +44,7 @@ layout(location = 1) out vec4 outGlow;
 #if SSAOLEVEL > 0
 layout(location = 2) out vec4 outGNormal;
 layout(location = 3) out vec4 outGPosition;
+layout(location = 4) out vec4 vintagertxUnlitAlbedo;
 #endif
 
 #include vertexflagbits.ash
@@ -193,6 +194,8 @@ void main()
     // half-float attachment represents all 1024 payloads deterministically;
     // values 0 and 1 remain reserved for untouched entity/legacy shaders.
     vec3 unlitLinear = pow(max(unlitTexColor.rgb, vec3(0.0)), vec3(2.2));
+    // Actual colour-mapped linear texel before raster illumination; alpha owns its view Z.
+    vintagertxUnlitAlbedo = vec4(unlitLinear, camPos.z);
     float unlitLuminance = dot(unlitLinear, vec3(0.2126, 0.7152, 0.0722));
     int roughnessBits = int(round(clamp(surfaceRoughness, 0.0, 1.0) * 31.0));
     int albedoBits = int(round(clamp(unlitLuminance, 0.0, 1.0) * 31.0));

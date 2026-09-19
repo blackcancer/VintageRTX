@@ -354,9 +354,10 @@ public sealed class RuntimeCoverageModSystemTests
                 "settings", "status", "toggle", "reload", "lighting", "voxel", "capture", "debug", "preset", "profile"
             ];
             CollectionAssert.AreEquivalent(expectedCommands, commands.Keys.ToArray());
-            Assert.AreEqual(10, eventCalls.Count(static name => name == "RegisterRenderer"));
+            Assert.AreEqual(11, eventCalls.Count(static name => name == "RegisterRenderer"));
             string[] expectedRendererRegistrations =
             [
+                "RegisterRenderer:vintagertx-raw-albedo:Opaque",
                 "RegisterRenderer:vintagertx-pbr-terrain:Opaque",
                 "RegisterRenderer:vintagertx-pbr-entities:Opaque",
                 "RegisterRenderer:vintagertx-entity-mirror-source:Opaque",
@@ -406,7 +407,7 @@ public sealed class RuntimeCoverageModSystemTests
 
             system.Dispose();
 
-            Assert.AreEqual(10, eventCalls.Count(static name => name == "UnregisterRenderer"));
+            Assert.AreEqual(11, eventCalls.Count(static name => name == "UnregisterRenderer"));
             Assert.IsNull(GetPrivateField<object?>(system, "renderer"));
             Assert.IsNull(GetPrivateField<object?>(system, "voxelScene"));
             Assert.IsNull(GetPrivateField<object?>(system, "pbrTerrainRenderer"));

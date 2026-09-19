@@ -11,13 +11,7 @@ public sealed class RuntimeImageValidatorReflectionWitnessTests
     [TestMethod]
     public void RealRuntimeLocalBodyCarrierRetainsMeasuredComponents()
     {
-        string path = Path.Combine(
-            TestPaths.FindRepositoryRoot(),
-            "tests",
-            "VintageRTX.Test",
-            "Fixtures",
-            "entity-mirror-local-body-real.png");
-        using SKBitmap bitmap = LoadRealMirrorFixture(path);
+        using SKBitmap bitmap = DecodeRealMirrorFixture(ReadRealMirrorFixtureBytes(), "embedded real mirror");
 
         IReadOnlyList<RuntimeImageValidator.EntityMirrorComponentAssessment> components =
             RuntimeImageValidator.AssessEntityMirrorComponents(bitmap);
@@ -88,13 +82,11 @@ public sealed class RuntimeImageValidatorReflectionWitnessTests
     [TestMethod]
     public void RealFixtureSurvivesUnicodePathAndRejectsChangedBytes()
     {
-        string source = Path.Combine(TestPaths.FindRepositoryRoot(), "tests", "VintageRTX.Test",
-            "Fixtures", "entity-mirror-local-body-real.png");
         string directory = Path.Combine(Path.GetTempPath(), "VintageRTX-Développement-é-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(directory);
         try
         {
-            byte[] data = File.ReadAllBytes(source);
+            byte[] data = ReadRealMirrorFixtureBytes();
             string path = Path.Combine(directory, "réflexion-corps.png");
             File.WriteAllBytes(path, data);
             using (SKBitmap decoded = LoadRealMirrorFixture(path))
@@ -122,10 +114,29 @@ public sealed class RuntimeImageValidatorReflectionWitnessTests
     /// <summary>Loads verified real capture bytes via managed Unicode file IO before Skia decoding.</summary>
     /// <param name="path">Path of the unchanged real mirror PNG.</param>
     /// <returns>Owned bitmap with the exact captured pixels.</returns>
-    private static SKBitmap LoadRealMirrorFixture(string path)
+    private static SKBitmap LoadRealMirrorFixture(string path) =>
+        DecodeRealMirrorFixture(File.ReadAllBytes(path), path);
+
+    /// <summary>Reads the original PNG from this exact test assembly, independent of deployment path.</summary>
+    /// <returns>Detached original capture bytes; never synthesizes or downloads a substitute.</returns>
+    private static byte[] ReadRealMirrorFixtureBytes()
+    {
+        const string name = "VintageRTX.Test.Fixtures.entity-mirror-local-body-real.png";
+        using Stream stream = typeof(RuntimeImageValidatorReflectionWitnessTests).Assembly
+            .GetManifestResourceStream(name)
+            ?? throw new InvalidDataException($"Missing embedded real mirror fixture '{name}'. Rebuild the test project from a complete checkout.");
+        using MemoryStream buffer = new();
+        stream.CopyTo(buffer);
+        return buffer.ToArray();
+    }
+
+    /// <summary>Rejects changed capture bytes before native image decoding.</summary>
+    /// <param name="data">Original embedded or managed-file bytes.</param>
+    /// <param name="path">Identity used in actionable integrity diagnostics.</param>
+    /// <returns>Owned bitmap containing the exact original capture.</returns>
+    private static SKBitmap DecodeRealMirrorFixture(byte[] data, string path)
     {
         const string expected = "40CBFF450C6F9A8D8B8082F2CC712A0D4F168E9AB5A08A364F59E8FA8AA8DD3E";
-        byte[] data = File.ReadAllBytes(path);
         string actual = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(data));
         if (!string.Equals(actual, expected, StringComparison.Ordinal))
             throw new InvalidDataException($"Real mirror fixture changed: '{path}', bytes={data.Length}, SHA256={actual}, expected={expected}.");

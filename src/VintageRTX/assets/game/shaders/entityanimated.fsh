@@ -27,6 +27,7 @@ in float fragFrostAlpha;
     in vec4 gnormal;
     layout(location = 2) out vec4 outGNormal;
     layout(location = 3) out vec4 outGPosition;
+    layout(location = 4) out vec4 vintagertxUnlitAlbedo;
     #endif
 #endif
 
@@ -163,6 +164,7 @@ void main() {
         ? vintagertxPerturbEntityNormal(gnormal.xyz, camPos.xyz, pbrSurface.rg)
         : normalize(gnormal.xyz);
     vec3 unlitLinear = pow(max(unlitTexColor.rgb, vec3(0.0)), vec3(2.2));
+    vintagertxUnlitAlbedo = vec4(unlitLinear, fragPosition.z);
     float unlitLuminance = dot(unlitLinear, vec3(0.2126, 0.7152, 0.0722));
     int roughnessBits = int(round(clamp(surfaceRoughness, 0.0, 1.0) * 31.0));
     int albedoBits = int(round(clamp(unlitLuminance, 0.0, 1.0) * 31.0));
@@ -196,6 +198,7 @@ void main() {
     #if USEOIT==0 && SSAOLEVEL > 0
         outGPosition.w=1;
         outGNormal.a=0;
+        vintagertxUnlitAlbedo=vec4(0.0);
         outGlow.b=0;
     #endif
 #endif

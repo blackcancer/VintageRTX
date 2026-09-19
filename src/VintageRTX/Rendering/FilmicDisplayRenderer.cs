@@ -85,6 +85,7 @@ internal sealed class FilmicDisplayRenderer : IRenderer
     private readonly LumaRenderBridge lumaBridge;
     private readonly LiquidSurfaceRuntime liquidSurfaceRuntime;
     private readonly ReflectionSourceCaptureRenderer reflectionSourceCapture;
+    private readonly RawAlbedoCapture rawAlbedoCapture;
     private readonly EntityMirrorSourceCaptureRenderer entityMirrorSourceCapture;
     private readonly EntityMirrorProjection entityMirrorProjection;
     /// <summary>Whether this renderer is registered to snapshot the per-frame floating origin.</summary>
@@ -359,7 +360,9 @@ internal sealed class FilmicDisplayRenderer : IRenderer
         captureService = new FrameCaptureService(api);
         lumaBridge = new LumaRenderBridge(api);
         liquidSurfaceRuntime = new LiquidSurfaceRuntime(api);
-        reflectionSourceCapture = new ReflectionSourceCaptureRenderer(api);
+        rawAlbedoCapture = new RawAlbedoCapture(api);
+        reflectionSourceCapture = new ReflectionSourceCaptureRenderer(api, rawAlbedoCapture);
+        api.Event.RegisterRenderer(rawAlbedoCapture, EnumRenderStage.Opaque, "vintagertx-raw-albedo");
         entityMirrorSourceCapture = new EntityMirrorSourceCaptureRenderer(api);
         entityMirrorProjection = new EntityMirrorProjection(api);
         automaticBenchmark = string.Equals(
@@ -1989,6 +1992,7 @@ internal sealed class FilmicDisplayRenderer : IRenderer
     {
         try
         {
+            rawAlbedoCapture.ReloadShader();
             shader = CreateShader();
             faulted = false;
             failureReason = null;
@@ -2947,6 +2951,10 @@ internal sealed class FilmicDisplayRenderer : IRenderer
         bool captureFrame)
     {
         GlState state = GlState.Capture();
+        GL.GetInteger(GetPName.ActiveTexture, out int previousRawAlbedoUnit);
+        GL.ActiveTexture(TextureUnit.Texture28);
+        GL.GetInteger(GetPName.TextureBinding2D, out int previousRawAlbedoBinding);
+        GL.ActiveTexture((TextureUnit)previousRawAlbedoUnit);
         bool shaderActive = false;
         bool gpuMeasurementActive = performanceMonitor.TryBeginGpuMeasurement();
 
@@ -2997,6 +3005,9 @@ internal sealed class FilmicDisplayRenderer : IRenderer
             shader!.Use();
             shaderActive = true;
             shader.BindTexture2D("sourceColor", sourceColorTexture, 0);
+            int rawAlbedoTexture = reflectionSourceCapture.RawAlbedoTextureId;
+            shader.BindTexture2D("gUnlitAlbedo", rawAlbedoTexture > 0 ? rawAlbedoTexture : sourceColorTexture, 28);
+            shader.Uniform("rawAlbedoEnabled", rawAlbedoTexture > 0 ? 1 : 0);
             NativeSunShadowDepthMaps nativeShadowMaps = ResolveNativeSunShadowDepthMaps(
                 api.Render.FrameBuffers);
             bool nativeShadowFarReady = nativeShadowMatrixFarReady
@@ -3673,7 +3684,9 @@ internal sealed class FilmicDisplayRenderer : IRenderer
             {
                 try
                 {
-                    state.Restore();
+                    GL.ActiveTexture(TextureUnit.Texture28);
+            GL.BindTexture(TextureTarget.Texture2D, previousRawAlbedoBinding);
+            state.Restore();
                 }
                 finally
                 {
@@ -5090,6 +5103,12 @@ internal sealed class FilmicDisplayRenderer : IRenderer
     /// <summary>Deletes all owned GL objects and renderer helpers; borrowed game resources remain untouched.</summary>
     public void Dispose()
     {
+        if (rawAlbedoCapture is not null)
+        {
+            api.Event.UnregisterRenderer(rawAlbedoCapture, EnumRenderStage.Opaque);
+            rawAlbedoCapture.Dispose();
+        }
+
         if (preFinalDiagnosticRegistered)
         {
             api.Event.UnregisterRenderer(this, EnumRenderStage.AfterPostProcessing);

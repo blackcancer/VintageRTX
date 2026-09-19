@@ -46,6 +46,7 @@ internal sealed class RawAlbedoCapture : IRenderer
     public void OnRenderFrame(float deltaTime, EnumRenderStage stage)
     {
         if (disposed || stage != EnumRenderStage.Opaque) return;
+        target.End(false);
         if (!enabled || faulted) { target.End(false); return; }
         try
         {

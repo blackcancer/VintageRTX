@@ -25,6 +25,9 @@ internal sealed class ReflectionSourceCaptureRenderer : IRenderer
     private const int PositionAttachment = 3;
     /// <summary>Client renderer and framebuffer registry.</summary>
     private readonly ICoreClientAPI api;
+    private readonly RawAlbedoCapture? rawAlbedo;
+    /// <summary>Unlit RGB captured in the same opaque transaction, or zero on unsupported paths.</summary>
+    internal int RawAlbedoTextureId => ready ? rawAlbedo?.TextureId ?? 0 : 0;
     /// <summary>Owned copy of Primary attachment zero.</summary>
     private int colorTextureId;
     /// <summary>Owned copy of Primary attachment one.</summary>
@@ -70,9 +73,11 @@ internal sealed class ReflectionSourceCaptureRenderer : IRenderer
 
     /// <summary>Creates an initially enabled render-thread capture owned by the display renderer.</summary>
     /// <param name="api">Client framebuffer dimensions, logging, and OpenGL services.</param>
-    public ReflectionSourceCaptureRenderer(ICoreClientAPI api)
+    /// <param name="rawAlbedo">Optional owned material transaction ending before the snapshot.</param>
+    public ReflectionSourceCaptureRenderer(ICoreClientAPI api, RawAlbedoCapture? rawAlbedo = null)
     {
         this.api = api;
+        this.rawAlbedo = rawAlbedo;
     }
 
     /// <summary>
@@ -94,6 +99,7 @@ internal sealed class ReflectionSourceCaptureRenderer : IRenderer
         set
         {
             enabled = value;
+            if (rawAlbedo is not null) rawAlbedo.Enabled = value;
             if (!value)
             {
                 ready = false;
@@ -167,6 +173,8 @@ internal sealed class ReflectionSourceCaptureRenderer : IRenderer
             return;
         }
 
+        // Detach the extra material target before any local-player draw is replayed.
+        rawAlbedo?.EndFrame();
         long diagnosticStart = cpuDiagnosticsEnabled ? Stopwatch.GetTimestamp() : 0L;
         long diagnosticSnapshotEnd = 0L;
         // Snapshot replay state before enqueueing the four image copies. Reading driver state

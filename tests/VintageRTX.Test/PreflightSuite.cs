@@ -293,11 +293,14 @@ internal static class PreflightSuite
             && shader.Contains("mix(0.035, 0.080, 1.0 - liquidInterfaceRoughness)", StringComparison.Ordinal)
             && shader.Contains("screenSceneConfidence", StringComparison.Ordinal),
             "resolved water reflections must retain local contrast instead of receiving a global sky wash");
-        Assert(shader.Contains("vec3 reflectedColor = hitAlbedo * 0.115", StringComparison.Ordinal),
-            "off-screen reflection hits need bounded local indirect radiance");
-        Assert(shader.Contains("float phase = 0.0", StringComparison.Ordinal)
+        Assert(shader.Contains("vec3 linearAlbedo = srgbToLinear", StringComparison.Ordinal)
+            && shader.Contains("linearAlbedo * sampleVoxelIrradiance(hitPosition, hitNormal)", StringComparison.Ordinal)
+            && shader.Contains("return linearToSrgb(max(reflectedColor, vec3(0.0)))", StringComparison.Ordinal),
+            "secondary lighting must accumulate linear radiance before encoding its compatibility carrier");
+        Assert(!shader.Contains("float coneWidth = roughness * roughness * 0.26", StringComparison.Ordinal)
+            && shader.Contains("normalize(reflect(incidentDirection, worldNormal))", StringComparison.Ordinal)
             && !shader.Contains("float(temporalFrameIndex & 7) * 2.39996322973", StringComparison.Ordinal),
-            "voxel reflections must not rotate a sparse cone sample between frames");
+            "the compatibility mirror query must not shift scenery using a fixed or animated cone offset");
         Assert(shader.Contains("struct LiquidOpticalProfile", StringComparison.Ordinal)
             && shader.Contains("defaultWaterOpticalProfile", StringComparison.Ordinal)
             && shader.Contains("profile.ior = 1.333", StringComparison.Ordinal)
@@ -387,11 +390,15 @@ internal static class PreflightSuite
             && shader.Contains("roughness >= maximumSpecularRoughness", StringComparison.Ordinal)
             && shader.Contains("one column lookup is sufficient", StringComparison.Ordinal),
             "rough dielectric specular or reflection-miss fast path missing");
-        Assert(shader.Contains("environmentAlignment", StringComparison.Ordinal)
-            && shader.Contains("metallic * 3.80", StringComparison.Ordinal)
-            && shader.Contains("localEnvironmentSpecular", StringComparison.Ordinal)
-            && shader.Contains("0.035 + metallic * 0.460", StringComparison.Ordinal),
-            "localized conductor highlight response missing");
+        // MaterialTransportTests executes GGX against an independent Smith reference and
+        // an integrated white furnace. This guard only checks its production wiring.
+        Assert(shader.Contains("materialFresnel(f0, vh)", StringComparison.Ordinal)
+            && shader.Contains("vec3 directSpecularRadiance = voxelLighting.directSpecular", StringComparison.Ordinal)
+            && shader.Contains("materialF0) * emissiveLightStrength", StringComparison.Ordinal)
+            && shader.Contains("materialF0) * sunLightStrength", StringComparison.Ordinal)
+            && !shader.Contains("metallic * 3.80", StringComparison.Ordinal)
+            && !shader.Contains("localEnvironmentSpecular", StringComparison.Ordinal),
+            "direct conductor lighting must use material Fresnel, not post-hoc metal gains or a diffuse-cache spotlight");
         Assert(shader.Contains("MAX_VOXEL_STEPS", StringComparison.Ordinal), "bounded voxel loop missing");
         Assert(shader.Contains("traceFineBlockVisibility", StringComparison.Ordinal), "hierarchical fine occupancy trace missing");
         Assert(shader.Contains("Hierarchical DDA", StringComparison.Ordinal), "empty-space skip contract missing");
@@ -551,7 +558,8 @@ internal static class PreflightSuite
             && shader.Contains("voxelIrradianceDirection", StringComparison.Ordinal)
             && shader.Contains("irradianceDirectionSum", StringComparison.Ordinal)
             && shader.Contains("directionalIrradiance", StringComparison.Ordinal)
-            && shader.Contains("irradianceSpecularRadiance", StringComparison.Ordinal)
+            && !shader.Contains("irradianceSpecularRadiance", StringComparison.Ordinal)
+            && shader.Contains("vec3 directSpecularRadiance = voxelLighting.directSpecular", StringComparison.Ordinal)
             && shader.Contains("voxelLighting.bounce * pointLightBounceStrength * 0.90", StringComparison.Ordinal)
             && !shader.Contains("voxelLighting.blockedDirect\n                    * pointLightBounceStrength", StringComparison.Ordinal),
             "stable irradiance cache or bounded detail bounce missing");
@@ -1603,15 +1611,13 @@ internal static class PreflightSuite
             && displayShader.Contains("max(authoredEmission, engineEmission)", StringComparison.Ordinal)
             && displayShader.Contains("+ emittedRadiance", StringComparison.Ordinal),
             "decoded normals or material maps do not influence final lighting energy");
-        Assert(displayShader.Contains("vec3 localEnvironmentSpecular = vec3(0.0)", StringComparison.Ordinal)
-            && displayShader.Contains("localEnvironmentSpecular = voxelLighting.irradianceCache", StringComparison.Ordinal)
-            && displayShader.Contains("environmentLobe", StringComparison.Ordinal)
+        Assert(displayShader.Contains("materialFresnel(baseReflectance, normalView)", StringComparison.Ordinal)
+            && displayShader.Contains("float reflectionAddWeight = 1.0", StringComparison.Ordinal)
+            && displayShader.Contains("rawAlbedoMatchesSurface", StringComparison.Ordinal)
             && displayShader.Contains("* fresnelReflectance", StringComparison.Ordinal)
-            && displayShader.Contains("* resolvedSpecularEligibility", StringComparison.Ordinal)
-            && displayShader.Contains("* (1.0 - resolvedPbrRoughness * 0.65)", StringComparison.Ordinal)
-            && displayShader.Contains("* surfaceReliability", StringComparison.Ordinal)
-            && displayShader.Contains("reflectedRadiance += localEnvironmentSpecular", StringComparison.Ordinal),
-            "low-cost reflection tiers can silently make valid metallic/roughness maps appear matte");
+            && !displayShader.Contains("reflectedRadiance += localEnvironmentSpecular", StringComparison.Ordinal)
+            && !displayShader.Contains("metallic * 3.00", StringComparison.Ordinal),
+            "specular transport must preserve material reflectance without inventing unresolved reflection energy");
 
         for (int roughness = 0; roughness < 32; roughness++)
         {
