@@ -70,7 +70,15 @@ jobs:
           export LD_LIBRARY_PATH="$VINTAGE_STORY/Lib:${LD_LIBRARY_PATH:-}"
           xvfb-run -a dotnet test tests/VintageRTX.Test/VintageRTX.Test.csproj -c Release --no-build --no-restore --settings tests/reported-regressions.runsettings --logger 'trx;LogFileName=reported.trx' --results-directory "$RUNNER_TEMP/delivery/evidence" > "$RUNNER_TEMP/delivery/evidence/reported.log" 2>&1
           xvfb-run -a dotnet test tests/VintageRTX.Test/VintageRTX.Test.csproj -c Release --no-build --no-restore --filter 'FullyQualifiedName~RawAlbedoTargetTests' --logger 'trx;LogFileName=raw-albedo.trx' --results-directory "$RUNNER_TEMP/delivery/evidence" > "$RUNNER_TEMP/delivery/evidence/raw-albedo.log" 2>&1
-      - name: Execute production GLSL and unchanged synthetic RenderLab
+      - name: Execute the shared blocker contracts and sampler ownership regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          export LD_LIBRARY_PATH="$VINTAGE_STORY/Lib:${LD_LIBRARY_PATH:-}"
+          xvfb-run -a dotnet test tests/VintageRTX.Test/VintageRTX.Test.csproj -c Release --no-build --no-restore --settings tests/blocker-smoke.runsettings --logger 'trx;LogFileName=blocker-smoke.trx' --results-directory "$RUNNER_TEMP/delivery/evidence" > "$RUNNER_TEMP/delivery/evidence/blocker-smoke.log" 2>&1
+          python3 tools/recovery/check_blocker_smoke.py "$RUNNER_TEMP/delivery/evidence/blocker-smoke.trx" > "$RUNNER_TEMP/delivery/evidence/blocker-smoke-summary.json"
+          xvfb-run -a dotnet test tools/VintageRTX.RenderLab/VintageRTX.RenderLab.csproj -c Release --no-build --no-restore --filter 'FullyQualifiedName~StandalonePipelineTests' --logger 'trx;LogFileName=pipeline.trx' --results-directory "$RUNNER_TEMP/delivery/evidence" > "$RUNNER_TEMP/delivery/evidence/pipeline.log" 2>&1
+      - name: Execute production GLSL and cold-cache multipass RenderLab
         shell: bash
         run: |
           set -euo pipefail
@@ -78,6 +86,8 @@ jobs:
           for suite in recovery feedback materials transport; do
             "$RUNNER_TEMP/glsl-tests/bin/python" -m unittest discover -s "tests/$suite" -v 2>&1 | tee "$RUNNER_TEMP/delivery/evidence/glsl-$suite.log"
           done
+          export MESA_SHADER_CACHE_DIR="$RUNNER_TEMP/renderlab-cold-cache"
+          mkdir -p "$MESA_SHADER_CACHE_DIR"
           timeout 180s xvfb-run -a dotnet test tools/VintageRTX.RenderLab/VintageRTX.RenderLab.csproj -c Release --no-build --no-restore --filter 'FullyQualifiedName~ProductionShaderCompilesAndRendersHeadlessly' --logger 'trx;LogFileName=renderlab.trx' --results-directory "$RUNNER_TEMP/delivery/evidence" > "$RUNNER_TEMP/delivery/evidence/renderlab.log" 2>&1
       - name: Verify payload and create installable ZIP plus exact sources
         shell: bash
@@ -99,14 +109,14 @@ jobs:
           if subprocess.check_output(['git', 'status', '--porcelain', '--untracked-files=no'], text=True).strip():
               raise SystemExit('Tracked source changed during qualification.')
           reports = {}
-          for name, minimum in [('reported', 103), ('raw-albedo', 1), ('renderlab', 1)]:
+          for name, minimum in [('reported', 155), ('blocker-smoke', 35), ('raw-albedo', 1), ('pipeline', 2), ('renderlab', 1)]:
               tree = ET.parse(evidence / (name + '.trx'))
               results = [n for n in tree.iter() if n.tag.endswith('UnitTestResult')]
               if len(results) < minimum or any(n.get('outcome') != 'Passed' for n in results):
                   raise SystemExit(f'{name}: required tests missing, failed, inconclusive or skipped.')
               reports[name] = len(results)
           python_reports = {}
-          for suite, minimum in [('recovery', 4), ('feedback', 4), ('materials', 9), ('transport', 5)]:
+          for suite, minimum in [('recovery', 4), ('feedback', 4), ('materials', 9), ('transport', 10)]:
               log = (evidence / ('glsl-' + suite + '.log')).read_text()
               count = re.search(r'^Ran (\d+) tests? in ', log, re.M)
               if not count or int(count[1]) < minimum or not re.search(r'^OK\s*$', log, re.M):
@@ -156,8 +166,8 @@ jobs:
                   'inGameValidated': False,
                   'note': 'Counts are separate campaigns, not a claim of total unique repository coverage.'},
               'knownOpenIssues': [
-                  'Dynamic-source indirect transport at adaptive Performance tier remains incomplete.',
-                  'Most contribution diagnostics still pass through the native final composite.',
+                  'Dynamic diffuse transport uses the reduced production passes; real-game acceptance remains open.',
+                  'Contribution diagnostics use explicit pre-final RGBA8 views, not unbounded HDR measurements.',
                   'Reported cave-interior GPU/FPS acceptance is not resolved or remeasured.',
                   'Animated occluders, rough multidirectional reflections and motion reprojection remain incomplete.'
               ],
@@ -165,7 +175,7 @@ jobs:
           }
           manifest_bytes = (json.dumps(manifest, indent=2, ensure_ascii=False) + '\n').encode()
           (delivery / 'BUILD-MANIFEST.json').write_bytes(manifest_bytes)
-          readme = f'''VintageRTX — build de reprise installable\n\nCommit : {commit}\nClient cible : Vintage Story 1.22.7\nConfiguration : Release ; version déclarée : {metadata['version']}\n\nCette archive contient le mod compilé, ses shaders et ses assets. Ce n'est pas un dossier de diagnostic.\nFermer le jeu ; conserver l'ancienne version hors du dossier Mods ; placer ce ZIP sans l'extraire dans le dossier Mods.\nNe pas garder une autre copie de VintageRTX dans un chemin de mods actif.\nLes sources sont livrées séparément ; le module de test runtime n'est pas inclus dans le ZIP du mod.\n\nPortée : intégration des correctifs déjà présents dans la branche, dont la résolution du hook Harmony\nqui empêchait la capture d'albedo RGB. Aucun nouveau correctif de transport n'est introduit par le packaging.\nLes tests automatisés sont détaillés dans BUILD-MANIFEST.json. Leur succès n'est pas une validation en jeu.\nLe rebond dynamique au niveau Performance, les diagnostics de contribution post-final et les budgets\nGPU/FPS signalés pour cave-interior restent ouverts. Cette archive n'est pas une version finale intégralement corrigée.\n'''
+          readme = f'''VintageRTX — build de reprise installable\n\nCommit : {commit}\nClient cible : Vintage Story 1.22.7\nConfiguration : Release ; version déclarée : {metadata['version']}\n\nCette archive contient le mod compilé, ses shaders et ses assets. Ce n'est pas un dossier de diagnostic.\nFermer le jeu ; conserver l'ancienne version hors du dossier Mods ; placer ce ZIP sans l'extraire dans le dossier Mods.\nNe pas garder une autre copie de VintageRTX dans un chemin de mods actif.\nLes sources sont livrées séparément ; le module de test runtime n'est pas inclus dans le ZIP du mod.\n\nPortée : candidat de reprise issu des sources indiquées par le manifeste. La capture RGB et le transport\ndiffus dynamique réduit sont intégrés ; la qualification visuelle complète en jeu reste ouverte.\nLes diagnostics utilisent les canaux pré-final du shader ; ces PNG ne sont pas des mesures HDR sans écrêtage.\nLa CI couvre la campagne courte, les régressions, les liaisons OpenGL, les calculs GLSL et le laboratoire.\nSon succès ne valide pas les ombres, matériaux, reflets et budgets GPU/FPS des 21 scénarios sur le matériel du joueur.\nAucun correctif supplémentaire du rendu n'est introduit par le seul empaquetage.\n'''
           short = commit[:8]
           mod_zip = delivery / f'VintageRTX-1.22.7-recovery-{short}-mod.zip'
           with zipfile.ZipFile(mod_zip, 'w', zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
