@@ -1,9 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <RunSettings>
   <RunConfiguration>
-    <!-- Whole reported renderer classes plus complete raw-capture, runtime-result and sandbox classes.
+    <!-- Whole reported renderer, capture and sandbox classes, plus reduced diffuse transport,
+         native-vegetation scenario contracts and runtime probe scheduling.
          No Vintage Story world launch; some cases require an actual hidden OpenGL context.
          A successful run does not certify the separate 21-scenario in-game campaign. -->
-    <TestCaseFilter>FullyQualifiedName~CoverageFilmicResidualTests|FullyQualifiedName~DisplayShaderAssetTests|FullyQualifiedName~FilmicDisplayRendererLogicCoverageTests|FullyQualifiedName~LiquidShaderPhysicsTests|FullyQualifiedName~PbrEntityRendererTests|FullyQualifiedName~ShadowFilterPipelineTests|FullyQualifiedName~VoxelSceneCoverageDeepTests|FullyQualifiedName~RawAlbedoHookTests|FullyQualifiedName~RuntimeCampaignContractTests|FullyQualifiedName~RendererServicesCoverageTests|FullyQualifiedName~CoverageRenderingServicesResidualTests|FullyQualifiedName~RuntimeDataSandboxTests|FullyQualifiedName~RuntimeHarnessLogMergeTests|FullyQualifiedName~RawAlbedoTargetTests</TestCaseFilter>
+    <TestCaseFilter>FullyQualifiedName~CoverageFilmicResidualTests|FullyQualifiedName~DisplayShaderAssetTests|FullyQualifiedName~FilmicDisplayRendererLogicCoverageTests|FullyQualifiedName~LiquidShaderPhysicsTests|FullyQualifiedName~PbrEntityRendererTests|FullyQualifiedName~ShadowFilterPipelineTests|FullyQualifiedName~VoxelSceneCoverageDeepTests|FullyQualifiedName~RawAlbedoHookTests|FullyQualifiedName~RuntimeCampaignContractTests|FullyQualifiedName~RendererServicesCoverageTests|FullyQualifiedName~CoverageRenderingServicesResidualTests|FullyQualifiedName~RuntimeDataSandboxTests|FullyQualifiedName~RuntimeHarnessLogMergeTests|FullyQualifiedName~RawAlbedoTargetTests|FullyQualifiedName~RuntimeTransportRecoveryTests|FullyQualifiedName~RuntimeVegetationMapScenarioTests|FullyQualifiedName~RuntimeCoverageProbeTickTests</TestCaseFilter>
   </RunConfiguration>
 </RunSettings>
