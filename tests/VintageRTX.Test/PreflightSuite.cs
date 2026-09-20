@@ -612,9 +612,20 @@ internal static class PreflightSuite
         Assert(shader.Contains("voxelBounceSteps", StringComparison.Ordinal)
             && shader.Contains("voxelBounceShadowSteps", StringComparison.Ordinal),
             "adaptive voxel bounce traversal budgets missing");
-        Assert(shader.Contains("temporalFrameIndex % max(secondaryBounceCadence, 1) == 0", StringComparison.Ordinal)
-            && shader.Contains("debugView == 8", StringComparison.Ordinal),
-            "performance-tier temporal bounce cadence missing");
+        // Diffuse transport is produced every frame on the reduced grid. Requiring the old
+        // modulo cadence would reintroduce alternating radiance/zero into the actual game.
+        Assert(!shader.Contains("temporalFrameIndex % max(secondaryBounceCadence, 1) == 0", StringComparison.Ordinal)
+            && shader.Contains("filteredBounce", StringComparison.Ordinal)
+            && shader.Contains("outShadowSun = vec4(rawSun, rawBounce)", StringComparison.Ordinal)
+            && shader.Contains("outShadowSun = vec4(filteredSun, filteredBounce)", StringComparison.Ordinal),
+            "current-frame HDR diffuse production/filter/resolve contract missing");
+        for (int tier = 0; tier <= 2; tier++)
+        {
+            Assert(DiffuseTransportBudget.RayCount(tier, 1, 1f) == 1,
+                "an enabled rendering tier must retain dynamic diffuse transport");
+            Assert(DiffuseTransportBudget.RayCount(tier, 1, 0f) == 0,
+                "explicitly disabled diffuse transport must remain disabled");
+        }
         Assert(VoxelScene.ShouldCastShadow(EnumChunkRenderPass.Opaque), "opaque mesh faces must cast shadows");
         Assert(VoxelScene.ShouldCastShadow(EnumChunkRenderPass.OpaqueNoCull), "alpha-tested cage faces must be inspected");
         Assert(!VoxelScene.ShouldCastShadow(EnumChunkRenderPass.Transparent), "transparent mesh faces must transmit light");
@@ -1014,9 +1025,10 @@ internal static class PreflightSuite
             "performance tier must retain artifact-free full-frame transport");
         Assert(
             renderer.Contains("shader.Uniform(\"secondaryBounceCadence\", 1)", StringComparison.Ordinal)
-                && shader.Contains("secondaryBounceCadence <= 1", StringComparison.Ordinal)
-                && shader.Contains("temporalFrameIndex % max(secondaryBounceCadence, 1) == 0", StringComparison.Ordinal),
-            "every profile must trace coherent secondary radiance without zero-energy cadence frames");
+                && shader.Contains("prefilteredShadowVisibility != 0 && secondaryBounceCadence > 0", StringComparison.Ordinal)
+                && shader.Contains("? max(filteredBounce, vec3(0.0))", StringComparison.Ordinal)
+                && !shader.Contains("temporalFrameIndex % max(secondaryBounceCadence, 1) == 0", StringComparison.Ordinal),
+            "every profile must resolve current-frame secondary radiance without zero-energy cadence frames");
         Assert(
             renderer.Contains("shader.Uniform(\"shadowTemporalBlend\", 0.0f)", StringComparison.Ordinal)
                 && shader.Contains("if (hitNormalRoughness.a < -0.0005)", StringComparison.Ordinal)
@@ -1075,9 +1087,11 @@ internal static class PreflightSuite
                 && renderer.Contains("AdaptiveTransitionCooldownFrames = 120", StringComparison.Ordinal),
             "adaptive transport must reach its stable native-resolution tier promptly");
         Assert(
-            renderer.Contains("directional irradiance field is the stable", StringComparison.Ordinal)
-                && renderer.Contains("2 => 0", StringComparison.Ordinal),
-            "performance tier must use the stable irradiance LOD without periodic bounce spikes");
+            renderer.Contains("DiffuseTransportBudget.RayCount(", StringComparison.Ordinal)
+                && renderer.Contains("effectiveVoxelBounceRayCount > 0", StringComparison.Ordinal)
+                && renderer.Contains("PixelInternalFormat.Rgba16f", StringComparison.Ordinal)
+                && shader.Contains("filteredBounce = accumulatedBounce / max(accumulatedWeight, 0.001)", StringComparison.Ordinal),
+            "performance tier must keep current-frame dynamic HDR bounce instead of a static-only irradiance substitute");
         Assert(
             renderer.Contains("Repeating a short hierarchical sky DDA", StringComparison.Ordinal)
                 && renderer.Contains("int effectiveSkyRayCount = adaptiveQualityLevel switch", StringComparison.Ordinal)

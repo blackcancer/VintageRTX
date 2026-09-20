@@ -39,7 +39,7 @@ internal sealed record DynamicLiquidSurfaceReport(
 /// <summary>
 /// Supports standalone Renderer within the deterministic VintageRTX test infrastructure.
 /// </summary>
-internal sealed class StandaloneRenderer : IDisposable
+internal sealed partial class StandaloneRenderer : IDisposable
 {
     /// <summary>
     /// Fixed shader clock in seconds. It keeps wind-driven waves and lava bursts identical across captures.
@@ -74,8 +74,13 @@ internal sealed class StandaloneRenderer : IDisposable
     {
         this.options = options;
         Directory.CreateDirectory(options.OutputDirectory);
+        Stopwatch phase = Stopwatch.StartNew();
         scene = new SyntheticScene(options.Width, options.Height);
-        InitializeGlResources();
+        RecordPhase("synthetic-scene", phase);
+        phase.Restart();
+        try { InitializeGlResources(); }
+        catch { Dispose(); throw; }
+        RecordPhase("GL-initialization", phase);
     }
 
     /// <summary>
@@ -84,6 +89,7 @@ internal sealed class StandaloneRenderer : IDisposable
     /// <returns>The run result consumed by the caller&apos;s assertion.</returns>
     public RenderLabReport Run()
     {
+        Stopwatch phase = Stopwatch.StartNew();
         Dictionary<string, string> captures = new(StringComparer.OrdinalIgnoreCase);
         string sourcePath = Path.Combine(options.OutputDirectory, "source-raster.png");
         SavePixels(sourcePath, scene.SourceColor);
@@ -150,6 +156,8 @@ internal sealed class StandaloneRenderer : IDisposable
         captures["pbr-classes"] = classesPath;
         PbrSeparationAnalyzer.Print(pbr.Report);
 
+        RecordPhase("diagnostic-draws-readback-analysis", phase);
+        phase.Restart();
         // Diagnostic readback and PNG compression are outside the timing
         // window. Warm the exact final shader before allocating timer queries.
         for (int index = 0; index < 30; index++)
@@ -158,7 +166,11 @@ internal sealed class StandaloneRenderer : IDisposable
         }
         GL.Finish();
 
+        RecordPhase("warmup-30-frames", phase);
+        phase.Restart();
         double[] gpuMilliseconds = MeasureGpuFrames(options.BenchmarkFrames);
+        RecordPhase("benchmark-all-passes", phase);
+        Console.WriteLine($"Transport draw count: {transportDrawCount} (three per frame, included in GPU queries).");
         Array.Sort(gpuMilliseconds);
         double average = gpuMilliseconds.Average();
         int p99Index = Math.Clamp((int)Math.Ceiling(gpuMilliseconds.Length * 0.99) - 1, 0, gpuMilliseconds.Length - 1);
@@ -272,13 +284,16 @@ internal sealed class StandaloneRenderer : IDisposable
             LiquidOpticalRegistry.LookupWidth, LiquidOpticalRegistry.LookupHeight,
             scene.LiquidOpticalProfiles, TextureMinFilter.Nearest, TextureMagFilter.Nearest);
         float[] dynamicLiquidState = BuildDynamicLiquidState();
-        CreateTexture2D(15, PixelInternalFormat.Rgba32f, PixelFormat.Rgba, PixelType.Float,
+        dynamicLiquidTexture = CreateTexture2D(15, PixelInternalFormat.Rgba32f, PixelFormat.Rgba, PixelType.Float,
             SyntheticScene.VoxelWidth * LiquidSurfaceSimulation.RecommendedCellsPerBlock,
             SyntheticScene.VoxelDepth * LiquidSurfaceSimulation.RecommendedCellsPerBlock,
             dynamicLiquidState,
             TextureMinFilter.Linear,
             TextureMagFilter.Linear);
 
+        // Allocation uses the active unit. Preserve the just-uploaded liquid texture instead
+        // of making the shader sample its own final render target on unit fifteen.
+        int allocationBinding = GL.GetInteger(GetPName.TextureBinding2D);
         outputTexture = GL.GenTexture();
         textures.Add(outputTexture);
         GL.BindTexture(TextureTarget.Texture2D, outputTexture);
@@ -296,6 +311,7 @@ internal sealed class StandaloneRenderer : IDisposable
             throw new InvalidOperationException($"Standalone framebuffer incomplete: {status}.");
         }
 
+        GL.BindTexture(TextureTarget.Texture2D, allocationBinding);
         GL.UseProgram(program);
         string[] samplerNames =
         [
@@ -317,6 +333,8 @@ internal sealed class StandaloneRenderer : IDisposable
         SetRequired("gDirectPosition", 2);
         SetRequired("reflectionSourceColor", 0);
         BindStaticUniforms();
+        InitializeTransportPipeline();
+        ValidateTextureOwnership(outputTexture);
         CheckGl("standalone initialization");
     }
 
@@ -348,6 +366,24 @@ internal sealed class StandaloneRenderer : IDisposable
         ];
         SetMatrix("projection", projection);
         SetMatrix("inverseViewMatrix", inverseView);
+        float[] view =
+        [
+            right.X, up.X, backward.X, 0,
+            right.Y, up.Y, backward.Y, 0,
+            right.Z, up.Z, backward.Z, 0,
+            0, 0, 0, 1
+        ];
+        SetMatrix("viewMatrix", view);
+        Matrix4x4 p = new(projection[0], projection[1], projection[2], projection[3],
+            projection[4], projection[5], projection[6], projection[7],
+            projection[8], projection[9], projection[10], projection[11],
+            projection[12], projection[13], projection[14], projection[15]);
+        if (!Matrix4x4.Invert(p, out Matrix4x4 inverse))
+            throw new InvalidOperationException("Synthetic perspective projection is singular.");
+        SetMatrix("inverseProjection", [inverse.M11, inverse.M12, inverse.M13, inverse.M14,
+            inverse.M21, inverse.M22, inverse.M23, inverse.M24,
+            inverse.M31, inverse.M32, inverse.M33, inverse.M34,
+            inverse.M41, inverse.M42, inverse.M43, inverse.M44]);
         Set("inverseFrameSize", 1.0f / options.Width, 1.0f / options.Height);
         Set("cameraWorldPosition", SyntheticScene.CameraPosition);
         // Runtime view positions are relative to the player's floating origin.
@@ -409,8 +445,8 @@ internal sealed class StandaloneRenderer : IDisposable
         Set("pointLightShadowSamples", 3);
         Set("denseDynamicLightCluster", 0);
         Set("voxelBounceRayCount", 1);
-        Set("voxelBounceSteps", 7);
-        Set("voxelBounceShadowSteps", 6);
+        Set("voxelBounceSteps", DiffuseTransportBudget.TraversalSteps(6f));
+        Set("voxelBounceShadowSteps", DiffuseTransportBudget.TraversalSteps(6f));
         Set("skyRayCount", 1);
         Set("skyTraceSteps", 10);
         Set("albedoDetailSamples", 1);
@@ -594,23 +630,12 @@ internal sealed class StandaloneRenderer : IDisposable
     /// <param name="outputColorDomain">
     /// Zero for the standalone filmic display preview; one for the production scene-transport domain.
     /// </param>
-    private void RenderFrame(
+    internal void RenderFrame(
         VintageRtxDebugView view,
         int frameIndex,
         int outputColorDomain = 0)
     {
-        GL.BindFramebuffer(FramebufferTarget.Framebuffer, framebuffer);
-        GL.Viewport(0, 0, options.Width, options.Height);
-        GL.DrawBuffer(DrawBufferMode.ColorAttachment0);
-        GL.ClearColor(0, 0, 0, 1);
-        GL.Clear(ClearBufferMask.ColorBufferBit);
-        GL.UseProgram(program);
-        Set("debugView", (int)view);
-        Set("outputColorDomain", outputColorDomain);
-        Set("temporalFrameIndex", frameIndex);
-        GL.BindVertexArray(vertexArray);
-        GL.DrawArrays(PrimitiveType.Triangles, 0, 3);
-        CheckGl($"render {view}");
+        RenderTransportFrame(view, frameIndex, outputColorDomain);
     }
 
     /// <summary>
@@ -958,6 +983,8 @@ internal sealed class StandaloneRenderer : IDisposable
             return;
         }
         disposed = true;
+        foreach (int target in transportFramebuffers)
+            if (target != 0) GL.DeleteFramebuffer(target);
         if (framebuffer != 0) GL.DeleteFramebuffer(framebuffer);
         if (vertexArray != 0) GL.DeleteVertexArray(vertexArray);
         if (program != 0) GL.DeleteProgram(program);

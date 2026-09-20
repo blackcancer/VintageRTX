@@ -245,6 +245,8 @@ public sealed class RenderLabExplorerTests
             "pbr-transport",
             out string? pbrTransportCapture));
         Assert.IsTrue(File.Exists(pbrTransportCapture));
+        Assert.IsTrue(File.Exists(Path.Combine(output, "phase-timings.json")));
+        Assert.AreEqual(60, report.BenchmarkFrames);
         Assert.IsTrue(report.AverageGpuMilliseconds > 0.0);
         Assert.IsTrue(report.P99GpuMilliseconds >= report.AverageGpuMilliseconds);
         Assert.IsTrue(report.OnePercentLowFps > 0.0);

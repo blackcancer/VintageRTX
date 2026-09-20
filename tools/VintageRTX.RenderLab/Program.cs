@@ -77,7 +77,13 @@ internal static class RenderLabRunner
             throw new NotSupportedException("OpenGL 4.3 or newer is required.");
         }
 
+        System.Diagnostics.Stopwatch phase = System.Diagnostics.Stopwatch.StartNew();
         contextReady?.Invoke();
+        Directory.CreateDirectory(options.OutputDirectory);
+        File.WriteAllText(Path.Combine(options.OutputDirectory, "gpu-services-milliseconds.txt"),
+            phase.Elapsed.TotalMilliseconds.ToString("R", System.Globalization.CultureInfo.InvariantCulture));
+        Console.WriteLine($"RenderLab phase production-GPU-services: {phase.Elapsed.TotalMilliseconds:0.0} ms");
+        Console.Out.Flush();
         using StandaloneRenderer renderer = new(options);
         return renderer.Run();
     }
