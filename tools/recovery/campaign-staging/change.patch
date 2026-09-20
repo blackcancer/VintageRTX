@@ -1,0 +1,259 @@
+--- a/src/VintageRTX/Rendering/FrameCaptureService.cs
++++ b/src/VintageRTX/Rendering/FrameCaptureService.cs
+@@ -452,12 +452,18 @@
+             return FrameCaptureAdvanceResult.RestartQueued;
+         }
+ 
+-        bool requiresRawDiagnostic = transactionRequest.DebugViewOverride
+-            is VintageRtxDebugView.ReflectionSource or VintageRtxDebugView.EntityMirror;
++        bool requiresRawDiagnostic = FrameCaptureDiagnosticContract.RequiresRaw(transactionRequest.DebugViewOverride);
+         if (requiresRawDiagnostic
+             && transactionPreFinalDiagnosticPixels is null)
+         {
+             QueueTransactionRestart("raw pre-final diagnostic is unavailable");
++            return FrameCaptureAdvanceResult.RestartQueued;
++        }
++
++        if (FrameCaptureDiagnosticContract.IsChannelDiagnostic(transactionRequest.DebugViewOverride)
++            && (transactionPreFinalDiagnosticWidth != width || transactionPreFinalDiagnosticHeight != height))
++        {
++            QueueTransactionRestart("raw channel dimensions differ from the matching final frame");
+             return FrameCaptureAdvanceResult.RestartQueued;
+         }
+ 
+@@ -481,9 +487,9 @@
+     }
+ 
+     /// <summary>
+-    /// Stores the effect pass exactly as produced before Vintage Story's final shader. This is used
+-    /// by reflection-source and entity-mirror diagnostics so later first-person or bloom composition
+-    /// cannot be mistaken for reflected geometry.
++    /// Stores the selected diagnostic before Vintage Story's final shader. Channel masks retain
++    /// their numeric encoding without fog, bloom or grading. Reflection-source and entity-mirror
++    /// carriers retain their separate raw evidence contract.
+     /// </summary>
+     /// <param name="step">Active effect step returned by <see cref="TryBeginCaptureFrame"/>.</param>
+     /// <param name="pixels">Bottom-up, tightly packed RGBA8 pre-final framebuffer.</param>
+@@ -499,8 +505,7 @@
+         bool expectedSubmission = transactionState == CaptureTransactionState.EffectReadbackPending
+             && step.Phase == FrameCapturePhase.Effect
+             && step.Request == transactionRequest
+-            && step.Request.DebugViewOverride
+-                is VintageRtxDebugView.ReflectionSource or VintageRtxDebugView.EntityMirror;
++            && FrameCaptureDiagnosticContract.RequiresRaw(step.Request.DebugViewOverride);
+         if (!expectedSubmission)
+         {
+             return false;
+@@ -784,8 +789,16 @@
+ 
+         try
+         {
++            bool channelDiagnostic = FrameCaptureDiagnosticContract.IsChannelDiagnostic(request.DebugViewOverride);
++            if (channelDiagnostic && (preFinalDiagnosticPixels is null
++                || preFinalDiagnosticWidth != width || preFinalDiagnosticHeight != height))
++                throw new InvalidDataException("A diagnostic channel requires matching pre-final pixels; no display fallback is accepted.");
+             SavePng(beforePath, beforePixels, width, height);
+-            SavePng(afterPath, afterPixels, width, height);
++            // The established validator filename now contains the actual numeric diagnostic.
++            // Preserve the player-facing post-final picture separately, never relabel it as data.
++            SavePng(afterPath, channelDiagnostic ? preFinalDiagnosticPixels! : afterPixels, width, height);
++            if (channelDiagnostic)
++                SavePng(Path.Combine(captureDirectory, $"{timestamp}-{request.Label}-postfinal.png"), afterPixels, width, height);
+             if (rawPath is not null)
+             {
+                 SavePng(
+@@ -794,6 +807,21 @@
+                     preFinalDiagnosticWidth,
+                     preFinalDiagnosticHeight);
+             }
++            string contractPath = Path.Combine(captureDirectory, $"{timestamp}-{request.Label}-capture.json");
++            File.WriteAllText(contractPath, Newtonsoft.Json.JsonConvert.SerializeObject(new
++            {
++                schemaVersion = 2,
++                label = request.Label,
++                view = request.DebugViewOverride?.ToString() ?? "configured-final",
++                beforeSignal = "engine-post-final-rgba8",
++                effectSignal = channelDiagnostic ? "shader-diagnostic-rgba8" : "engine-post-final-rgba8",
++                diagnosticEncoding = FrameCaptureDiagnosticContract.DescribeEncoding(request.DebugViewOverride),
++                rawSignal = rawPath is null ? null : "pre-final-rgba8",
++                width,
++                height,
++                rawWidth = preFinalDiagnosticWidth,
++                rawHeight = preFinalDiagnosticHeight
++            }, Newtonsoft.Json.Formatting.Indented));
+             status = $"saved: {afterPath}";
+             if (rawPath is null)
+             {
+@@ -805,7 +833,7 @@
+             else
+             {
+                 api.Logger.Notification(
+-                    "[VintageRTX] Comparison capture saved: {0}, {1}, and raw pre-final {2}",
++                    "[VintageRTX] Comparison capture saved: {0} and {1}, and raw pre-final {2}",
+                     beforePath,
+                     afterPath,
+                     rawPath);
+--- a/src/VintageRTX/Rendering/FilmicDisplayRenderer.cs
++++ b/src/VintageRTX/Rendering/FilmicDisplayRenderer.cs
+@@ -3641,8 +3641,7 @@
+             }
+ 
+             if (captureFrame
+-                && effectiveDebugView
+-                    is VintageRtxDebugView.ReflectionSource or VintageRtxDebugView.EntityMirror)
++                && FrameCaptureDiagnosticContract.RequiresRaw(activeCaptureStep.Request.DebugViewOverride))
+             {
+                 CaptureRawPreFinalDiagnostic(
+                     state,
+@@ -5392,8 +5391,8 @@
+     }
+ 
+     /// <summary>
+-    /// Reads either the full-size reflection source or the half-size entity-only evidence before the
+-    /// official final shader can add bloom and first-person geometry. Failure restarts only the
++    /// Reads the full-size shader diagnostic or the half-size entity-only evidence before the
++    /// official final shader can add fog, bloom, grading or first-person geometry. Failure restarts only the
+     /// evidence transaction and never disables rendering, because the transport frame remains valid.
+     /// </summary>
+     /// <param name="state">Callback state whose read framebuffer and buffer must be restored.</param>
+--- a/tests/VintageRTX.Test/RuntimeDataSandbox.cs
++++ b/tests/VintageRTX.Test/RuntimeDataSandbox.cs
+@@ -149,7 +149,9 @@
+         }
+ 
+         Directory.CreateDirectory(destination);
+-        foreach (string file in Directory.EnumerateFiles(captureRoot, "*.png", SearchOption.TopDirectoryOnly))
++        foreach (string file in Directory.EnumerateFiles(captureRoot, "*", SearchOption.TopDirectoryOnly)
++            .Where(static path => path.EndsWith(".png", StringComparison.OrdinalIgnoreCase)
++                || path.EndsWith("-capture.json", StringComparison.OrdinalIgnoreCase)))
+         {
+             if (File.GetLastWriteTimeUtc(file) >= captureCutoffUtc)
+             {
+--- a/tests/VintageRTX.Test/RuntimeHarness.cs
++++ b/tests/VintageRTX.Test/RuntimeHarness.cs
+@@ -27,11 +27,19 @@
+     /// <param name="cancellationToken">The cancellation Token input used to configure this deterministic test path.</param>
+     /// <returns>A task that completes when the isolated test operation and its cleanup finish.</returns>
+     public static async Task<int> RunAsync(ScenarioDefinition scenario, CancellationToken cancellationToken)
++        => (await RunDetailedAsync(scenario, cancellationToken)).ExitCode;
++
++    /// <summary>Runs one real scenario and preserves its individual verdict and durable evidence.</summary>
++    /// <param name="scenario">Authoritative scenario contract, including all unchanged acceptance gates.</param>
++    /// <param name="cancellationToken">Cancellation of this invocation only.</param>
++    /// <returns>Structured result belonging to this scenario, never another parallel run.</returns>
++    internal static async Task<RuntimeScenarioResult> RunDetailedAsync(ScenarioDefinition scenario, CancellationToken cancellationToken)
+     {
+         if (!scenario.Automated)
+         {
+             Console.Error.WriteLine($"Scenario '{scenario.Name}' is catalogued but still requires an automation driver.");
+-            return 2;
++            return new RuntimeScenarioResult(scenario.Name, string.Empty, "NotAutomated", 2,
++                ["scenario is catalogued but has no automation driver"]);
+         }
+ 
+         string repositoryRoot = TestPaths.FindRepositoryRoot();
+@@ -95,6 +103,7 @@
+         startInfo.ArgumentList.Add("--addModPath");
+         startInfo.ArgumentList.Add(modBuildPath);
+         string runtimeTestModBuildPath = ResolveRuntimeTestModPath(modBuildPath);
++        RuntimeScenarioResult.WriteInputIdentity(artifactRoot, modBuildPath);
+         startInfo.Environment["VINTAGERTX_AUTO_CAPTURE"] = "1";
+         // RuntimeScenarioProbe changes this process-local gate only after the
+         // official calendar/weather/sky pass and the requested scene/camera
+@@ -206,7 +215,7 @@
+                         clientLogPath,
+                         serverLogPath,
+                         cancellationToken);
+-                    runtimeCompleted = RuntimeLogValidator.IsComplete(log, scenario);
++                    runtimeCompleted = RuntimeScenarioCompletion.HasCollectedEvidence(log, scenario);
+                     runtimeFailed = RuntimeLogValidator.HasFatalFailure(log);
+                     if (runtimeCompleted || runtimeFailed)
+                     {
+@@ -319,13 +328,12 @@
+                 nativeCaptureTier,
+                 benchmarkTier);
+         }
+-        if (!RuntimeLogValidator.IsComplete(log, scenario)
+-            && !RuntimeLogValidator.HasFatalFailure(log))
+-        {
+-            failures.Add(scenario.RunBenchmark
+-                ? "runtime scenario timed out before the stabilized benchmark completed"
+-                : "runtime scenario timed out before the focused capture sequence completed");
+-        }
++        string termination = runtimeCompleted ? "EvidenceCollected"
++            : runtimeFailed ? "FatalRuntimeSignature"
++            : harnessStoppedProcess ? "DeadlineReached" : "ExitedBeforeEvidence";
++        if (!runtimeCompleted && !runtimeFailed)
++            failures.Add($"runtime execution incomplete: {termination}; "
++                + RuntimeScenarioCompletion.DescribeMissingEvidence(log, scenario));
+ 
+         if (RuntimeLogValidator.TryDescribeBenchmarkContention(
+                 log,
+@@ -340,13 +348,12 @@
+             Console.Error.WriteLine($"FAIL {failure}");
+         }
+ 
+-        if (failures.Count == 0)
+-        {
++        RuntimeScenarioResult result = new(scenario.Name, artifactRoot, termination,
++            failures.Count == 0 ? 0 : 1, failures.ToArray());
++        result.Write();
++        if (result.ExitCode == 0)
+             Console.WriteLine($"PASS runtime scenario {scenario.Name}");
+-            return 0;
+-        }
+-
+-        return 1;
++        return result;
+     }
+ 
+     /// <summary>
+--- a/tests/VintageRTX.Test/InGameRealCaseTests.cs
++++ b/tests/VintageRTX.Test/InGameRealCaseTests.cs
+@@ -12,6 +12,9 @@
+ [DoNotParallelize]
+ public sealed class InGameRealCaseTests
+ {
++    /// <summary>Attaches the exact per-scenario report to its Visual Studio/TRX result.</summary>
++    public TestContext TestContext { get; set; } = null!;
++
+     /// <summary>
+     /// Gets every automated multi-scene campaign identifier directly from the
+     /// catalog. Each row is resolved immediately before launch.
+@@ -33,10 +36,9 @@
+     public async Task RepresentativeScenarioCompletesSuccessfully(string scenarioName)
+     {
+         ScenarioDefinition scenario = ScenarioCatalog.Get(scenarioName);
+-        int exitCode = await RuntimeHarness.RunAsync(scenario, CancellationToken.None);
+-        Assert.AreEqual(
+-            0,
+-            exitCode,
+-            $"Real-case VintageRTX scenario '{scenarioName}' failed. Inspect its runtime artifact directory for logs and captures.");
++        RuntimeScenarioResult result = await RuntimeHarness.RunDetailedAsync(scenario, CancellationToken.None);
++        if (!string.IsNullOrWhiteSpace(result.ArtifactDirectory))
++            TestContext.AddResultFile(Path.Combine(result.ArtifactDirectory, "runtime-result.json"));
++        Assert.AreEqual(0, result.ExitCode, result.FormatFailure());
+     }
+ }
+--- a/tests/VintageRTX.Test/RendererServicesCoverageTests.cs
++++ b/tests/VintageRTX.Test/RendererServicesCoverageTests.cs
+@@ -66,7 +66,7 @@
+             _ => null,
+             () => now,
+             out _);
+-        FrameCaptureRequest request = new("post-final", VintageRtxDebugView.Reflection);
++        FrameCaptureRequest request = new("post-final", VintageRtxDebugView.Final);
+ 
+         Assert.IsTrue(service.ReadyForBenchmark);
+         Assert.IsTrue(service.QueueCapture(request));
+--- a/tests/VintageRTX.Test/CoverageRenderingServicesResidualTests.cs
++++ b/tests/VintageRTX.Test/CoverageRenderingServicesResidualTests.cs
+@@ -273,7 +273,7 @@
+         FrameCaptureService material = CreateCaptureService(CreateExistingCaptureRoot());
+         Assert.IsTrue(material.QueueCapture(new FrameCaptureRequest(
+             "not-raw",
+-            VintageRtxDebugView.Material)));
++            VintageRtxDebugView.Final)));
+         FrameCaptureStep materialEffect = BeginEffect(material, 30);
+         Assert.IsFalse(material.SubmitPreFinalDiagnostic(
+             materialEffect,
