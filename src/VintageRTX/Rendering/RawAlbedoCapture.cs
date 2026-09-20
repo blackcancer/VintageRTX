@@ -96,12 +96,25 @@ internal sealed class RawAlbedoCapture : IRenderer
         int slot = Array.FindIndex(map.InterfaceMethods, method => method.Name == nameof(IShaderProgram.Use)
             && method.GetParameters().Length == 0);
         if (slot < 0) return false;
-        MethodInfo method = map.TargetMethods[slot];
+        MethodInfo method = ResolveDeclaredUseMethod(map.TargetMethods[slot]);
         if (patchedMethods.Contains(method)) return true;
         harmony ??= new Harmony(HarmonyId);
         harmony.Patch(method, postfix: new HarmonyMethod(typeof(RawAlbedoCapture), nameof(AfterUse)));
         patchedMethods.Add(method);
         return true;
+    }
+
+    /// <summary>Canonicalizes an interface-map target to its implemented declaration for Harmony.</summary>
+    /// <param name="implementation">Actual interface dispatch target, possibly reflected through a derived shader.</param>
+    /// <returns>The same implementation reflected from its declaring type, preserving real overrides.</returns>
+    internal static MethodInfo ResolveDeclaredUseMethod(MethodInfo implementation)
+    {
+        ArgumentNullException.ThrowIfNull(implementation);
+        // The official client inherits Use() from ShaderProgramBase. Its interface map can return
+        // a MethodInfo reflected through the derived shader; Harmony explicitly rejects that alias.
+        // Canonicalize before both deduplication and patching, and retain that identity for cleanup.
+        // GetBaseDefinition() would be wrong here: a genuine override owns a different method body.
+        return AccessTools.GetDeclaredMember(implementation);
     }
 
     /// <summary>Disables the extra route for all programs not positively identified as albedo writers.</summary>
