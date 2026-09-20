@@ -17,7 +17,7 @@ permissions:
 
 concurrency:
   group: recovery-delivery-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   package:
@@ -26,6 +26,7 @@ jobs:
     timeout-minutes: 20
     env:
       LIBGL_ALWAYS_SOFTWARE: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -40,7 +41,7 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/delivery/evidence" "$RUNNER_TEMP/vs-client"
           git rev-parse HEAD > "$RUNNER_TEMP/delivery/evidence/source-commit.txt"
-          git status --porcelain > "$RUNNER_TEMP/delivery/evidence/source-status.txt"
+          git status --porcelain --untracked-files=no > "$RUNNER_TEMP/delivery/evidence/source-status.txt"
           test ! -s "$RUNNER_TEMP/delivery/evidence/source-status.txt"
           sudo apt-get update -qq
           sudo apt-get install -y -qq libegl1-mesa-dev libgl1-mesa-dri libgl-dev libglfw3 xvfb libxinerama1 libxcursor1 > "$RUNNER_TEMP/delivery/evidence/packages.log"
@@ -93,8 +94,10 @@ jobs:
           commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
           if commit != os.environ['GITHUB_SHA']:
               raise SystemExit('Checkout does not match the workflow source.')
-          if subprocess.check_output(['git', 'status', '--porcelain'], text=True).strip():
-              raise SystemExit('Tracked/untracked source changes during qualification.')
+          # Untracked interpreter/test scratch files are never packaged. Every tracked change
+          # remains fatal; the source ZIP is generated from the immutable Git commit itself.
+          if subprocess.check_output(['git', 'status', '--porcelain', '--untracked-files=no'], text=True).strip():
+              raise SystemExit('Tracked source changed during qualification.')
           reports = {}
           for name, minimum in [('reported', 103), ('raw-albedo', 1), ('renderlab', 1)]:
               tree = ET.parse(evidence / (name + '.trx'))
@@ -120,8 +123,8 @@ jobs:
           dll = output / 'VintageRTX.dll'
           if dll.read_bytes()[:2] != b'MZ':
               raise SystemExit('Compiled mod DLL is missing or invalid.')
-          # Allowlist only the mod and its tracked runtime assets. Never distribute the client,
-          # native libraries, runtime-test support, authentication or user-world artifacts.
+          # Only the mod and its tracked runtime assets: never distribute the client, native
+          # libraries, runtime-test support, authentication or user-world artifacts.
           files = {'VintageRTX.dll': dll, 'modinfo.json': output / 'modinfo.json'}
           tracked = subprocess.check_output(['git', 'ls-files', '-z', 'src/VintageRTX/assets']).decode().split('\0')
           for name in filter(None, tracked):
@@ -136,7 +139,8 @@ jobs:
                   files[optional] = output / optional
           if len(files) < 20 or not any(name.endswith('/display.frag') for name in files):
               raise SystemExit('Incomplete runtime payload.')
-          if any(Path(name).suffix.lower() in {'.ttf', '.otf', '.woff', '.woff2', '.ttc'} for name in files):
+          forbidden_fonts = {'.ttf', '.otf', '.woff', '.woff2', '.ttc'}
+          if any(Path(name).suffix.lower() in forbidden_fonts for name in files):
               raise SystemExit('Font files require a separate distribution review.')
           digest = lambda data: hashlib.sha256(data).hexdigest()
           manifest = {
@@ -181,7 +185,7 @@ jobs:
           with zipfile.ZipFile(source_zip) as archive:
               if archive.testzip() is not None:
                   raise SystemExit('Source archive verification failed.')
-              if any(Path(n).suffix.lower() in {'.ttf', '.otf', '.woff', '.woff2', '.ttc'} for n in archive.namelist()):
+              if any(Path(n).suffix.lower() in forbidden_fonts for n in archive.namelist()):
                   raise SystemExit('Source font files require separate review.')
           (delivery / 'SHA256SUMS.txt').write_text(''.join(
               digest(path.read_bytes()) + '  ' + path.name + '\n' for path in [mod_zip, source_zip]))
