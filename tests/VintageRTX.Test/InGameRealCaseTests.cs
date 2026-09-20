@@ -12,6 +12,9 @@ namespace VintageRTX.Test;
 [DoNotParallelize]
 public sealed class InGameRealCaseTests
 {
+    /// <summary>Attaches the exact per-scenario report to its Visual Studio/TRX result.</summary>
+    public TestContext TestContext { get; set; } = null!;
+
     /// <summary>
     /// Gets every automated multi-scene campaign identifier directly from the
     /// catalog. Each row is resolved immediately before launch.
@@ -33,10 +36,9 @@ public sealed class InGameRealCaseTests
     public async Task RepresentativeScenarioCompletesSuccessfully(string scenarioName)
     {
         ScenarioDefinition scenario = ScenarioCatalog.Get(scenarioName);
-        int exitCode = await RuntimeHarness.RunAsync(scenario, CancellationToken.None);
-        Assert.AreEqual(
-            0,
-            exitCode,
-            $"Real-case VintageRTX scenario '{scenarioName}' failed. Inspect its runtime artifact directory for logs and captures.");
+        RuntimeScenarioResult result = await RuntimeHarness.RunDetailedAsync(scenario, CancellationToken.None);
+        if (!string.IsNullOrWhiteSpace(result.ArtifactDirectory))
+            TestContext.AddResultFile(Path.Combine(result.ArtifactDirectory, "runtime-result.json"));
+        Assert.AreEqual(0, result.ExitCode, result.FormatFailure());
     }
 }

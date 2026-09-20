@@ -27,11 +27,19 @@ internal static class RuntimeHarness
     /// <param name="cancellationToken">The cancellation Token input used to configure this deterministic test path.</param>
     /// <returns>A task that completes when the isolated test operation and its cleanup finish.</returns>
     public static async Task<int> RunAsync(ScenarioDefinition scenario, CancellationToken cancellationToken)
+        => (await RunDetailedAsync(scenario, cancellationToken)).ExitCode;
+
+    /// <summary>Runs one real scenario and preserves its individual verdict and durable evidence.</summary>
+    /// <param name="scenario">Authoritative scenario contract, including all unchanged acceptance gates.</param>
+    /// <param name="cancellationToken">Cancellation of this invocation only.</param>
+    /// <returns>Structured result belonging to this scenario, never another parallel run.</returns>
+    internal static async Task<RuntimeScenarioResult> RunDetailedAsync(ScenarioDefinition scenario, CancellationToken cancellationToken)
     {
         if (!scenario.Automated)
         {
             Console.Error.WriteLine($"Scenario '{scenario.Name}' is catalogued but still requires an automation driver.");
-            return 2;
+            return new RuntimeScenarioResult(scenario.Name, string.Empty, "NotAutomated", 2,
+                ["scenario is catalogued but has no automation driver"]);
         }
 
         string repositoryRoot = TestPaths.FindRepositoryRoot();
@@ -95,6 +103,7 @@ internal static class RuntimeHarness
         startInfo.ArgumentList.Add("--addModPath");
         startInfo.ArgumentList.Add(modBuildPath);
         string runtimeTestModBuildPath = ResolveRuntimeTestModPath(modBuildPath);
+        RuntimeScenarioResult.WriteInputIdentity(artifactRoot, modBuildPath);
         startInfo.Environment["VINTAGERTX_AUTO_CAPTURE"] = "1";
         // RuntimeScenarioProbe changes this process-local gate only after the
         // official calendar/weather/sky pass and the requested scene/camera
@@ -206,7 +215,7 @@ internal static class RuntimeHarness
                         clientLogPath,
                         serverLogPath,
                         cancellationToken);
-                    runtimeCompleted = RuntimeLogValidator.IsComplete(log, scenario);
+                    runtimeCompleted = RuntimeScenarioCompletion.HasCollectedEvidence(log, scenario);
                     runtimeFailed = RuntimeLogValidator.HasFatalFailure(log);
                     if (runtimeCompleted || runtimeFailed)
                     {
@@ -319,13 +328,12 @@ internal static class RuntimeHarness
                 nativeCaptureTier,
                 benchmarkTier);
         }
-        if (!RuntimeLogValidator.IsComplete(log, scenario)
-            && !RuntimeLogValidator.HasFatalFailure(log))
-        {
-            failures.Add(scenario.RunBenchmark
-                ? "runtime scenario timed out before the stabilized benchmark completed"
-                : "runtime scenario timed out before the focused capture sequence completed");
-        }
+        string termination = runtimeCompleted ? "EvidenceCollected"
+            : runtimeFailed ? "FatalRuntimeSignature"
+            : harnessStoppedProcess ? "DeadlineReached" : "ExitedBeforeEvidence";
+        if (!runtimeCompleted && !runtimeFailed)
+            failures.Add($"runtime execution incomplete: {termination}; "
+                + RuntimeScenarioCompletion.DescribeMissingEvidence(log, scenario));
 
         if (RuntimeLogValidator.TryDescribeBenchmarkContention(
                 log,
@@ -340,13 +348,12 @@ internal static class RuntimeHarness
             Console.Error.WriteLine($"FAIL {failure}");
         }
 
-        if (failures.Count == 0)
-        {
+        RuntimeScenarioResult result = new(scenario.Name, artifactRoot, termination,
+            failures.Count == 0 ? 0 : 1, failures.ToArray());
+        result.Write();
+        if (result.ExitCode == 0)
             Console.WriteLine($"PASS runtime scenario {scenario.Name}");
-            return 0;
-        }
-
-        return 1;
+        return result;
     }
 
     /// <summary>

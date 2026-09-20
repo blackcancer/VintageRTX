@@ -66,7 +66,7 @@ public sealed class RendererServicesCoverageTests
             _ => null,
             () => now,
             out _);
-        FrameCaptureRequest request = new("post-final", VintageRtxDebugView.Reflection);
+        FrameCaptureRequest request = new("post-final", VintageRtxDebugView.Final);
 
         Assert.IsTrue(service.ReadyForBenchmark);
         Assert.IsTrue(service.QueueCapture(request));
@@ -435,7 +435,7 @@ public sealed class RendererServicesCoverageTests
             Assert.AreEqual(new FrameCaptureRequest(label, view), terminal);
         }
 
-        service.SavePair(terminal, [1, 2, 3, 255], [4, 5, 6, 255], 1, 1);
+        SaveNumericTerminal(service, terminal);
         Assert.IsTrue(notifications.Any(static message => message.Contains(
             "profile=light-stability, last=light-stability-shadow-c, captures=10",
             StringComparison.Ordinal)));
@@ -467,7 +467,7 @@ public sealed class RendererServicesCoverageTests
         Assert.AreEqual(14, captureCount);
         Assert.AreEqual("wetness", terminal.Label);
         Assert.AreEqual(VintageRtxDebugView.Wetness, terminal.DebugViewOverride);
-        service.SavePair(terminal, [1, 2, 3, 255], [4, 5, 6, 255], 1, 1);
+        SaveNumericTerminal(service, terminal);
         Assert.IsTrue(notifications.Any(static message => message.Contains(
             "profile=default, last=wetness, captures=14",
             StringComparison.Ordinal)));
@@ -516,7 +516,7 @@ public sealed class RendererServicesCoverageTests
             Assert.IsTrue(service.TryGetCapture(frame, out finalRequest), frame.ToString());
         }
         Assert.AreEqual("native-sun-shadow", finalRequest.Label);
-        service.SavePair(finalRequest, [1, 2, 3, 255], [4, 5, 6, 255], 1, 1);
+        SaveNumericTerminal(service, finalRequest);
         Assert.IsTrue(service.Status.StartsWith("saved: ", StringComparison.Ordinal));
         Assert.IsTrue(notifications.Count > 0);
         Assert.IsFalse(service.ReadyForBenchmark);
@@ -693,4 +693,19 @@ public sealed class RendererServicesCoverageTests
         });
         return new FrameCaptureService(api, environment, utcNow);
     }
+    /// <summary>Commits a selected channel through the same baseline/raw/effect transaction as the renderer.</summary>
+    /// <param name="service">Production service whose automatic schedule has selected its terminal request.</param>
+    /// <param name="request">Selected diagnostic; its raw bytes are mandatory rather than inferred from final colour.</param>
+    private static void SaveNumericTerminal(FrameCaptureService service, FrameCaptureRequest request)
+    {
+        Assert.IsTrue(service.QueueCapture(request));
+        Assert.IsTrue(service.TryBeginCaptureFrame(20_000, out FrameCaptureStep baseline));
+        Assert.AreEqual(FrameCaptureAdvanceResult.BaselineStored,
+            service.SubmitPostFinalFrame(baseline, [1, 2, 3, 255], 1, 1));
+        Assert.IsTrue(service.TryBeginCaptureFrame(20_001, out FrameCaptureStep effect));
+        Assert.IsTrue(service.SubmitPreFinalDiagnostic(effect, [0, 0, 0, 255], 1, 1));
+        Assert.AreEqual(FrameCaptureAdvanceResult.PairSaved,
+            service.SubmitPostFinalFrame(effect, [4, 5, 6, 255], 1, 1));
+    }
+
 }

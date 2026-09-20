@@ -3640,9 +3640,8 @@ internal sealed class FilmicDisplayRenderer : IRenderer
                 GL.ReadBuffer((ReadBufferMode)state.ReadBuffer);
             }
 
-            if (captureFrame
-                && effectiveDebugView
-                    is VintageRtxDebugView.ReflectionSource or VintageRtxDebugView.EntityMirror)
+            if (captureFrame && gBufferAvailable
+                && FrameCaptureDiagnosticContract.RequiresRaw(activeCaptureStep.Request.DebugViewOverride))
             {
                 CaptureRawPreFinalDiagnostic(
                     state,
@@ -5392,8 +5391,8 @@ internal sealed class FilmicDisplayRenderer : IRenderer
     }
 
     /// <summary>
-    /// Reads either the full-size reflection source or the half-size entity-only evidence before the
-    /// official final shader can add bloom and first-person geometry. Failure restarts only the
+    /// Reads the full-size shader diagnostic or the half-size entity-only evidence before the
+    /// official final shader can add fog, bloom, grading or first-person geometry. Failure restarts only the
     /// evidence transaction and never disables rendering, because the transport frame remains valid.
     /// </summary>
     /// <param name="state">Callback state whose read framebuffer and buffer must be restored.</param>

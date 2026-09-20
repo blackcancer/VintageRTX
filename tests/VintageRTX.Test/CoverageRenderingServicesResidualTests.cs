@@ -273,7 +273,7 @@ public sealed class CoverageRenderingServicesResidualTests
         FrameCaptureService material = CreateCaptureService(CreateExistingCaptureRoot());
         Assert.IsTrue(material.QueueCapture(new FrameCaptureRequest(
             "not-raw",
-            VintageRtxDebugView.Material)));
+            VintageRtxDebugView.Final)));
         FrameCaptureStep materialEffect = BeginEffect(material, 30);
         Assert.IsFalse(material.SubmitPreFinalDiagnostic(
             materialEffect,

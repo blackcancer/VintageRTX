@@ -452,12 +452,18 @@ internal sealed class FrameCaptureService
             return FrameCaptureAdvanceResult.RestartQueued;
         }
 
-        bool requiresRawDiagnostic = transactionRequest.DebugViewOverride
-            is VintageRtxDebugView.ReflectionSource or VintageRtxDebugView.EntityMirror;
+        bool requiresRawDiagnostic = FrameCaptureDiagnosticContract.RequiresRaw(transactionRequest.DebugViewOverride);
         if (requiresRawDiagnostic
             && transactionPreFinalDiagnosticPixels is null)
         {
             QueueTransactionRestart("raw pre-final diagnostic is unavailable");
+            return FrameCaptureAdvanceResult.RestartQueued;
+        }
+
+        if (FrameCaptureDiagnosticContract.IsChannelDiagnostic(transactionRequest.DebugViewOverride)
+            && (transactionPreFinalDiagnosticWidth != width || transactionPreFinalDiagnosticHeight != height))
+        {
+            QueueTransactionRestart("raw channel dimensions differ from the matching final frame");
             return FrameCaptureAdvanceResult.RestartQueued;
         }
 
@@ -481,9 +487,9 @@ internal sealed class FrameCaptureService
     }
 
     /// <summary>
-    /// Stores the effect pass exactly as produced before Vintage Story's final shader. This is used
-    /// by reflection-source and entity-mirror diagnostics so later first-person or bloom composition
-    /// cannot be mistaken for reflected geometry.
+    /// Stores the selected diagnostic before Vintage Story's final shader. Channel masks retain
+    /// their numeric encoding without fog, bloom or grading. Reflection-source and entity-mirror
+    /// carriers retain their separate raw evidence contract.
     /// </summary>
     /// <param name="step">Active effect step returned by <see cref="TryBeginCaptureFrame"/>.</param>
     /// <param name="pixels">Bottom-up, tightly packed RGBA8 pre-final framebuffer.</param>
@@ -499,8 +505,7 @@ internal sealed class FrameCaptureService
         bool expectedSubmission = transactionState == CaptureTransactionState.EffectReadbackPending
             && step.Phase == FrameCapturePhase.Effect
             && step.Request == transactionRequest
-            && step.Request.DebugViewOverride
-                is VintageRtxDebugView.ReflectionSource or VintageRtxDebugView.EntityMirror;
+            && FrameCaptureDiagnosticContract.RequiresRaw(step.Request.DebugViewOverride);
         if (!expectedSubmission)
         {
             return false;
@@ -784,8 +789,16 @@ internal sealed class FrameCaptureService
 
         try
         {
+            bool channelDiagnostic = FrameCaptureDiagnosticContract.IsChannelDiagnostic(request.DebugViewOverride);
+            if (channelDiagnostic && (preFinalDiagnosticPixels is null
+                || preFinalDiagnosticWidth != width || preFinalDiagnosticHeight != height))
+                throw new InvalidDataException("A diagnostic channel requires matching pre-final pixels; no display fallback is accepted.");
             SavePng(beforePath, beforePixels, width, height);
-            SavePng(afterPath, afterPixels, width, height);
+            // The established validator filename now contains the actual numeric diagnostic.
+            // Preserve the player-facing post-final picture separately, never relabel it as data.
+            SavePng(afterPath, channelDiagnostic ? preFinalDiagnosticPixels! : afterPixels, width, height);
+            if (channelDiagnostic)
+                SavePng(Path.Combine(captureDirectory, $"{timestamp}-{request.Label}-postfinal.png"), afterPixels, width, height);
             if (rawPath is not null)
             {
                 SavePng(
@@ -794,6 +807,21 @@ internal sealed class FrameCaptureService
                     preFinalDiagnosticWidth,
                     preFinalDiagnosticHeight);
             }
+            string contractPath = Path.Combine(captureDirectory, $"{timestamp}-{request.Label}-capture.json");
+            File.WriteAllText(contractPath, Newtonsoft.Json.JsonConvert.SerializeObject(new
+            {
+                schemaVersion = 2,
+                label = request.Label,
+                view = request.DebugViewOverride?.ToString() ?? "configured-final",
+                beforeSignal = "engine-post-final-rgba8",
+                effectSignal = channelDiagnostic ? "shader-diagnostic-rgba8" : "engine-post-final-rgba8",
+                diagnosticEncoding = FrameCaptureDiagnosticContract.DescribeEncoding(request.DebugViewOverride),
+                rawSignal = rawPath is null ? null : "pre-final-rgba8",
+                width,
+                height,
+                rawWidth = preFinalDiagnosticWidth,
+                rawHeight = preFinalDiagnosticHeight
+            }, Newtonsoft.Json.Formatting.Indented));
             status = $"saved: {afterPath}";
             if (rawPath is null)
             {
@@ -805,7 +833,7 @@ internal sealed class FrameCaptureService
             else
             {
                 api.Logger.Notification(
-                    "[VintageRTX] Comparison capture saved: {0}, {1}, and raw pre-final {2}",
+                    "[VintageRTX] Comparison capture saved: {0} and {1}, and raw pre-final {2}",
                     beforePath,
                     afterPath,
                     rawPath);

@@ -149,7 +149,9 @@ internal sealed class RuntimeDataSandbox : IDisposable
         }
 
         Directory.CreateDirectory(destination);
-        foreach (string file in Directory.EnumerateFiles(captureRoot, "*.png", SearchOption.TopDirectoryOnly))
+        foreach (string file in Directory.EnumerateFiles(captureRoot, "*", SearchOption.TopDirectoryOnly)
+            .Where(static path => path.EndsWith(".png", StringComparison.OrdinalIgnoreCase)
+                || path.EndsWith("-capture.json", StringComparison.OrdinalIgnoreCase)))
         {
             if (File.GetLastWriteTimeUtc(file) >= captureCutoffUtc)
             {
