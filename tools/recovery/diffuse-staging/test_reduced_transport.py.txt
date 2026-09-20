@@ -95,6 +95,8 @@ class ReducedTransportTests(unittest.TestCase):
             history[i].use(11+i);self.program[name].value=11+i
         self.program['voxelLightPositionIntensity'].write(np.zeros((8,4),'f4').tobytes())
         self.program['voxelLightCount'].value=0
+        # Keep real visibility history active: old GBA radiance must still not be recycled.
+        self.program['shadowTemporalBlend'].value=.93
         raw,filtered=self.raw_and_filter()
         pixels=np.frombuffer(filtered[2].read(),dtype='f2').reshape(-1,4)
         self.assertTrue(np.all(pixels[:,0]==1.));self.assertTrue(np.all(pixels[:,1:]==0.),pixels)
@@ -120,7 +122,10 @@ void main(){vec4 a,b;float sun;vec3 bounce;resolveSurfaceShadow(vec3(0.,0.,-2.),
         blank=self.texture((2,2),np.ones((2,2,4),'f4'))
         for i,(name,t) in enumerate([('gPosition',guides),('gNormal',normal),('shadowSunHistory',transport),('shadowPointHistoryA',blank),('shadowPointHistoryB',blank)]):
             if name in p:t.use(i);p[name].value=i
-        p['inverseViewMatrix'].write(np.eye(4,dtype='f4').tobytes());p['floatingWorldOrigin'].value=(0.,0.,0.)
+        # Constant fallback witnesses deliberately isolate guide selection. Mesa can eliminate
+        # their unused world transforms; do not require inactive fixture uniforms to exist.
+        if 'inverseViewMatrix' in p:p['inverseViewMatrix'].write(np.eye(4,dtype='f4').tobytes())
+        if 'floatingWorldOrigin' in p:p['floatingWorldOrigin'].value=(0.,0.,0.)
         target=self.own(self.ctx.texture((4,4),4,dtype='f4'));fb=self.own(self.ctx.framebuffer([target]));fb.use();self.ctx.viewport=(0,0,4,4)
         vao=self.own(self.ctx.vertex_array(p,[]));vao.render(vertices=3)
         return np.frombuffer(target.read(),dtype='f4').reshape(4,4,4)
