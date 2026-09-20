@@ -1,0 +1,44 @@
+name: Native solar contract probe
+on:
+  push:
+    branches: [dev/renderer-recovery-20260918]
+    paths: ['.github/workflows/recovery-native-shadow-probe.yml']
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Inspect exact official shader inputs without executing or publishing the client
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/solar-contract"
+          curl -fsSL --retry 2 --max-time 180 'https://cdn.vintagestory.at/gamefiles/stable/vs_client_linux-x64_1.22.7.tar.gz' -o "$RUNNER_TEMP/client.tar.gz"
+          sha256sum "$RUNNER_TEMP/client.tar.gz" > "$RUNNER_TEMP/solar-contract/client.sha256"
+          python3 - <<'PY'
+          import tarfile, re, pathlib, os
+          lines=[]
+          with tarfile.open(pathlib.Path(os.environ['RUNNER_TEMP'])/'client.tar.gz') as archive:
+              for member in archive:
+                  if not member.isfile() or '/assets/game/' not in member.name or not member.name.endswith(('.vsh','.fsh','.ash')): continue
+                  text=archive.extractfile(member).read().decode('utf-8-sig')
+                  rows=text.splitlines()
+                  if not re.search(r'(toShadowMapSpace|shadowMapFar|shadowMapNear)',text,re.I):continue
+                  lines.append('\nFILE '+member.name)
+                  indices=set()
+                  for i,row in enumerate(rows):
+                      if re.search(r'(toShadowMapSpace|sampler.*shadowMap|shadowCoords|shadowCoord|texture.*shadowMap)',row,re.I):
+                          indices.update(range(max(0,i-2),min(len(rows),i+4)))
+                  lines.extend(f'{i+1}: {rows[i]}' for i in sorted(indices))
+          output='\n'.join(lines)
+          print(output)
+          (pathlib.Path(os.environ['RUNNER_TEMP'])/'solar-contract/shader-contract.txt').write_text(output)
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-solar-contract
+          path: ${{ runner.temp }}/solar-contract/
+          retention-days: 3
+          if-no-files-found: error
