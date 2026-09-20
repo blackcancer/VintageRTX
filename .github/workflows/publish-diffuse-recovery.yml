@@ -34,12 +34,11 @@ jobs:
            'tests/VintageRTX.Test/ScenarioCatalog.cs':'68bfd38c0dd81cfe249993cc7c8bd6a2cf0f79ec',
            'tests/VintageRTX.Test/RuntimeLogValidator.cs':'5507438e76b2c073659b407088f62c7a3ddaf271',
            'tests/VintageRTX.Test/ShadowFilterPipelineTests.cs':'988a84924007d0ab0080ddd84ff560d5fa2cd00c',
+           'tests/VintageRTX.Test/CoverageFilmicResidualTests.cs':'75b515c37fa8f9984d523bc2178e7fb5f46eae8d',
            'tests/VintageRTX.Test/PreflightSuite.cs':'5a039e19d370528a8503020b798848d24a2bf1d1'}
           for path,sha in expected.items():
               b=pathlib.Path(path).read_bytes()
               if hashlib.sha1(b'blob '+str(len(b)).encode()+b'\0'+b).hexdigest()!=sha:raise SystemExit('Unexpected base '+path)
-          # Standard git file boundaries allow --recount to validate human-entered hunk counts.
-          # This normalizes diff syntax only; actual edits remain visible in the patch.
           patch=pathlib.Path('tools/recovery/diffuse-staging/change.patch').read_text()
           patch=re.sub(r'^--- a/(.+)\n\+\+\+ b/(.+)$',lambda m:f'diff --git a/{m[1]} b/{m[2]}\n'+m[0],patch,flags=re.M)
           i=patch.index('@@ -961,7 +961,7 @@')
@@ -59,6 +58,8 @@ jobs:
           git apply --recount "$RUNNER_TEMP/diffuse.patch"
           git apply --check tools/recovery/diffuse-staging/capture-epoch.patch
           git apply tools/recovery/diffuse-staging/capture-epoch.patch
+          git apply --check tools/recovery/diffuse-staging/finalization.patch
+          git apply tools/recovery/diffuse-staging/finalization.patch
           test ! -e src/VintageRTX/Rendering/DiffuseTransportBudget.cs
           test ! -e tests/VintageRTX.Test/RuntimeTransportRecoveryTests.cs
           cp tools/recovery/diffuse-staging/DiffuseTransportBudget.cs.txt src/VintageRTX/Rendering/DiffuseTransportBudget.cs
@@ -119,8 +120,9 @@ jobs:
           remote=$(git ls-remote origin refs/heads/dev/renderer-recovery-20260918 | cut -f1)
           test "$remote" = "$GITHUB_SHA"
           git diff --check
-          git add src/VintageRTX/Rendering/FilmicDisplayRenderer.cs src/VintageRTX/Rendering/DiffuseTransportBudget.cs src/VintageRTX/assets/vintagertx/shaders/display.frag tests/VintageRTX.Test/ScenarioCatalog.cs tests/VintageRTX.Test/RuntimeLogValidator.cs tests/VintageRTX.Test/ShadowFilterPipelineTests.cs tests/VintageRTX.Test/PreflightSuite.cs tests/VintageRTX.Test/RuntimeTransportRecoveryTests.cs tests/transport/test_reduced_transport.py
+          git add src/VintageRTX/Rendering/FilmicDisplayRenderer.cs src/VintageRTX/Rendering/DiffuseTransportBudget.cs src/VintageRTX/assets/vintagertx/shaders/display.frag tests/VintageRTX.Test/ScenarioCatalog.cs tests/VintageRTX.Test/RuntimeLogValidator.cs tests/VintageRTX.Test/ShadowFilterPipelineTests.cs tests/VintageRTX.Test/CoverageFilmicResidualTests.cs tests/VintageRTX.Test/PreflightSuite.cs tests/VintageRTX.Test/RuntimeTransportRecoveryTests.cs tests/transport/test_reduced_transport.py
           git rm -r tools/recovery/diffuse-staging .github/workflows/publish-diffuse-recovery.yml .github/workflows/recovery-native-shadow-probe.yml
+          git diff --exit-code
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git commit -m 'fix(rendering): preserve dynamic diffuse transport in a current-frame reduced MRT'
