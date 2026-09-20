@@ -1,0 +1,138 @@
+"""Production raw MRT/filter passes followed by production geometry-guided resolve.
+Synthetic voxel ceiling: not a game screenshot, timing measurement or HDR reference image.
+"""
+from pathlib import Path
+import os,re,unittest
+import numpy as np
+import moderngl
+ROOT=Path(__file__).resolve().parents[2]
+VERT='''#version 330 core
+out vec2 uv;
+void main(){vec2 p=vec2((gl_VertexID<<1)&2,gl_VertexID&2);uv=p;gl_Position=vec4(p*2.-1.,0.,1.);}'''
+def function(source,signature):
+    a=source.index(signature);i=source.index('{',a)+1;depth=1
+    while depth:
+        depth+=(source[i]=='{')-(source[i]=='}');i+=1
+    return source[a:i]
+class ReducedTransportTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault('LIBGL_ALWAYS_SOFTWARE','1')
+        cls.ctx=moderngl.create_standalone_context(require=330,backend='egl')
+        cls.source=(ROOT/'src/VintageRTX/assets/vintagertx/shaders/display.frag').read_text()
+        cls.program=cls.ctx.program(vertex_shader=VERT,fragment_shader=cls.source)
+        print('Reduced transport renderer:',cls.ctx.info['GL_RENDERER'])
+    @classmethod
+    def tearDownClass(cls):cls.program.release();cls.ctx.release()
+    def setUp(self):self.owned=[]
+    def tearDown(self):
+        for obj in reversed(self.owned):obj.release()
+    def own(self,obj):self.owned.append(obj);return obj
+    def texture(self,size,data):
+        t=self.own(self.ctx.texture(size,4,np.asarray(data,dtype='f4').tobytes(),dtype='f4'))
+        t.filter=(moderngl.NEAREST,moderngl.NEAREST);t.repeat_x=t.repeat_y=False
+        return t
+    def mrt(self,size):
+        ts=[self.own(self.ctx.texture(size,4,dtype='f2')) for _ in range(3)]
+        for t in ts:t.filter=(moderngl.LINEAR,moderngl.LINEAR);t.repeat_x=t.repeat_y=False
+        return ts,self.own(self.ctx.framebuffer(ts))
+    def configure(self):
+        p=self.program
+        black=self.texture((1,1),[0,0,0,0])
+        pos=self.texture((12,12),np.tile([1.5,1.,-1.5,0.],(12,12,1)))
+        normal=self.texture((12,12),np.tile([0.,1.,0.,.5],(12,12,1)))
+        volume=np.zeros((4,4,4,4),dtype='f4');volume[:,2,:,:]=[.5,.5,.5,1.]
+        coarse=self.own(self.ctx.texture3d((4,4,4),4,volume.tobytes(),dtype='f4'))
+        fine=np.zeros((16,16,16),dtype='f4');fine[:,8:12,:]=1.
+        occupancy=self.own(self.ctx.texture3d((16,16,16),1,fine.tobytes(),dtype='f4'))
+        zero3=self.own(self.ctx.texture3d((1,1,1),4,np.zeros(4,'f4').tobytes(),dtype='f4'))
+        uint3=self.own(self.ctx.texture3d((1,1,1),2,np.zeros(2,'u4').tobytes(),dtype='u4'))
+        depth=self.own(self.ctx.depth_texture((1,1)))
+        for unit,t in {0:black,1:pos,2:normal,3:coarse,4:occupancy,5:zero3,6:uint3,7:depth}.items():t.use(unit)
+        for kind,name in re.findall(r'uniform (sampler2DShadow|usampler3D|sampler3D|sampler2D) (\w+);',self.source):
+            if name not in p:continue
+            unit={'sampler2D':0,'sampler3D':5,'usampler3D':6,'sampler2DShadow':7}[kind]
+            p[name].value={'gPosition':1,'gNormal':2,'voxelVolume':3,'voxelOccupancy':4}.get(name,unit)
+        for name in re.findall(r'uniform mat4 (\w+);',self.source):
+            if name in p:p[name].write(np.eye(4,dtype='f4').tobytes())
+        values={'voxelLightingEnabled':1,'shadowPass':1,'shadowTemporalBlend':0.,'prefilteredShadowVisibility':0,
+            'voxelOrigin':(0.,0.,-4.),'voxelSize':(4.,4.,4.),'floatingWorldOrigin':(0.,0.,0.),
+            'cameraWorldPosition':(1.5,1.,0.),'occupancyScale':4.,'voxelBounceRayCount':1,'voxelBounceSteps':20,
+            'voxelBounceDistance':4.,'secondaryBounceCadence':1,'pointLightRadius':18.,'voxelLightCount':8,
+            'emissiveLightStrength':1.,'skyLightStrength':0.,'skyTraceSteps':0,'skyRayCount':0,
+            'sunColorStrength':(0.,0.,0.,0.),'sunLightStrength':0.,'sunDirection':(0.,1.,0.),
+            'pointLightShadowSamples':1,'shadowFilterTapCount':2,'shadowInverseFrameSize':(.25,.25),
+            'inverseFrameSize':(1/12,1/12),'debugView':0,'pointLightBounceStrength':1.}
+        for k,v in values.items():
+            if k in p:p[k].value=v
+        positions=np.zeros((8,4),'f4');positions[7]=[1.5,1.5,-1.5,100.]
+        colors=np.zeros((8,4),'f4');colors[7]=[1.,.42,.08,18.]
+        for k,v in {'voxelLightPositionIntensity':positions,'voxelLightColorRadius':colors,
+            'voxelLightPhotometry':np.tile([.025,.04,.001,1.],(8,1)).astype('f4'),
+            'voxelLightCasterLayer':np.full(8,-1.,'f4')}.items():
+            if k in p:p[k].write(v.tobytes())
+        self.vao=self.own(self.ctx.vertex_array(p,[]))
+    def draw(self,fb,size):
+        fb.use();self.ctx.viewport=(0,0,*size);self.vao.render(vertices=3)
+    def raw_and_filter(self):
+        raw,fbr=self.mrt((4,4));self.program['shadowPass'].value=1;self.draw(fbr,(4,4))
+        filtered,fbf=self.mrt((4,4))
+        for i,name in enumerate(['shadowPointCurrentA','shadowPointCurrentB','shadowSunCurrent']):
+            raw[i].use(8+i);self.program[name].value=8+i
+        self.program['shadowPass'].value=2;self.draw(fbf,(4,4))
+        return raw,filtered
+    def test_real_raw_pass_keeps_eighth_dynamic_light_in_hdr_then_filter_preserves_it(self):
+        self.configure();raw,filtered=self.raw_and_filter()
+        a=np.frombuffer(raw[2].read(),dtype='f2').reshape(4,4,4).astype('f4')
+        b=np.frombuffer(filtered[2].read(),dtype='f2').reshape(4,4,4).astype('f4')
+        self.assertTrue(np.all(np.isfinite(a)));self.assertTrue(np.all(a[:,:,1]>1.),a)
+        self.assertTrue(np.all(a[:,:,1]>a[:,:,2]*3.));self.assertTrue(np.all(a[:,:,2]>a[:,:,3]*3.))
+        np.testing.assert_allclose(b,a,rtol=.002,atol=.001)
+        self.assertTrue(np.all(a[:,:,0]==1.),'Sun visibility is independent of bounce colour.')
+    def test_extinguished_dynamic_source_leaves_zero_not_old_warm_history(self):
+        self.configure();old,history=self.raw_and_filter()
+        for i,name in enumerate(['shadowPointHistoryA','shadowPointHistoryB','shadowSunHistory']):
+            history[i].use(11+i);self.program[name].value=11+i
+        self.program['voxelLightPositionIntensity'].write(np.zeros((8,4),'f4').tobytes())
+        self.program['voxelLightCount'].value=0
+        raw,filtered=self.raw_and_filter()
+        pixels=np.frombuffer(filtered[2].read(),dtype='f2').reshape(-1,4)
+        self.assertTrue(np.all(pixels[:,0]==1.));self.assertTrue(np.all(pixels[:,1:]==0.),pixels)
+    def test_explicit_zero_ray_budget_produces_no_diffuse_transport(self):
+        self.configure();self.program['voxelBounceRayCount'].value=0
+        raw,filtered=self.raw_and_filter()
+        self.assertTrue(np.all(np.frombuffer(filtered[2].read(),dtype='f2').reshape(-1,4)[:,1:]==0.))
+    def resolve(self,positions):
+        header='''#version 330 core
+in vec2 uv;out vec4 result;
+uniform sampler2D gPosition,gNormal,shadowPointHistoryA,shadowPointHistoryB,shadowSunHistory;
+uniform mat4 inverseViewMatrix;uniform vec3 floatingWorldOrigin;
+void traceRawPointShadowVisibilities(vec3 p,vec3 n,out vec4 a,out vec4 b){a=vec4(.3);b=vec4(.4);}
+float traceRawSunShadowVisibility(vec3 p,vec3 r,vec3 n){return .75;}
+vec3 traceVoxelDiffuseBounce(vec3 p,vec3 n,vec3 g){return vec3(7.,3.,1.);}
+'''
+        fragment=header+function(self.source,'vec4 readGBufferTexel(')+function(self.source,'void resolveSurfaceShadow(')+'''
+void main(){vec4 a,b;float sun;vec3 bounce;resolveSurfaceShadow(vec3(0.,0.,-2.),vec3(0.,0.,1.),vec3(0.,0.,1.),a,b,sun,bounce);result=vec4(sun,bounce);}'''
+        p=self.own(self.ctx.program(vertex_shader=VERT,fragment_shader=fragment))
+        guides=self.texture((4,4),positions)
+        normal=self.texture((4,4),np.tile([0,0,1,0],(4,4,1)))
+        transport=self.texture((2,2),np.tile([.5,4.,2.,.25],(2,2,1)))
+        blank=self.texture((2,2),np.ones((2,2,4),'f4'))
+        for i,(name,t) in enumerate([('gPosition',guides),('gNormal',normal),('shadowSunHistory',transport),('shadowPointHistoryA',blank),('shadowPointHistoryB',blank)]):
+            if name in p:t.use(i);p[name].value=i
+        p['inverseViewMatrix'].write(np.eye(4,dtype='f4').tobytes());p['floatingWorldOrigin'].value=(0.,0.,0.)
+        target=self.own(self.ctx.texture((4,4),4,dtype='f4'));fb=self.own(self.ctx.framebuffer([target]));fb.use();self.ctx.viewport=(0,0,4,4)
+        vao=self.own(self.ctx.vertex_array(p,[]));vao.render(vertices=3)
+        return np.frombuffer(target.read(),dtype='f4').reshape(4,4,4)
+    def test_guided_resolve_preserves_hdr_and_rejects_unrelated_surface(self):
+        valid=np.tile([0.,0.,-2.,0.],(4,4,1))
+        np.testing.assert_allclose(self.resolve(valid),np.tile([.5,4.,2.,.25],(4,4,1)),rtol=1e-5)
+        unrelated=np.tile([0.,0.,-8.,0.],(4,4,1))
+        np.testing.assert_allclose(self.resolve(unrelated),np.tile([.75,7.,3.,1.],(4,4,1)),rtol=1e-5)
+    def test_production_wiring_reuses_resolved_bounce_without_a_second_query(self):
+        lighting=function(self.source,'VoxelLightingResult traceVoxelPointLight(')
+        self.assertRegex(lighting,r'result\.bounce = prefilteredShadowVisibility != 0.*\n\s*\? max\(filteredBounce')
+        self.assertIn('outShadowSun = vec4(rawSun, rawBounce)',self.source)
+        self.assertIn('outShadowSun = vec4(filteredSun, filteredBounce)',self.source)
+        self.assertNotIn('debugView == 8',lighting)
+if __name__=='__main__':unittest.main()

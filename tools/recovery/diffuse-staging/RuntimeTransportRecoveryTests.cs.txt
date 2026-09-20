@@ -1,0 +1,116 @@
+using System.Reflection;
+using Microsoft.VisualStudio.TestTools.UnitTesting;
+using OpenTK.Graphics.OpenGL4;
+using OpenTK.Mathematics;
+using OpenTK.Windowing.Common;
+using OpenTK.Windowing.Desktop;
+using OpenTK.Windowing.GraphicsLibraryFramework;
+using VintageRTX.Rendering;
+
+namespace VintageRTX.Test;
+
+/// <summary>Checks tier participation, complete traversal budgets, readiness and the real MRT allocation.</summary>
+[TestClass]
+[DoNotParallelize]
+public sealed class RuntimeTransportRecoveryTests
+{
+    /// <summary>Performance preserves enabled diffuse transport and explicit disable remains respected.</summary>
+    [TestMethod]
+    public void EveryEnabledTierRetainsTransportAndZeroDisablesIt()
+    {
+        for (int tier = 0; tier <= 2; tier++)
+        {
+            for (int requested = 1; requested <= 4; requested++)
+                Assert.AreEqual(tier == 0 ? requested : 1, DiffuseTransportBudget.RayCount(tier, requested, 1f));
+            Assert.AreEqual(0, DiffuseTransportBudget.RayCount(tier, 0, 1f));
+            Assert.AreEqual(0, DiffuseTransportBudget.RayCount(tier, 4, 0f));
+            Assert.AreEqual(0, DiffuseTransportBudget.RayCount(tier, 4, float.NaN));
+        }
+    }
+
+    /// <summary>Counts analytic grid-plane crossings independently of the renderer DDA.</summary>
+    [TestMethod]
+    public void TraversalBudgetCoversAnalyticCrossingsAtEveryDistance()
+    {
+        Random random = new(702921);
+        for (int i = 0; i < 4096; i++)
+        {
+            double[] origin = [random.NextDouble(), random.NextDouble(), random.NextDouble()];
+            double[] direction = [random.NextDouble() * 2 - 1, random.NextDouble() * 2 - 1, random.NextDouble() * 2 - 1];
+            double norm = Math.Sqrt(direction.Sum(v => v * v));
+            float distance = (float)(random.NextDouble() * 24 + .01);
+            List<double> crossings = [];
+            for (int axis = 0; axis < 3; axis++)
+            {
+                double component = direction[axis] / norm;
+                if (Math.Abs(component) < 1e-12) continue;
+                for (int plane = -26; plane <= 26; plane++)
+                {
+                    double t = (plane - origin[axis]) / component;
+                    if (t > 0 && t < distance) crossings.Add(t);
+                }
+            }
+            int cells = crossings.Distinct().Count() + 1;
+            Assert.IsTrue(cells <= DiffuseTransportBudget.TraversalSteps(distance), $"distance={distance}, cells={cells}");
+        }
+        Assert.AreEqual(1, DiffuseTransportBudget.TraversalSteps(float.NaN));
+        Assert.AreEqual(128, DiffuseTransportBudget.TraversalSteps(float.MaxValue));
+    }
+
+    /// <summary>No A/B capture treats pending or unpublished geometry as the requested effect.</summary>
+    [TestMethod]
+    public void CaptureRequiresPublishedSettledGeometryOnlyWhenVoxelIsEnabled()
+    {
+        for (int flags = 0; flags < 16; flags++)
+        {
+            bool enabled = (flags & 1) != 0, ready = (flags & 2) != 0, settled = (flags & 4) != 0;
+            int generation = (flags & 8) != 0 ? 1 : 0;
+            Assert.AreEqual(!enabled || (ready && settled && generation > 0),
+                DiffuseTransportBudget.CaptureReady(enabled, ready, generation, settled));
+        }
+    }
+
+    /// <summary>Eight real selected sources satisfy the stress criterion; insufficient or invalid counts do not.</summary>
+    [TestMethod]
+    public void StressPopulationUsesAnEntireNumericCountNotAnExactThreePrefix()
+    {
+        foreach (int count in new[] { 3, 4, 8 })
+            Assert.AreEqual(0, RuntimeLogValidator.ValidateDynamicLightPopulation($"Dynamic point lights tracked: {count}, caster masks").Count);
+        foreach (string count in new[] { "0", "1", "2", "9", "30", "3x", "three", "9999999999999999999" })
+            Assert.IsTrue(RuntimeLogValidator.ValidateDynamicLightPopulation($"Dynamic point lights tracked: {count}, caster masks").Count > 0, count);
+        Assert.IsTrue(RuntimeLogValidator.ValidateDynamicLightPopulation("").Count > 0);
+        Assert.AreEqual(0, RuntimeLogValidator.ValidateDynamicLightPopulation("Dynamic point lights tracked: 0\nDynamic point lights tracked: 8\n").Count);
+    }
+
+    /// <summary>The actual production texture retains HDR diffuse RGB separate from solar visibility.</summary>
+    [TestMethod]
+    [TestCategory("GPU")]
+    public void ProductionTransportCarrierKeepsHdrColourAndZeroRadiance()
+    {
+        GLFWProvider.CheckForMainThread = false;
+        using NativeWindow window = new(new NativeWindowSettings
+        {
+            ClientSize = new Vector2i(8, 8), StartVisible = false, API = ContextAPI.OpenGL,
+            APIVersion = new Version(3, 3), Profile = ContextProfile.Core
+        });
+        window.Context.MakeCurrent();
+        GL.LoadBindings(new GLFWBindingsContext());
+        int texture = GL.GenTexture();
+        try
+        {
+            MethodInfo allocate = typeof(FilmicDisplayRenderer).GetMethod("AllocateShadowSunTexture", BindingFlags.NonPublic | BindingFlags.Static)!;
+            Assert.IsNotNull(allocate);
+            allocate.Invoke(null, [texture, 2, 1]);
+            GL.BindTexture(TextureTarget.Texture2D, texture);
+            GL.GetTexLevelParameter(TextureTarget.Texture2D, 0, GetTextureParameter.TextureInternalFormat, out int format);
+            Assert.AreEqual((int)PixelInternalFormat.Rgba16f, format);
+            float[] input = [0.25f, 8f, 2f, 0.5f, 1f, 0f, 0f, 0f];
+            GL.TexSubImage2D(TextureTarget.Texture2D, 0, 0, 0, 2, 1, PixelFormat.Rgba, PixelType.Float, input);
+            float[] result = new float[8];
+            GL.GetTexImage(TextureTarget.Texture2D, 0, PixelFormat.Rgba, PixelType.Float, result);
+            CollectionAssert.AreEqual(input, result);
+            Assert.AreEqual(ErrorCode.NoError, GL.GetError());
+        }
+        finally { GL.DeleteTexture(texture); }
+    }
+}
