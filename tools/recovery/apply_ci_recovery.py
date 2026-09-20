@@ -38,6 +38,25 @@ s=once(s,'''        Assert(shader.Contains("temporalFrameIndex % max(secondaryBo
             Assert(DiffuseTransportBudget.RayCount(tier, 1, 0f) == 0,
                 "explicitly disabled diffuse transport must remain disabled");
         }''')
+s=once(s,r'''        Assert(
+            renderer.Contains("shader.Uniform(\"secondaryBounceCadence\", 1)", StringComparison.Ordinal)
+                && shader.Contains("secondaryBounceCadence <= 1", StringComparison.Ordinal)
+                && shader.Contains("temporalFrameIndex % max(secondaryBounceCadence, 1) == 0", StringComparison.Ordinal),
+            "every profile must trace coherent secondary radiance without zero-energy cadence frames");''',r'''        Assert(
+            renderer.Contains("shader.Uniform(\"secondaryBounceCadence\", 1)", StringComparison.Ordinal)
+                && shader.Contains("prefilteredShadowVisibility != 0 && secondaryBounceCadence > 0", StringComparison.Ordinal)
+                && shader.Contains("? max(filteredBounce, vec3(0.0))", StringComparison.Ordinal)
+                && !shader.Contains("temporalFrameIndex % max(secondaryBounceCadence, 1) == 0", StringComparison.Ordinal),
+            "every profile must resolve current-frame secondary radiance without zero-energy cadence frames");''')
+s=once(s,'''        Assert(
+            renderer.Contains("directional irradiance field is the stable", StringComparison.Ordinal)
+                && renderer.Contains("2 => 0", StringComparison.Ordinal),
+            "performance tier must use the stable irradiance LOD without periodic bounce spikes");''','''        Assert(
+            renderer.Contains("DiffuseTransportBudget.RayCount(", StringComparison.Ordinal)
+                && renderer.Contains("effectiveVoxelBounceRayCount > 0", StringComparison.Ordinal)
+                && renderer.Contains("PixelInternalFormat.Rgba16f", StringComparison.Ordinal)
+                && shader.Contains("filteredBounce = accumulatedBounce / max(accumulatedWeight, 0.001)", StringComparison.Ordinal),
+            "performance tier must keep current-frame dynamic HDR bounce instead of a static-only irradiance substitute");''')
 sources[p]=s
 p='tools/VintageRTX.RenderLab/StandaloneRenderer.cs'
 s=sources[p]
