@@ -109,7 +109,7 @@ public sealed class RuntimeTransportRecoveryTests
             float[] result = new float[8];
             GL.GetTexImage(TextureTarget.Texture2D, 0, PixelFormat.Rgba, PixelType.Float, result);
             CollectionAssert.AreEqual(input, result);
-            Assert.AreEqual(ErrorCode.NoError, GL.GetError());
+            Assert.AreEqual(OpenTK.Graphics.OpenGL4.ErrorCode.NoError, GL.GetError());
         }
         finally { GL.DeleteTexture(texture); }
     }
