@@ -1,0 +1,114 @@
+name: Verify and publish CI pipeline repair
+on:
+  push:
+    branches: [dev/renderer-recovery-20260918]
+    paths:
+      - '.github/workflows/publish-ci-recovery.yml'
+      - 'tools/recovery/apply_ci_recovery.py'
+      - 'tools/recovery/ci-staging/**'
+permissions:
+  contents: write
+concurrency:
+  group: ci-pipeline-repair-publication
+  cancel-in-progress: false
+jobs:
+  verify:
+    if: github.repository == 'blackcancer/VintageRTX' && github.ref == 'refs/heads/dev/renderer-recovery-20260918'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      LIBGL_ALWAYS_SOFTWARE: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: true
+      - name: Verify exact inputs and materialize ordinary source changes
+        run: |
+          mkdir -p "$RUNNER_TEMP/ci-evidence"
+          git rev-parse HEAD > "$RUNNER_TEMP/ci-evidence/staging-commit.txt"
+          python3 tools/recovery/apply_ci_recovery.py
+          git diff --check
+          git diff > "$RUNNER_TEMP/ci-evidence/applied.patch"
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9
+        with:
+          dotnet-version: '10.0.401'
+      - name: Prepare official client and hidden graphics context
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libegl1-mesa-dev libgl1-mesa-dri libgl-dev libglfw3 xvfb libxinerama1 libxcursor1 > "$RUNNER_TEMP/ci-evidence/packages.log"
+          mkdir -p "$RUNNER_TEMP/vs-client"
+          curl -fsSL --retry 2 --max-time 180 'https://cdn.vintagestory.at/gamefiles/stable/vs_client_linux-x64_1.22.7.tar.gz' -o "$RUNNER_TEMP/client.tar.gz"
+          sha256sum "$RUNNER_TEMP/client.tar.gz" > "$RUNNER_TEMP/ci-evidence/client.sha256"
+          tar -xzf "$RUNNER_TEMP/client.tar.gz" -C "$RUNNER_TEMP/vs-client"
+          dll=$(find "$RUNNER_TEMP/vs-client" -name VintagestoryAPI.dll -print -quit)
+          test -n "$dll"
+          echo "VINTAGE_STORY=$(dirname "$dll")" >> "$GITHUB_ENV"
+          python3 -m venv "$RUNNER_TEMP/glsl-tests"
+          "$RUNNER_TEMP/glsl-tests/bin/pip" install 'numpy>=2,<3' 'moderngl>=5.12,<6'
+      - name: Compile the mod and both actual test projects
+        shell: bash
+        run: |
+          set -euo pipefail
+          for project in tests/VintageRTX.Test/VintageRTX.Test.csproj tools/VintageRTX.RenderLab/VintageRTX.RenderLab.csproj; do
+            dotnet restore "$project" --source https://api.nuget.org/v3/index.json
+            dotnet build "$project" -c Release --no-restore
+          done 2>&1 | tee "$RUNNER_TEMP/ci-evidence/build.log"
+      - name: Execute both permanent regression selections and new driver checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          export LD_LIBRARY_PATH="$VINTAGE_STORY/Lib:${LD_LIBRARY_PATH:-}"
+          for suite in blocker-smoke reported-regressions; do
+            xvfb-run -a dotnet test tests/VintageRTX.Test/VintageRTX.Test.csproj -c Release --no-build --no-restore --settings "tests/$suite.runsettings" --logger "trx;LogFileName=$suite.trx" --results-directory "$RUNNER_TEMP/ci-evidence" 2>&1 | tee "$RUNNER_TEMP/ci-evidence/$suite.log"
+          done
+          xvfb-run -a dotnet test tools/VintageRTX.RenderLab/VintageRTX.RenderLab.csproj -c Release --no-build --no-restore --filter 'FullyQualifiedName~StandalonePipelineTests' --logger 'trx;LogFileName=pipeline.trx' --results-directory "$RUNNER_TEMP/ci-evidence" 2>&1 | tee "$RUNNER_TEMP/ci-evidence/pipeline.log"
+      - name: Execute the original 120-second RenderLab test with a fresh driver cache
+        shell: bash
+        run: |
+          set -euo pipefail
+          export LD_LIBRARY_PATH="$VINTAGE_STORY/Lib:${LD_LIBRARY_PATH:-}"
+          export MESA_SHADER_CACHE_DIR="$RUNNER_TEMP/renderlab-cold-cache"
+          mkdir -p "$MESA_SHADER_CACHE_DIR"
+          timeout 180s xvfb-run -a dotnet test tools/VintageRTX.RenderLab/VintageRTX.RenderLab.csproj -c Release --no-build --no-restore --filter 'FullyQualifiedName~ProductionShaderCompilesAndRendersHeadlessly' --logger 'trx;LogFileName=renderlab.trx' --results-directory "$RUNNER_TEMP/ci-evidence" 2>&1 | tee "$RUNNER_TEMP/ci-evidence/renderlab.log"
+      - name: Execute production GLSL against numerical references
+        shell: bash
+        run: |
+          set -euo pipefail
+          for suite in recovery feedback materials transport; do
+            "$RUNNER_TEMP/glsl-tests/bin/python" -m unittest discover -s "tests/$suite" -v 2>&1 | tee "$RUNNER_TEMP/ci-evidence/glsl-$suite.log"
+          done
+      - name: Refuse incomplete tests and publish checked ordinary files without force
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, pathlib, xml.etree.ElementTree as ET
+          p=pathlib.Path(os.environ['RUNNER_TEMP'])/'ci-evidence'
+          for name, expected in [('blocker-smoke',35),('reported-regressions',155),('pipeline',2),('renderlab',1)]:
+              results=[e for e in ET.parse(p/(name+'.trx')).iter() if e.tag.endswith('UnitTestResult')]
+              if len(results)<expected or any(e.get('outcome')!='Passed' for e in results):
+                  raise SystemExit('Incomplete or failed '+name)
+              print(name,len(results),'all passed')
+          PY
+          remote=$(git ls-remote origin refs/heads/dev/renderer-recovery-20260918 | cut -f1)
+          test "$remote" = "$GITHUB_SHA"
+          git diff --check
+          git add tests/VintageRTX.Test/PreflightSuite.cs tools/VintageRTX.RenderLab/StandaloneRenderer.cs tools/VintageRTX.RenderLab/Program.cs tools/VintageRTX.RenderLab/RenderLabExplorerTests.cs tools/VintageRTX.RenderLab/StandaloneTransportPipeline.cs tools/VintageRTX.RenderLab/StandalonePipelineTests.cs
+          git rm -r tools/recovery/ci-staging tools/recovery/apply_ci_recovery.py .github/workflows/publish-ci-recovery.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix: align preflight and standalone transport with current renderer and isolate texture ownership'
+          git push origin HEAD:refs/heads/dev/renderer-recovery-20260918
+          git rev-parse HEAD > "$RUNNER_TEMP/ci-evidence/published-commit.txt"
+      - name: Preserve evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ci-pipeline-repair-${{ github.sha }}
+          path: ${{ runner.temp }}/ci-evidence/
+          if-no-files-found: error
+          retention-days: 14
