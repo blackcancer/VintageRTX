@@ -17,6 +17,8 @@ internal static partial class RuntimeLogValidator
     public static IReadOnlyList<string> Validate(string log, ScenarioDefinition scenario)
     {
         List<string> failures = [];
+        if (string.Equals(scenario.Name, "many-lights-stress", StringComparison.OrdinalIgnoreCase))
+            failures.AddRange(ValidateDynamicLightPopulation(log));
         if (HasFatalFailure(log))
         {
             failures.Add("VintageRTX emitted an error during the runtime scenario");
@@ -1192,6 +1194,28 @@ internal static partial class RuntimeLogValidator
 
         return (1000.0 / effectFps) - (1000.0 / baselineFps);
     }
+
+    /// <summary>Checks the stress source population numerically, not by a prefix matching only three.</summary>
+    /// <param name="log">The current scenario log containing complete source-count records.</param>
+    /// <returns>Failures for absent, insufficient or backend-incompatible light populations.</returns>
+    internal static IReadOnlyList<string> ValidateDynamicLightPopulation(string log)
+    {
+        int maximum = -1;
+        foreach (Match match in DynamicLightPopulationRegex().Matches(log))
+        {
+            if (!int.TryParse(match.Groups[1].Value, NumberStyles.None,
+                CultureInfo.InvariantCulture, out int count))
+                return ["dynamic light population is malformed"];
+            if (count > 8) return [$"dynamic light population {count} exceeds the eight-source backend"];
+            maximum = Math.Max(maximum, count);
+        }
+        return maximum >= 3 ? [] : [$"stress scene did not track at least three simultaneous lights (maximum={maximum})"];
+    }
+
+    /// <summary>Matches an entire non-negative count without accepting three as a prefix of thirty.</summary>
+    /// <returns>Compiled culture-independent light-population expression.</returns>
+    [GeneratedRegex(@"Dynamic point lights tracked:\s*(\d+)(?=[,;\s]|$)", RegexOptions.IgnoreCase)]
+    private static partial Regex DynamicLightPopulationRegex();
 
     private static readonly string[] CommonRequiredTokens =
     [

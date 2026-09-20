@@ -172,7 +172,7 @@ internal static class ScenarioCatalog
             "foggy village world",
             true,
             "many-lights-stress",
-            ["[VintageRTX.Test] Scenario many-lights-stress injected", "Dynamic point lights tracked: 3", "Adaptive quality", "Stabilized A/B/A result"],
+            ["[VintageRTX.Test] Scenario many-lights-stress injected", "Dynamic point lights tracked:", "Adaptive quality", "Stabilized A/B/A result"],
             21.0,
             ShadowValidation: ShadowValidation.Informational),
         new(

@@ -299,7 +299,9 @@ public sealed class ShadowFilterPipelineTests
         StringAssert.Contains(shader, "void filterShadowVisibilities(");
         StringAssert.Contains(shader, "texture(shadowPointCurrentA, uv)");
         StringAssert.Contains(shader, "texture(shadowPointCurrentB, uv)");
-        StringAssert.Contains(shader, "texture(shadowSunCurrent, uv).r");
+        StringAssert.Contains(shader, "readGBufferTexel(shadowSunCurrent, uv)");
+        StringAssert.Contains(shader, "vec3 accumulatedBounce = max(centerTransport.gba, vec3(0.0));");
+        StringAssert.Contains(shader, "float centerSun = clamp(centerTransport.r, 0.0, 1.0);");
         StringAssert.Contains(shader, "shadowFilterOffset(index) * shadowInverseFrameSize");
         StringAssert.Contains(shader, "if (index >= shadowFilterTapCount)");
         StringAssert.Contains(shader, "shadowFilterTapCount == 2");
@@ -321,7 +323,7 @@ public sealed class ShadowFilterPipelineTests
         StringAssert.Contains(resolve, "planeError > tolerance * 3.0");
         StringAssert.Contains(resolve, "texelFetch(shadowPointHistoryA, pixel, 0)");
         StringAssert.Contains(resolve, "texelFetch(shadowPointHistoryB, pixel, 0)");
-        StringAssert.Contains(resolve, "texelFetch(shadowSunHistory, pixel, 0).r");
+        StringAssert.Contains(resolve, "texelFetch(shadowSunHistory, pixel, 0)");
         StringAssert.Contains(resolve, "traceRawPointShadowVisibilities(worldPosition, worldNormal, pointA, pointB)");
         StringAssert.Contains(resolve, "traceRawSunShadowVisibility(worldPosition, relativePosition, worldNormal)");
         StringAssert.Contains(shader, "if (prefilteredShadowVisibility == 0 && !cameraAlignedLight)");
@@ -439,7 +441,8 @@ public sealed class ShadowFilterPipelineTests
         Assert.AreEqual(3, FilmicDisplayRenderer.ShadowResolutionDivisor(2));
         StringAssert.Contains(renderer, "PixelInternalFormat.Rgba16f");
         StringAssert.Contains(renderer, "PixelFormat.Rgba");
-        StringAssert.Contains(renderer, "PixelInternalFormat.R16f");
+        StringAssert.Contains(renderer, "PixelInternalFormat.Rgba16f");
+        StringAssert.Contains(shader, "outShadowSun = vec4(rawSun, rawBounce)");
         StringAssert.Contains(renderer, "PixelFormat.Red");
         StringAssert.Contains(renderer, "PixelType.HalfFloat");
         StringAssert.Contains(renderer, "DrawBuffersEnum.ColorAttachment2");

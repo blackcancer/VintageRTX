@@ -541,6 +541,13 @@ public sealed class CoverageFilmicResidualTests
             Assert.IsTrue(renderer.QueueDiagnosticCapture(
                 "gpu-pre-final-transaction",
                 VintageRtxDebugView.ReflectionSource));
+            // This fixture has no published voxel scene. A transport capture must remain
+            // queued, while a deliberately voxel-free raster capture still completes.
+            renderer.OnRenderFrame(0.016f, EnumRenderStage.AfterPostProcessing);
+            Assert.IsFalse(GetField<bool>(renderer, "activeCaptureStepPending"));
+            Assert.IsFalse(GetField<bool>(renderer, "faulted"), renderer.Status);
+            bool originalVoxelLighting = harness.Config.VoxelLightingEnabled;
+            harness.Config.VoxelLightingEnabled = false;
             renderer.OnRenderFrame(0.016f, EnumRenderStage.AfterPostProcessing);
             Assert.IsTrue(GetField<bool>(renderer, "activeCaptureStepPending"));
             renderer.OnRenderFrame(0.016f, EnumRenderStage.AfterBlit);
@@ -549,6 +556,8 @@ public sealed class CoverageFilmicResidualTests
             Assert.IsTrue(GetField<bool>(renderer, "activeCaptureStepPending"));
             renderer.OnRenderFrame(0.016f, EnumRenderStage.AfterBlit);
             Assert.IsFalse(GetField<bool>(renderer, "activeCaptureStepPending"));
+
+            harness.Config.VoxelLightingEnabled = originalVoxelLighting;
 
             SetField(renderer, "benchmarkPhase", BenchmarkPhase.Effect);
             renderer.OnRenderFrame(0.016f, EnumRenderStage.AfterPostProcessing);
@@ -852,6 +861,8 @@ public sealed class CoverageFilmicResidualTests
                 SetField(renderer, "shader", shader);
                 SetField(GetField<LumaRenderBridge>(renderer, "lumaBridge"), "shader", shader);
 
+                // This tests Luma failure containment, without a populated voxel world.
+                harness.Config.VoxelLightingEnabled = false;
                 Assert.IsTrue(renderer.QueueDiagnosticCapture(
                     "gpu-missing-luma",
                     VintageRtxDebugView.Final));

@@ -961,7 +961,7 @@ internal static class PreflightSuite
                 && !renderer.Contains("voxelBounceDiagnosticCapture", StringComparison.Ordinal)
                 && renderer.Contains("effectiveReflectionSteps = adaptiveQualityLevel switch", StringComparison.Ordinal)
                 && renderer.Contains("effectiveVoxelReflectionSteps = adaptiveQualityLevel switch", StringComparison.Ordinal)
-                && renderer.Contains("effectiveVoxelBounceRayCount = adaptiveQualityLevel switch", StringComparison.Ordinal),
+                && renderer.Contains("DiffuseTransportBudget.RayCount(", StringComparison.Ordinal),
             "native diagnostics must use exactly the runtime profile's reflection and bounce budgets");
         Assert(
             renderer.Contains("VintageRtxRenderProfile.Extreme => 16", StringComparison.Ordinal)

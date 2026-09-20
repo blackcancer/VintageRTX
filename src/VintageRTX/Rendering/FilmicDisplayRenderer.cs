@@ -76,6 +76,7 @@ internal sealed class FilmicDisplayRenderer : IRenderer
     ];
 
     private readonly ICoreClientAPI api;
+    private int captureTransportGeneration = -1;
     private EntityLightCollector? entityLightCollector;
     private readonly byte[] liveCasterUpload = new byte[VoxelScene.LightCasterVoxelCount * VoxelScene.MaximumLightCount];
 
@@ -570,16 +571,27 @@ internal sealed class FilmicDisplayRenderer : IRenderer
         }
 
         FrameCaptureStep captureStep = default;
+        int captureSceneGeneration = voxelSnapshot.Generation;
+        bool captureSceneReady = DiffuseTransportBudget.CaptureReady(
+            config.VoxelLightingEnabled, voxelTextureReady, voxelSnapshot.Generation, voxelScene.IsSettled);
+        if (!captureSceneReady || (captureTransportGeneration >= 0
+            && captureTransportGeneration != voxelSnapshot.Generation))
+        {
+            captureService.RestartCaptureTransaction();
+            captureTransportGeneration = -1;
+        }
         captureService.ObserveVoxelSceneState(
             voxelTextureReady ? voxelSnapshot.Generation : 0,
             voxelScene.IsSettled);
-        bool captureFrame = !config.Enabled || faulted
+        bool captureFrame = !config.Enabled || faulted || !captureSceneReady
             ? false
             : captureService.TryBeginCaptureFrame(
                 ++renderedFrameCount,
                 out captureStep);
         if (captureFrame)
         {
+            captureTransportGeneration = captureStep.Phase == FrameCapturePhase.Baseline
+                ? voxelSnapshot.Generation : -1;
             activeCaptureStep = captureStep;
             activeCaptureStepPending = true;
         }
@@ -612,6 +624,16 @@ internal sealed class FilmicDisplayRenderer : IRenderer
             EnsureResources(width, height, adaptiveQualityLevel);
             preparationTicks = ReadStageTicks(collectCpuDiagnostics, ref stageMarker);
             UpdateVoxelTexture();
+            if (captureFrame && config.VoxelLightingEnabled
+                && voxelSnapshot.Generation != captureSceneGeneration)
+            {
+                // An upload can publish a newer scene after the pre-frame readiness check.
+                // Do not pair its effect with a baseline captured from the previous generation.
+                captureService.RestartCaptureTransaction();
+                activeCaptureStepPending = false;
+                captureTransportGeneration = -1;
+                captureFrame = false;
+            }
             voxelTicks = ReadStageTicks(collectCpuDiagnostics, ref stageMarker);
             ResolveGBuffer(out GameGBuffer gBuffer);
             gBufferTicks = ReadStageTicks(collectCpuDiagnostics, ref stageMarker);
@@ -2405,7 +2427,7 @@ internal sealed class FilmicDisplayRenderer : IRenderer
     /// <returns>Three for Performance (tier two), otherwise two.</returns>
     internal static int ShadowResolutionDivisor(int qualityLevel) => qualityLevel == 2 ? 3 : 2;
 
-    /// <summary>Defines one linearly sampled R16F solar-visibility texture.</summary>
+    /// <summary>Defines an RGBA16F carrier: R solar visibility, GBA linear RGB diffuse bounce.</summary>
     /// <param name="texture">Existing owned OpenGL texture handle.</param>
     /// <param name="width">Half-resolution allocation width in shadow pixels.</param>
     /// <param name="height">Half-resolution allocation height in shadow pixels.</param>
@@ -2419,11 +2441,11 @@ internal sealed class FilmicDisplayRenderer : IRenderer
         GL.TexImage2D(
             TextureTarget.Texture2D,
             0,
-            PixelInternalFormat.R16f,
+            PixelInternalFormat.Rgba16f,
             width,
             height,
             0,
-            PixelFormat.Red,
+            PixelFormat.Rgba,
             PixelType.HalfFloat,
             IntPtr.Zero);
     }
@@ -2432,7 +2454,7 @@ internal sealed class FilmicDisplayRenderer : IRenderer
     /// <param name="framebuffer">Owned framebuffer receiving the attachment.</param>
     /// <param name="pointA">Owned RGBA16F slots 0..3.</param>
     /// <param name="pointB">Owned RGBA16F slots 4..7.</param>
-    /// <param name="sun">Owned R16F direct-sun visibility.</param>
+    /// <param name="sun">Owned RGBA16F solar visibility and linear RGB diffuse transport.</param>
     /// <param name="failureMessage">Diagnostic used if the driver rejects the framebuffer.</param>
     private static void AttachShadowFramebuffer(
         int framebuffer,
@@ -3235,37 +3257,13 @@ internal sealed class FilmicDisplayRenderer : IRenderer
             shader.Uniform("secondaryBounceCadence", 1);
             denseMultiLightCluster = IsDenseMultiLightCluster(
                 adaptiveQualityLevel, availableDynamicLightCount, voxelSnapshot.Lights);
-            int effectiveVoxelBounceRayCount = adaptiveQualityLevel switch
-                {
-                    1 => Math.Min(config.VoxelBounceRayCount, 1),
-                    // The CPU-built directional irradiance field is the stable
-                    // secondary-light LOD at the minimum tier. A full-screen ray
-                    // every frame exceeded the pacing budget, while skipping it
-                    // periodically produced the visible zero/radiance pulse.
-                    2 => 0,
-                    _ => config.VoxelBounceRayCount
-                };
+            // Every enabled tier transports the same dynamic emitter table. Reduce spatial
+            // evaluation density, not source participation or the requested ray distance.
+            int effectiveVoxelBounceRayCount = DiffuseTransportBudget.RayCount(
+                adaptiveQualityLevel, config.VoxelBounceRayCount, config.PointLightBounceStrength);
             shader.Uniform("voxelBounceRayCount", effectiveVoxelBounceRayCount);
-            int highQualityVoxelBounceSteps = config.RenderProfile switch
-            {
-                VintageRtxRenderProfile.Extreme => 12,
-                VintageRtxRenderProfile.Cinematic => 16,
-                _ => 8
-            };
-            int effectiveVoxelBounceSteps = adaptiveQualityLevel switch
-            {
-                1 => 7,
-                // No per-pixel bounce ray is issued at this tier; these values
-                // remain valid ABI inputs and diagnostic-capture fallbacks.
-                2 => 2,
-                _ => highQualityVoxelBounceSteps
-            };
-            int effectiveVoxelBounceShadowSteps = adaptiveQualityLevel switch
-            {
-                1 => 6,
-                2 => 2,
-                _ => highQualityVoxelBounceSteps
-            };
+            int effectiveVoxelBounceSteps = DiffuseTransportBudget.TraversalSteps(config.VoxelBounceDistance);
+            int effectiveVoxelBounceShadowSteps = effectiveVoxelBounceSteps;
             shader.Uniform("voxelBounceSteps", effectiveVoxelBounceSteps);
             shader.Uniform("voxelBounceShadowSteps", effectiveVoxelBounceShadowSteps);
             int highQualitySkyRayCount = config.RenderProfile switch
@@ -3460,14 +3458,14 @@ internal sealed class FilmicDisplayRenderer : IRenderer
             bool shadowFilteringActive = config.VoxelLightingEnabled
                 && voxelTextureReady
                 && gBufferAvailable
-                && (selectedPointShadowSources || selectedSunShadowSource);
+                && (selectedPointShadowSources || selectedSunShadowSource || effectiveVoxelBounceRayCount > 0);
             bool shadowRefreshActive = shadowFilteringActive
-                && ShouldRefreshShadowVisibility(
+                && (effectiveVoxelBounceRayCount > 0 || ShouldRefreshShadowVisibility(
                     adaptiveQualityLevel,
                     temporalCameraStable,
                     captureFrame,
                     shadowHistoryValid,
-                    renderedFrameCount);
+                    renderedFrameCount));
             shader.Uniform("shadowPass", 0);
             shader.Uniform("prefilteredShadowVisibility", 0);
             shader.Uniform("shadowTemporalBlend", 0.0f);
@@ -3477,7 +3475,8 @@ internal sealed class FilmicDisplayRenderer : IRenderer
                 // A coherent tier-scaled viewport evaluates every receiver;
                 // there is no checkerboard/interlaced shadow phase at tier 2.
                 // Pass 1 preserves one dimensionless visibility per light slot
-                // across two RGBA16F banks and stores sun separately in R16F.
+                // across two RGBA16F banks. A third RGBA16F stores sun in R and
+                // current-frame diffuse radiance in GBA, without a new sampler.
                 // No final color is accumulated and no source is averaged.
                 GL.Viewport(0, 0, shadowWidth, shadowHeight);
                 GL.BindFramebuffer(

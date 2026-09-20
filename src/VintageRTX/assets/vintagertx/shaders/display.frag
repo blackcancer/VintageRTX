@@ -1984,7 +1984,7 @@ float traceSunVisibility(
     // Within a supported cascade, the native alpha-tested geometry is
     // authoritative. The conservative voxel representation resumes only
     // beyond the exact cascade exit, retaining the independent 96 m reach.
-    float nativeAndTailVisibility = min(
+    float nativeAndTailVisibility = nativeVisibility <= 0.0 ? 0.0 : min(
         nativeVisibility,
         traceVoxelSunTail(voxelRayOrigin, nativeCoveredDistance));
     if (nativeSupport >= 0.9999)
@@ -2831,11 +2831,15 @@ void filterShadowVisibilities(
     vec3 centerNormal,
     out vec4 filteredPointA,
     out vec4 filteredPointB,
-    out float filteredSun)
+    out float filteredSun,
+    out vec3 filteredBounce)
 {
     vec4 centerPointA = clamp(texture(shadowPointCurrentA, uv), 0.0, 1.0);
     vec4 centerPointB = clamp(texture(shadowPointCurrentB, uv), 0.0, 1.0);
-    float centerSun = clamp(texture(shadowSunCurrent, uv).r, 0.0, 1.0);
+    // Visibility and radiance have disjoint channels and units. Only visibility is clamped.
+    vec4 centerTransport = readGBufferTexel(shadowSunCurrent, uv);
+    float centerSun = clamp(centerTransport.r, 0.0, 1.0);
+    vec3 accumulatedBounce = max(centerTransport.gba, vec3(0.0));
     vec4 accumulatedPointA = centerPointA;
     vec4 accumulatedPointB = centerPointB;
     float accumulatedSun = centerSun;
@@ -2887,10 +2891,9 @@ void filterShadowVisibilities(
             texture(shadowPointCurrentB, sampleUv),
             0.0,
             1.0);
-        float neighborSun = clamp(
-            texture(shadowSunCurrent, sampleUv).r,
-            0.0,
-            1.0);
+        vec4 neighborTransport = readGBufferTexel(shadowSunCurrent, sampleUv);
+        float neighborSun = clamp(neighborTransport.r, 0.0, 1.0);
+        accumulatedBounce += max(neighborTransport.gba, vec3(0.0)) * weight;
         accumulatedPointA += neighborPointA * weight;
         accumulatedPointB += neighborPointB * weight;
         accumulatedSun += neighborSun * weight;
@@ -2906,6 +2909,8 @@ void filterShadowVisibilities(
     vec4 spatialPointA = accumulatedPointA / max(accumulatedWeight, 0.001);
     vec4 spatialPointB = accumulatedPointB / max(accumulatedWeight, 0.001);
     float spatialSun = accumulatedSun / max(accumulatedWeight, 0.001);
+    // No same-UV radiance history: moving sources/occluders update on the current frame.
+    filteredBounce = accumulatedBounce / max(accumulatedWeight, 0.001);
     if (shadowTemporalBlend <= 0.001)
     {
         filteredPointA = spatialPointA;
@@ -2966,7 +2971,8 @@ VoxelLightingResult traceVoxelPointLight(
     vec3 materialF0,
     vec4 filteredPointVisibilityA,
     vec4 filteredPointVisibilityB,
-    float filteredSunVisibility)
+    float filteredSunVisibility,
+    vec3 filteredBounce)
 {
     VoxelLightingResult result;
     result.direct = vec3(0.0);
@@ -3152,19 +3158,11 @@ VoxelLightingResult traceVoxelPointLight(
         result.irradianceDirection = normalize(irradianceDirectionSum);
     }
 
-    // Retain the cadence uniform for shader ABI compatibility, but normal
-    // runtime profiles bind one: writing zero radiance on skipped frames made
-    // temporal history decay twice and then spike on the traced frame.
-    bool traceSecondaryBounce = secondaryBounceCadence <= 1
-        || temporalBlend <= 0.001
-        || debugView == 8
-        || temporalFrameIndex % max(secondaryBounceCadence, 1) == 0;
-    result.bounce = traceSecondaryBounce
-        ? traceVoxelDiffuseBounce(
-            worldPosition,
-            worldNormal,
-            worldGeometricNormal)
-        : vec3(0.0);
+    // The reduced-resolution pass owns diffuse ray queries. The full-resolution fallback
+    // is used only when that pass is unavailable; diagnostics use the identical resolved value.
+    result.bounce = prefilteredShadowVisibility != 0 && secondaryBounceCadence > 0
+        ? max(filteredBounce, vec3(0.0))
+        : traceVoxelDiffuseBounce(worldPosition, worldNormal, worldGeometricNormal);
 
     // Preserve the weighted visibility of every selected emitter. The
     // raster carrier contains their aggregate engine lighting, so its
@@ -3389,7 +3387,7 @@ vec3 shadeVoxelReflectionHit(
     vec3 reflectedColor = linearAlbedo * sampleVoxelIrradiance(hitPosition, hitNormal)
         * pointLightBounceStrength;
     float sunReceiver = max(dot(hitNormal, sunDirection), 0.0);
-    float reflectedSunVisibility = sunReceiver > 0.0
+    float reflectedSunVisibility = sunReceiver > 0.0 && sunColorStrength.w > 0.0 && sunLightStrength > 0.0
         ? traceSunVisibility(hitPosition - floatingWorldOrigin,
             hitPosition + hitNormal * 0.02 + sunDirection * 0.005)
         : 0.0;
@@ -5167,13 +5165,13 @@ vec3 denoiseTemporalHistory(
 
 
 void resolveSurfaceShadow(vec3 centerPosition, vec3 centerNormal, vec3 geometricViewNormal,
-    out vec4 pointA, out vec4 pointB, out float sunlight)
+    out vec4 pointA, out vec4 pointB, out float sunlight, out vec3 bounce)
 {
     ivec2 size = textureSize(shadowPointHistoryA, 0);
     vec2 grid = uv * vec2(size) - vec2(0.5);
     ivec2 basePixel = ivec2(floor(grid));
     vec2 fraction = fract(grid);
-    pointA = vec4(0.0); pointB = vec4(0.0); sunlight = 0.0;
+    pointA = vec4(0.0); pointB = vec4(0.0); sunlight = 0.0; bounce = vec3(0.0);
     float weightSum = 0.0;
     for (int i = 0; i < 4; ++i)
     {
@@ -5191,12 +5189,14 @@ void resolveSurfaceShadow(vec3 centerPosition, vec3 centerNormal, vec3 geometric
         float weight = w.x * w.y * exp(-planeError / tolerance) * smoothstep(0.6, 0.95, normalAgreement);
         pointA += texelFetch(shadowPointHistoryA, pixel, 0) * weight;
         pointB += texelFetch(shadowPointHistoryB, pixel, 0) * weight;
-        sunlight += texelFetch(shadowSunHistory, pixel, 0).r * weight;
+        vec4 transport = texelFetch(shadowSunHistory, pixel, 0);
+        sunlight += transport.r * weight;
+        bounce += max(transport.gba, vec3(0.0)) * weight;
         weightSum += weight;
     }
     if (weightSum > 0.05)
     {
-        pointA /= weightSum; pointB /= weightSum; sunlight /= weightSum;
+        pointA /= weightSum; pointB /= weightSum; sunlight /= weightSum; bounce /= weightSum;
     }
     else
     {
@@ -5205,6 +5205,8 @@ void resolveSurfaceShadow(vec3 centerPosition, vec3 centerNormal, vec3 geometric
         vec3 worldNormal = normalize(mat3(inverseViewMatrix) * geometricViewNormal);
         traceRawPointShadowVisibilities(worldPosition, worldNormal, pointA, pointB);
         sunlight = traceRawSunShadowVisibility(worldPosition, relativePosition, worldNormal);
+        vec3 shadingWorldNormal = normalize(mat3(inverseViewMatrix) * centerNormal);
+        bounce = traceVoxelDiffuseBounce(worldPosition, shadingWorldNormal, worldNormal);
     }
 }
 
@@ -5250,6 +5252,7 @@ void main()
         vec4 filteredPointA = vec4(1.0);
         vec4 filteredPointB = vec4(1.0);
         float filteredSun = 1.0;
+        vec3 filteredBounce = vec3(0.0);
         if (hasGeometry)
         {
             filterShadowVisibilities(
@@ -5257,11 +5260,12 @@ void main()
                 normal,
                 filteredPointA,
                 filteredPointB,
-                filteredSun);
+                filteredSun,
+                filteredBounce);
         }
         outColor = filteredPointA;
         outShadowPointB = filteredPointB;
-        outShadowSun = vec4(filteredSun, 0.0, 0.0, 1.0);
+        outShadowSun = vec4(filteredSun, filteredBounce);
         return;
     }
     if (shadowPass == 1)
@@ -5269,6 +5273,7 @@ void main()
         vec4 rawPointA = vec4(1.0);
         vec4 rawPointB = vec4(1.0);
         float rawSun = 1.0;
+        vec3 rawBounce = vec3(0.0);
         if (hasGeometry && voxelLightingEnabled != 0)
         {
             vec3 rawRelativeWorldPosition = (
@@ -5298,11 +5303,12 @@ void main()
                     rawWorldPosition,
                     rawRelativeWorldPosition,
                     worldGeometricNormal);
+                rawBounce = traceVoxelDiffuseBounce(rawWorldPosition, rawWorldNormal, worldGeometricNormal);
             }
         }
         outColor = rawPointA;
         outShadowPointB = rawPointB;
-        outShadowSun = vec4(rawSun, 0.0, 0.0, 1.0);
+        outShadowSun = vec4(rawSun, rawBounce);
         return;
     }
     if (debugView == 0 && !hasGeometry)
@@ -5639,39 +5645,17 @@ void main()
             }
             else
             {
-                // Real receivers keep the exact center-mask path. A synthetic
-                // one-pixel receiver inherits at least two already filtered,
-                // geometrically coherent neighbours rather than forcing both
-                // half-resolution passes to reconstruct and trace empty sky.
+                // Resolve only current-frame samples belonging to this receiver. Silhouette
+                // pixels without compatible samples trace their own visibility and diffuse path.
                 vec4 resolvedPointVisibilityA = vec4(1.0);
                 vec4 resolvedPointVisibilityB = vec4(1.0);
                 float resolvedSunVisibility = 1.0;
+                vec3 resolvedBounce = vec3(0.0);
                 if (prefilteredShadowVisibility != 0)
                 {
-                    if (geometryWasRepaired
-                        && repairedShadowVisibilityCount >= 2)
-                    {
-                        float inverseRepairCount = 1.0
-                            / float(repairedShadowVisibilityCount);
-                        resolvedPointVisibilityA = clamp(
-                            repairedPointVisibilityA * inverseRepairCount,
-                            0.0,
-                            1.0);
-                        resolvedPointVisibilityB = clamp(
-                            repairedPointVisibilityB * inverseRepairCount,
-                            0.0,
-                            1.0);
-                        resolvedSunVisibility = clamp(
-                            repairedSunVisibility * inverseRepairCount,
-                            0.0,
-                            1.0);
-                    }
-                    else
-                    {
-                        resolveSurfaceShadow(position, normal,
-                            normalize(mat3(viewMatrix) * worldGeometricNormal),
-                            resolvedPointVisibilityA, resolvedPointVisibilityB, resolvedSunVisibility);
-                    }
+                    resolveSurfaceShadow(position, normal,
+                        normalize(mat3(viewMatrix) * worldGeometricNormal),
+                        resolvedPointVisibilityA, resolvedPointVisibilityB, resolvedSunVisibility, resolvedBounce);
                 }
                 vec4 directMaterial = dynamicSurface > 0.5
                     ? vec4(0.0) : sampleVoxelAtWorld(worldPosition - worldGeometricNormal * 0.08);
@@ -5690,7 +5674,8 @@ void main()
                     materialF0,
                     resolvedPointVisibilityA,
                     resolvedPointVisibilityB,
-                    resolvedSunVisibility);
+                    resolvedSunVisibility,
+                    resolvedBounce);
             }
         }
     }
