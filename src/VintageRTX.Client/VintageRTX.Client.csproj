@@ -3,7 +3,7 @@
     <AssemblyName>VintageRTX</AssemblyName>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <!-- Match the previous project's game-discoverable layout and launch profiles.
-         Isolated --artifacts-path builds must not overwrite a running local mod. -->
+         Artifact-redirected builds must not overwrite a running local mod. -->
     <OutputPath Condition="'$(ArtifactsPath)' == ''">bin\$(Configuration)\Mods\vintagertx\</OutputPath>
     <DebugType>portable</DebugType>
   </PropertyGroup>
