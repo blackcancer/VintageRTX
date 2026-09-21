@@ -12,7 +12,6 @@ using VintageRTX.Core.Transport;
 
 namespace VintageRTX.Client.Tests;
 
-/// <summary>Malformed ownership and runtime-loss cases must invalidate output, not retain old pixels.</summary>
 [TestClass, DoNotParallelize]
 public sealed class GpuFailureBoundaryTests
 {
@@ -77,7 +76,6 @@ public sealed class GpuFailureBoundaryTests
         {
             foreach(int texture in invalid)
             {
-                // Deliberately emulate an invalid producer/compositor binding without issuing a feedback draw.
                 Set(geometry, nameof(geometry.RegionTexture), texture);
                 var error = Assert.ThrowsException<InvalidOperationException>(() => pass.Render(surfaces, geometry, lights));
                 StringAssert.Contains(error.Message, "feedback"); Assert.IsFalse(pass.Ready);
@@ -93,8 +91,13 @@ public sealed class GpuFailureBoundaryTests
     {
         using var gl = Context();
         Assert.ThrowsException<InvalidOperationException>(() => new DirectImagePass("", "", "", "invalid shader"));
-        Assert.ThrowsException<InvalidOperationException>(() => new DirectImagePass("", "", "",
-            "in vec3 missingVertexOutput;out vec4 outputColor;void main(){outputColor=vec4(missingVertexOutput,1);}"));
+        int count = GL.GetInteger(GetPName.MaxTextureImageUnits) + 1;
+        // A missing varying can legally link with undefined values on some drivers. Instead,
+        // activate one more fragment sampler than the advertised limit: valid syntax, invalid link resources.
+        string declarations = string.Join("\n", Enumerable.Range(0, count).Select(i => $"uniform sampler2D t{i};"));
+        string sum = string.Join("+", Enumerable.Range(0, count).Select(i => $"texture(t{i},gl_FragCoord.xy)"));
+        string fragment = declarations + "\nout vec4 outputColor;void main(){outputColor=" + sum + ";}";
+        Assert.ThrowsException<InvalidOperationException>(() => new DirectImagePass("", "", "", fragment));
         using var untouched = Pass(); Assert.AreEqual(0, untouched.DiagnosticTexture); untouched.Dispose(); untouched.Dispose();
         using var scene = new SceneTextureSet(); scene.NoUpload(); Assert.AreEqual(0L, scene.LastUploadBytes);
         Assert.ThrowsException<ArgumentException>(() => scene.Upload(new GpuSceneData()));
@@ -115,15 +118,14 @@ public sealed class GpuFailureBoundaryTests
         Assert.AreEqual(ErrorCode.NoError, GL.GetError());
         try
         {
-            // Context/resource corruption is simulated at the private handle boundary. The uploader
-            // still issues real OpenGL calls, which reject rebinding a 3D name as a 2D texture.
             Set(texture, nameof(texture.Texture), wrongTarget);
             registry.Remove(default); packet.Update(registry.Capture(2, 1), default);
             Assert.ThrowsException<InvalidOperationException>(() => texture.Upload(packet));
             Assert.IsFalse(texture.Ready); Assert.IsNull(texture.PublishedFrame);
         }
         finally {Set(texture, nameof(texture.Texture), original); GL.DeleteTexture(wrongTarget);}
-        while(GL.GetError() != ErrorCode.NoError) { }
+        for(int i = 0; i < 8; i++) if(GL.GetError() == ErrorCode.NoError) break;
+        Assert.AreEqual(ErrorCode.NoError, GL.GetError());
         texture.Upload(packet); Assert.IsTrue(texture.Ready); Assert.AreEqual(0, texture.PublishedFrame!.Samples.Length);
     }
 }
