@@ -1,0 +1,10 @@
+{
+  "type": "content",
+  "modid": "vrtxemissionexample",
+  "name": "VintageRTX emission asset example",
+  "description": "Example native patches for the rewrite emission catalog. No C# dependency or gameplay-light changes.",
+  "authors": ["VintageRTX"],
+  "version": "1.0.0",
+  "side": "Client",
+  "dependencies": { "vintagertx": "0.0.0" }
+}

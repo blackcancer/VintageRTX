@@ -1,0 +1,37 @@
+[
+  {
+    "file": "vintagertx:config/emission.json",
+    "side": "client",
+    "op": "replace",
+    "path": "/profiles/vintagertx:candle/amplitude",
+    "value": 0.08
+  },
+  {
+    "file": "vintagertx:config/emission.json",
+    "side": "client",
+    "op": "replace",
+    "path": "/bindings/vintagertx:chandelier/profile",
+    "value": "vintagertx:candle"
+  },
+  {
+    "file": "vintagertx:config/emission.json",
+    "side": "client",
+    "op": "add",
+    "path": "/profiles/example:steady-lamp",
+    "value": { "kind": "steady" }
+  },
+  {
+    "file": "vintagertx:config/emission.json",
+    "side": "client",
+    "op": "add",
+    "path": "/bindings/example:crystal-lantern",
+    "value": {
+      "codes": ["example:crystal-lantern-*"],
+      "targets": ["block", "item"],
+      "profile": "example:steady-lamp",
+      "priority": 100,
+      "enabled": true,
+      "intensityScale": 1.0
+    }
+  }
+]

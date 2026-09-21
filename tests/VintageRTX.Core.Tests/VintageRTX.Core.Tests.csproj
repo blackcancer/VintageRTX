@@ -5,5 +5,6 @@
     <PackageReference Include="MSTest.TestAdapter" Version="3.7.1" />
     <PackageReference Include="MSTest.TestFramework" Version="3.7.1" />
     <ProjectReference Include="../../src/VintageRTX.Core/VintageRTX.Core.csproj" />
+    <Content Include="../../src/VintageRTX.Client/assets/vintagertx/config/emission.json" Link="Fixtures/emission.json" CopyToOutputDirectory="Always" />
   </ItemGroup>
 </Project>

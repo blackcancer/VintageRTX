@@ -59,10 +59,11 @@ public sealed class EmissionTests
     [TestMethod]
     public void ProfileMappingDoesNotGuessFireFromColorOrModSubstrings()
     {
-        Assert.AreEqual(EmissionKind.Flame,EmissionProfiles.ForCode("game:torch-up").Kind);
-        Assert.AreEqual(EmissionKind.Flame,EmissionProfiles.ForCode("game:oillamp-clay").Kind);
-        Assert.AreEqual(EmissionKind.Steady,EmissionProfiles.ForCode("other:torch-battery").Kind);
-        Assert.AreEqual(EmissionKind.EngineDriven,EmissionProfiles.ForCode("game:locust-corrupt",true).Kind);
+        EmissionCatalog catalog = EmissionCatalog.Parse(File.ReadAllText(Path.Combine(AppContext.BaseDirectory,"Fixtures","emission.json")));
+        Assert.AreEqual(EmissionKind.Flame,EmissionProfiles.ForCode(catalog,"game:torch-up").Kind);
+        Assert.AreEqual(EmissionKind.Flame,EmissionProfiles.ForCode(catalog,"game:oillamp-clay").Kind);
+        Assert.AreEqual(EmissionKind.Steady,EmissionProfiles.ForCode(catalog,"other:torch-battery").Kind);
+        Assert.AreEqual(EmissionKind.EngineDriven,EmissionProfiles.ForCode(catalog,"game:locust-corrupt",true).Kind);
     }
     [TestMethod]
     public void InvalidProfileOrTimeIsRejected()

@@ -8,7 +8,7 @@
     <Reference Include="OpenTK.Graphics"><HintPath>$(VintageStoryPath)/Lib/OpenTK.Graphics.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="OpenTK.Mathematics"><HintPath>$(VintageStoryPath)/Lib/OpenTK.Mathematics.dll</HintPath><Private>false</Private></Reference>
     <Content Include="modinfo.json" CopyToOutputDirectory="PreserveNewest" />
-    <Content Include="assets/**/*" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="assets/**/*" CopyToOutputDirectory="Always" />
     <InternalsVisibleTo Include="VintageRTX.Client.Tests" />
   </ItemGroup>
   <Target Name="ValidateClient" BeforeTargets="ResolveAssemblyReferences">

@@ -24,12 +24,14 @@ public sealed record EmissionProfile
         Kind = kind; Amplitude = amplitude; FrequencyHz = frequencyHz;
         WindSensitivity = windSensitivity; DurationSeconds = durationSeconds;
     }
+    // Standalone reference presets, not runtime family mappings. The client resolves patched assets.
     public static EmissionProfile Steady { get; } = new(EmissionKind.Steady);
     public static EmissionProfile Engine { get; } = new(EmissionKind.EngineDriven);
     public static EmissionProfile Torch { get; } = new(EmissionKind.Flame, 0.22, 7, 0.35);
     public static EmissionProfile Fire { get; } = new(EmissionKind.Flame, 0.32, 5, 0.5);
     public static EmissionProfile Lantern { get; } = new(EmissionKind.Flame, 0.07, 5, 0.04);
     public static EmissionProfile OilLamp { get; } = new(EmissionKind.Flame, 0.10, 6, 0.1);
+    public static EmissionProfile Candle { get; } = new(EmissionKind.Flame, 0.12, 6, 0.2);
     public static EmissionProfile Lightning { get; } = new(EmissionKind.Lightning, durationSeconds: 0.4);
 }
 
@@ -64,7 +66,6 @@ public static class EmissionWaveform
         double amplitude = Math.Min(0.8, profile.Amplitude * (1 + profile.WindSensitivity * Math.Clamp(wind01, 0, 1)));
         return 1 + amplitude * signal;
     }
-
     private static double Pulse(double t, double start, double attack, double decay)
     {
         double x = t - start;
@@ -93,25 +94,11 @@ public static class EmissionWaveform
     public static double Unit(ulong bits) => (bits >> 11) * (1.0 / 9007199254740992.0);
 }
 
-/// <summary>No substring guesses for third-party sources. Runtime zero always wins.</summary>
+/// <summary>Explicit catalog lookup. There are no longer any hardcoded game-family rules in C#.</summary>
 public static class EmissionProfiles
 {
-    public static EmissionProfile ForCode(string code, bool intrinsicEntity = false)
-    {
-        if (intrinsicEntity) return EmissionProfile.Engine;
-        if (!code.StartsWith("game:", StringComparison.Ordinal)) return EmissionProfile.Steady;
-        ReadOnlySpan<char> path = code.AsSpan(5);
-        int dash = path.IndexOf('-');
-        string family = (dash < 0 ? path : path[..dash]).ToString();
-        return family switch
-        {
-            "torch" => EmissionProfile.Torch,
-            "fire" or "firepit" => EmissionProfile.Fire,
-            "lantern" => EmissionProfile.Lantern,
-            "oillamp" or "oilLamp" => EmissionProfile.OilLamp,
-            _ => EmissionProfile.Steady
-        };
-    }
+    public static EmissionProfile ForCode(EmissionCatalog catalog, string code, bool intrinsicEntity = false) =>
+        catalog.Resolve(code, intrinsicEntity ? EmissionTarget.Entity : EmissionTarget.Block).Profile;
 }
 
 /// <summary>Scene-linear RGB. Non-color maps must not go through this transfer.</summary>

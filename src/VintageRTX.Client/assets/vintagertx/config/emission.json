@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "profiles": {
+    "vintagertx:steady": { "kind": "steady" },
+    "vintagertx:engine": { "kind": "engineDriven" },
+    "vintagertx:torch": { "kind": "flame", "amplitude": 0.22, "frequencyHz": 7.0, "windSensitivity": 0.35 },
+    "vintagertx:fire": { "kind": "flame", "amplitude": 0.32, "frequencyHz": 5.0, "windSensitivity": 0.50 },
+    "vintagertx:lantern": { "kind": "flame", "amplitude": 0.07, "frequencyHz": 5.0, "windSensitivity": 0.04 },
+    "vintagertx:oillamp": { "kind": "flame", "amplitude": 0.10, "frequencyHz": 6.0, "windSensitivity": 0.10 },
+    "vintagertx:candle": { "kind": "flame", "amplitude": 0.12, "frequencyHz": 6.0, "windSensitivity": 0.20 },
+    "vintagertx:chandelier": { "kind": "flame", "amplitude": 0.06, "frequencyHz": 6.0, "windSensitivity": 0.08 },
+    "vintagertx:lightning": { "kind": "lightning", "durationSeconds": 0.4 }
+  },
+  "bindings": {
+    "vintagertx:torch": { "codes": ["game:torch", "game:torch-*"], "targets": ["block", "item"], "profile": "vintagertx:torch" },
+    "vintagertx:fire": { "codes": ["game:fire", "game:fire-*", "game:firepit", "game:firepit-*"], "targets": ["block", "item"], "profile": "vintagertx:fire" },
+    "vintagertx:lantern": { "codes": ["game:lantern", "game:lantern-*"], "targets": ["block", "item"], "profile": "vintagertx:lantern" },
+    "vintagertx:oillamp": { "codes": ["game:oillamp", "game:oillamp-*"], "targets": ["block", "item"], "profile": "vintagertx:oillamp" },
+    "vintagertx:candle": { "codes": ["game:candle", "game:candle-*", "game:candles", "game:candles-*", "game:bunchocandles", "game:bunchocandles-*"], "targets": ["block", "item"], "profile": "vintagertx:candle" },
+    "vintagertx:chandelier": { "codes": ["game:chandelier", "game:chandelier-*"], "targets": ["block", "item"], "profile": "vintagertx:chandelier" },
+    "vintagertx:locust": { "codes": ["game:locust", "game:locust-*"], "targets": ["entity"], "profile": "vintagertx:engine" }
+  }
+}

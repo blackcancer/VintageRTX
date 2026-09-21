@@ -11,7 +11,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   core:
-    name: Core and production GPU queries (not in-game acceptance)
+    name: Core, emission assets and production GPU queries (not in-game acceptance)
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
@@ -33,9 +33,11 @@ jobs:
           python3 - <<'PY'
           import xml.etree.ElementTree as ET
           from pathlib import Path
-          c=ET.parse('artifacts/core.trx').getroot().find('.//{*}Counters')
-          assert c is not None and int(c.get('total','0'))>=77,c.attrib if c is not None else 'missing'
+          r=ET.parse('artifacts/core.trx').getroot()
+          c=r.find('.//{*}Counters')
+          assert c is not None and int(c.get('total','0'))>=80,c.attrib if c is not None else 'missing'
           assert c.get('total')==c.get('executed')==c.get('passed'),c.attrib
+          assert any('EmissionCatalogTests' in t.get('className','') for t in r.findall('.//{*}TestMethod'))
           assert len(list(Path('src').rglob('*ModSystem.cs')))==1
           assert not Path('src/VintageRTX').exists()
           print(c.attrib)
@@ -58,7 +60,7 @@ jobs:
           path: artifacts/
           if-no-files-found: error
   adapter:
-    name: Native mesh importer and OpenGL uploader against Vintage Story 1.22.7
+    name: Native patches, mesh importer and OpenGL uploader (Vintage Story 1.22.7)
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     needs: core
@@ -82,7 +84,7 @@ jobs:
           dll=$(find "$RUNNER_TEMP/vs" -name VintagestoryAPI.dll -print -quit)
           test -n "$dll"
           echo "VINTAGE_STORY=$(dirname "$dll")" >> "$GITHUB_ENV"
-      - name: Compile and exercise actual client importer and uploader
+      - name: Compile and exercise client assets, native patcher, importer and uploader
         shell: bash
         run: |
           set -euo pipefail
@@ -90,11 +92,14 @@ jobs:
           xvfb-run -a dotnet test tests/VintageRTX.Client.Tests/VintageRTX.Client.Tests.csproj -c Release --logger 'trx;LogFileName=client.trx' --results-directory artifacts 2>&1 | tee artifacts/adapter.log
           python3 - <<'PY'
           import xml.etree.ElementTree as ET
-          c=ET.parse('artifacts/client.trx').getroot().find('.//{*}Counters')
-          assert c is not None and int(c.get('total','0'))>=4
+          r=ET.parse('artifacts/client.trx').getroot()
+          c=r.find('.//{*}Counters')
+          assert c is not None and int(c.get('total','0'))>=12
           assert c.get('total')==c.get('executed')==c.get('passed'),c.attrib
+          assert any('EmissionAssetTests' in t.get('className','') for t in r.findall('.//{*}TestMethod'))
           print(c.attrib)
           PY
+          cmp src/VintageRTX.Client/assets/vintagertx/config/emission.json src/VintageRTX.Client/bin/Release/net10.0/assets/vintagertx/config/emission.json
           git diff --exit-code
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
