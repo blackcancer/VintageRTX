@@ -118,14 +118,17 @@ def verify(root: Path, output: Path) -> None:
         report['commit'] = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True).strip()
         tracked = subprocess.check_output(['git', 'ls-files', '-z'], cwd=root).decode('utf-8').split('\0')
         with tempfile.TemporaryDirectory(prefix='VintageRTX déploiement ') as temp, (output / 'build.log').open('w', encoding='utf-8') as log:
-            work = Path(temp) / 'projet avec espaces'
+            # Windows TEMP may use an 8.3 account name. Compare canonical paths on BOTH
+            # sides rather than rejecting the correct MSBuild output under its long name.
+            temporary = Path(temp).resolve()
+            work = temporary / 'projet avec espaces'
             for relative in filter(None, tracked):
                 file = root / relative
                 if file.is_file():
                     destination = work / relative
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(file, destination)
-            source = work / CLIENT.parent
+            source = (work / CLIENT.parent).resolve()
             env = dict(os.environ, VINTAGE_STORY=str(game), DOTNET_CLI_TELEMETRY_OPTOUT='1', DOTNET_NOLOGO='1')
             # Property selection is tested in separate processes, never with cached MSBuild state.
             for supplied in (game, game / 'Lib', game / 'Mods'):
@@ -133,7 +136,7 @@ def verify(root: Path, output: Path) -> None:
                 resolved = properties(CLIENT, 'Debug', work, local_env, log)
                 require(normalized(resolved['VintageStoryPath']) == game, f'Legacy path no longer resolves: {supplied}')
                 report['checks'].append('resolve:' + supplied.name)
-            invalid_env = dict(env, VINTAGE_STORY=str(Path(temp) / 'installation absente'))
+            invalid_env = dict(env, VINTAGE_STORY=str(temporary / 'installation absente'))
             override = properties(CLIENT, 'Debug', work, invalid_env, log, (f'-p:VintageStoryPath={game}',))
             require(normalized(override['VintageStoryPath']) == game, 'Explicit MSBuild path lost precedence')
             report['checks'].append('explicit-property-precedence')
@@ -145,7 +148,8 @@ def verify(root: Path, output: Path) -> None:
                 run(['dotnet', 'build', str(CLIENT), '-c', configuration, '--nologo'], work, build_env, log)
                 settings = properties(CLIENT, configuration, work, build_env, log)
                 package = normalized(settings['TargetDir'])
-                require(package == source / 'bin' / configuration / 'Mods/vintagertx', 'SDK output is not game-discoverable')
+                expected = source / 'bin' / configuration / 'Mods/vintagertx'
+                require(package == expected, f'SDK output is not game-discoverable: actual={package}, expected={expected}')
                 core = normalized(properties(CORE, configuration, work, env, log)['TargetPath'])
                 report[configuration] = package_check(source, package, core)
                 check_profiles(source, package, configuration, game)
@@ -176,7 +180,7 @@ def verify(root: Path, output: Path) -> None:
                 os.utime(asset, ns=(stat.st_atime_ns, stat.st_mtime_ns))
             report['checks'].append('same-timestamp-asset-update')
             before = {p.relative_to(packages['Debug']).as_posix(): digest(p) for p in packages['Debug'].rglob('*') if p.is_file()}
-            redirect = Path(temp) / 'sortie isolée'
+            redirect = temporary / 'sortie isolée'
             run(['dotnet', 'build', str(CLIENT), '-c', 'Debug', '--artifacts-path', str(redirect), '--nologo'], work, env, log)
             isolated = properties(CLIENT, 'Debug', work, env, log, (f'-p:ArtifactsPath={redirect}',))
             isolated_package = normalized(isolated['TargetDir'])
@@ -186,7 +190,7 @@ def verify(root: Path, output: Path) -> None:
             after = {p.relative_to(packages['Debug']).as_posix(): digest(p) for p in packages['Debug'].rglob('*') if p.is_file()}
             require(before == after, 'An isolated build modified the locally deployed mod')
             report['checks'].append('artifact-isolation')
-            publish = Path(temp) / 'paquet publié'
+            publish = temporary / 'paquet publié'
             run(['dotnet', 'publish', str(CLIENT), '-c', 'Release', '-o', str(publish), '--nologo'], work, env, log)
             core = normalized(properties(CORE, 'Release', work, env, log)['TargetPath'])
             package_check(source, publish, core)
