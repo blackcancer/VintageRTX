@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><IsTestProject>true</IsTestProject><IsPackable>false</IsPackable></PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="MSTest.TestAdapter" Version="3.7.1" />
+    <PackageReference Include="MSTest.TestFramework" Version="3.7.1" />
+    <ProjectReference Include="../../src/VintageRTX.Client/VintageRTX.Client.csproj" />
+    <Reference Include="VintagestoryAPI"><HintPath>$(VintageStoryPath)/VintagestoryAPI.dll</HintPath></Reference>
+    <Reference Include="Newtonsoft.Json"><HintPath>$(VintageStoryPath)/Lib/Newtonsoft.Json.dll</HintPath></Reference>
+    <Reference Include="OpenTK.Core"><HintPath>$(VintageStoryPath)/Lib/OpenTK.Core.dll</HintPath></Reference>
+    <Reference Include="OpenTK.Graphics"><HintPath>$(VintageStoryPath)/Lib/OpenTK.Graphics.dll</HintPath></Reference>
+    <Reference Include="OpenTK.Mathematics"><HintPath>$(VintageStoryPath)/Lib/OpenTK.Mathematics.dll</HintPath></Reference>
+    <Reference Include="OpenTK.Windowing.Common"><HintPath>$(VintageStoryPath)/Lib/OpenTK.Windowing.Common.dll</HintPath></Reference>
+    <Reference Include="OpenTK.Windowing.Desktop"><HintPath>$(VintageStoryPath)/Lib/OpenTK.Windowing.Desktop.dll</HintPath></Reference>
+    <Reference Include="OpenTK.Windowing.GraphicsLibraryFramework"><HintPath>$(VintageStoryPath)/Lib/OpenTK.Windowing.GraphicsLibraryFramework.dll</HintPath></Reference>
+    <Content Include="../../src/VintageRTX.Client/assets/vintagertx/shaderincludes/scene-query.glsl" Link="scene-query.glsl" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

@@ -4,7 +4,12 @@
     <ProjectReference Include="../VintageRTX.Core/VintageRTX.Core.csproj" />
     <Reference Include="VintagestoryAPI"><HintPath>$(VintageStoryPath)/VintagestoryAPI.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="Newtonsoft.Json"><HintPath>$(VintageStoryPath)/Lib/Newtonsoft.Json.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="OpenTK.Core"><HintPath>$(VintageStoryPath)/Lib/OpenTK.Core.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="OpenTK.Graphics"><HintPath>$(VintageStoryPath)/Lib/OpenTK.Graphics.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="OpenTK.Mathematics"><HintPath>$(VintageStoryPath)/Lib/OpenTK.Mathematics.dll</HintPath><Private>false</Private></Reference>
     <Content Include="modinfo.json" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="assets/**/*" CopyToOutputDirectory="PreserveNewest" />
+    <InternalsVisibleTo Include="VintageRTX.Client.Tests" />
   </ItemGroup>
   <Target Name="ValidateClient" BeforeTargets="ResolveAssemblyReferences">
     <Error Condition="!Exists('$(VintageStoryPath)/VintagestoryAPI.dll')" Text="Set VINTAGE_STORY to a Vintage Story 1.22.7 client installation." />
