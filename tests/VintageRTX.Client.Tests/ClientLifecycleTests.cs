@@ -198,7 +198,7 @@ internal sealed class LifecycleHost
                 return layer == BlockLayersAccess.Fluid ? Air : Blocks.GetValueOrDefault((p.dimension, p.X, p.Y, p.Z), Air);}
             return Default(m.ReturnType);
         });
-        var clientPlayer = Stub.Create<IClientPlayer>((m, _) => m.Name == "get_Entity" ? Player : Default(m.ReturnType));
+        IClientPlayer clientPlayer = OfficialPlayerFixture.Create(Player);
         IClientWorldAccessor world = Stub.Create<IClientWorldAccessor>((m, _) => m.Name switch {
             "get_Player" => HasPlayer ? clientPlayer : null, "get_LoadedEntities" => Entities,
             "get_BlockAccessor" => accessor, "get_Logger" => Logger, "get_Config" => new TreeAttribute(), _ => Default(m.ReturnType)});
