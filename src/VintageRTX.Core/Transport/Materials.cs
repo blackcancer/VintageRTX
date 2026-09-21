@@ -33,16 +33,23 @@ public static class Bsdf
     {
         if(!double.IsFinite(cosine) || !double.IsFinite(incidentIor) || incidentIor<=0
             || !double.IsFinite(transmittedIor) || transmittedIor<=0) throw new ArgumentException("Invalid optical interface.");
+        // No interface exists between identical media, including the exactly grazing limit.
+        if(incidentIor==transmittedIor) return 0;
         double c=Math.Clamp(Math.Abs(cosine),0,1), ratio=incidentIor/transmittedIor;
-        double sin2=ratio*ratio*(1-c*c); if(sin2>=1) return 1;
+        if(c==0) return 1;
+        if(!double.IsFinite(ratio) || ratio==0) throw new ArgumentException("Unrepresentable IOR ratio.");
+        double sin2=ratio*ratio*Math.Max(0,1-c*c); if(sin2>=1) return 1;
         double ct=Math.Sqrt(Math.Max(0,1-sin2));
-        double rs=(incidentIor*c-transmittedIor*ct)/(incidentIor*c+transmittedIor*ct);
-        double rp=(transmittedIor*c-incidentIor*ct)/(transmittedIor*c+incidentIor*ct);
-        if(c==0 && ct==0) return 0; // Identical media at grazing incidence.
+        double rs=(ratio*c-ct)/(ratio*c+ct);
+        double rp=(c-ratio*ct)/(c+ratio*ct);
         return (rs*rs+rp*rp)*0.5;
     }
     public static double ConductorFresnel(double cosine,double eta,double k)
     {
+        if(!double.IsFinite(cosine) || !double.IsFinite(eta) || eta<=0 || !double.IsFinite(k) || k<0)
+            throw new ArgumentException("Invalid complex refractive index.");
+        // The lossless limit uses the real-index equation, avoiding removable 0/0 singularities.
+        if(k==0) return DielectricFresnel(cosine,1,eta);
         double c=Math.Clamp(Math.Abs(cosine),0,1);
         if(c==0) return 1;
         double c2=c*c,s2=1-c2,e2=eta*eta,k2=k*k,t0=e2-k2-s2;
@@ -71,7 +78,7 @@ public static class Bsdf
         double nv=DVec3.Dot(normal,outgoing),nl=DVec3.Dot(normal,incoming);
         if(nv<=0 || nl<=0) return Vector3.Zero;
         if(m.Kind==SurfaceKind.Diffuse) return m.Reflectance/(float)Math.PI;
-        if(m.Roughness==0) return Vector3.Zero; // A delta lobe is sampled, not evaluated as finite density.
+        if(m.Roughness==0) return Vector3.Zero;
         DVec3 sum=outgoing+incoming; if(sum.LengthSquared<1e-24) return Vector3.Zero;
         DVec3 h=sum.Normalized(); double alpha=Math.Max(1e-4,m.Roughness*m.Roughness);
         double d=Distribution(DVec3.Dot(normal,h),alpha),g=1/(1+Lambda(nv,alpha)+Lambda(nl,alpha));
