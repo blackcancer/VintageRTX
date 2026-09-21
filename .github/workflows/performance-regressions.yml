@@ -1,0 +1,72 @@
+name: Liquid performance equivalence
+on:
+  push:
+    branches: [dev/renderer-recovery-20260918]
+    paths: ['src/**', 'tests/**', 'tools/performance/**', '.github/workflows/performance-regressions.yml']
+  pull_request:
+    paths: ['src/**', 'tests/**', 'tools/performance/**', '.github/workflows/performance-regressions.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: performance-equivalence-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  compare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      LIBGL_ALWAYS_SOFTWARE: '1'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9
+        with:
+          dotnet-version: '10.0.401'
+      - name: Prepare official references and graphics context
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/performance" "$RUNNER_TEMP/vs-client"
+          git rev-parse HEAD > "$RUNNER_TEMP/performance/source-commit.txt"
+          lscpu > "$RUNNER_TEMP/performance/cpu.txt"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libegl1-mesa-dev libgl1-mesa-dri libgl-dev libglfw3 xvfb libxinerama1 libxcursor1
+          curl -fsSL --retry 2 --max-time 180 'https://cdn.vintagestory.at/gamefiles/stable/vs_client_linux-x64_1.22.7.tar.gz' -o "$RUNNER_TEMP/client.tar.gz"
+          sha256sum "$RUNNER_TEMP/client.tar.gz" > "$RUNNER_TEMP/performance/client.sha256"
+          tar -xzf "$RUNNER_TEMP/client.tar.gz" -C "$RUNNER_TEMP/vs-client"
+          api_dll=$(find "$RUNNER_TEMP/vs-client" -name VintagestoryAPI.dll -print -quit)
+          test -n "$api_dll"
+          echo "VINTAGE_STORY=$(dirname "$api_dll")" >> "$GITHUB_ENV"
+      - name: Compile and exercise all liquid regression classes
+        run: |
+          set -euo pipefail
+          export LD_LIBRARY_PATH="$VINTAGE_STORY/Lib:${LD_LIBRARY_PATH:-}"
+          dotnet restore tests/VintageRTX.Test/VintageRTX.Test.csproj --source https://api.nuget.org/v3/index.json
+          dotnet build tests/VintageRTX.Test/VintageRTX.Test.csproj -c Release --no-restore 2>&1 | tee "$RUNNER_TEMP/performance/build.log"
+          xvfb-run -a dotnet test tests/VintageRTX.Test/VintageRTX.Test.csproj -c Release --no-build --no-restore --filter 'FullyQualifiedName~Liquid' --logger 'trx;LogFileName=liquids.trx' --results-directory "$RUNNER_TEMP/performance" 2>&1 | tee "$RUNNER_TEMP/performance/liquids.log"
+          python3 - <<'PY'
+          import os,xml.etree.ElementTree as ET
+          from pathlib import Path
+          r=ET.parse(Path(os.environ['RUNNER_TEMP'])/'performance/liquids.trx').getroot()
+          c=r.find('.//{*}Counters')
+          assert c is not None and int(c.get('total','0'))>=125
+          assert c.get('total')==c.get('executed')==c.get('passed'),c.attrib
+          names=[x.get('testName','') for x in r.findall('.//{*}UnitTestResult')]
+          assert 'TopologyIsNotRebuiltForWindOrWaveMotion' in names
+          assert 'RemovedAndReactivatedCellHasNoStaleWaveState' in names
+          PY
+      - name: Verify frozen-reference state and record CPU A/B measurements
+        run: |
+          set -euo pipefail
+          dotnet build-server shutdown
+          python3 tools/performance/compare_liquid.py --output-directory "$RUNNER_TEMP/performance" 2>&1 | tee "$RUNNER_TEMP/performance/comparison.log"
+          test -z "$(git status --porcelain --untracked-files=no)"
+      - name: Preserve reports without distributing client binaries
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: performance-equivalence-${{ github.sha }}
+          path: ${{ runner.temp }}/performance/
+          if-no-files-found: error
+          retention-days: 30
