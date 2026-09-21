@@ -1,40 +1,45 @@
 # VintageRTX — réécriture
 
-Branche : `dev/renderer-rewrite-20260921`. Base historique conservée : `dev/renderer-recovery-20260918`, commit `1a82a0ca6f8a7566c19f56cfa7852312764db755`.
+Branche de développement : `dev/renderer-rewrite-20260921`. L'ancienne implémentation reste dans `dev/renderer-recovery-20260918` et l'historique Git. Les étapes de la réécriture continuent sur la même branche.
 
-**État : R00, fondations exécutables et testables. Ce n'est pas encore le nouveau renderer en jeu.** Le module client observe les émetteurs et prépare leur état de trame ; il laisse volontairement le rendu natif intact. Il n'installe aucun hook, shader ni effet de l'ancien moteur. Ne pas présenter ce build comme une version photoréaliste installable.
+**État : R01b, données régionales, émissions configurables et premières requêtes GPU. Le rendu natif du jeu reste inchangé.** Les shaders de requête sont exercés dans des contextes de test ; la composition PBR de l'image du monde n'est pas encore raccordée. Ce build ne doit pas être présenté comme le mod photoréaliste terminé.
 
 ## Objectif
 
-Lumières et réflexions physiquement cohérentes, réactives, aussi naturelles que possible, sans dénaturer les modèles de Vintage Story. Scènes intérieures/extérieures, ombres des géométries fines et animées, reflets hors écran, métaux rugueux, eau et verre. Les optimisations ne doivent pas faire disparaître les sources ni imposer un délai global de stabilisation.
+Lumières et réflexions cohérentes, réactives et aussi naturelles que possible, sans dénaturer les modèles de Vintage Story. Scènes intérieures/extérieures, géométries fines et animées, reflets hors écran, métaux rugueux, eau et verre. Les optimisations ne doivent pas supprimer silencieusement des sources ni attendre la stabilisation de tous les caches.
 
-## Ce qui existe dans ce premier lot
+## Éléments présents
 
-- Nouveau cœur indépendant du jeu et d'OpenGL : états lumineux immuables par trame, identités structurelles, versions d'émission séparées de la géométrie.
-- Profils temporels déterministes : feu/torche, lanterne protégée, lampe à huile, source stable, source pilotée par son état moteur et flash de foudre fini. La foudre n'est pas une lumière continue ni une flamme.
-- Transactions de régions : construction, données CPU disponibles, publication GPU acquittée. Rejet des anciennes versions après édition, éviction ou changement de monde. Une région prête n'attend pas les autres.
-- Ordonnanceur incrémental prioritaire avec coalescence, limites de travail et progression réservée aux tâches de fond.
-- Intersections sur triangles et BVH CPU, coordonnées monde en double précision ; référence de transport diffus et conducteur GGX sur des scènes fournies complètes. Mêmes lumières pour les impacts primaires et secondaires, pas de plafond de huit sources.
-- Adaptateur d'observation via API publique, sans ajouter de lumières natives en double. Commande client `.vrtxrewrite` : état de la fondation.
+Le cœur indépendant du jeu comprend un registre de sources avec identités structurelles et frames immuables, des profils temporels déterministes, des transactions régionales, un ordonnanceur incrémental et un tracer CPU de référence. Les coordonnées monde sont conservées en double précision ; les données GPU sont relatives à une ancre entière.
 
-Le tracer CPU est un **instrument de référence**, pas un renderer temps réel du monde. Il ne gère pas encore les émetteurs surfaciques, la transparence, les textures ou les milieux imbriqués. Les traces de la scène complète fournie ne connaissent pas les chunks non chargés : la future traversal GPU doit consulter les états régionaux et retourner `Unknown`, jamais les confondre avec un ciel dégagé.
+L'adaptateur importe un sous-ensemble **explicitement limité de maillages opaques statiques** via l'API publique. Les régions GPU sont mises à jour indépendamment. Les autres géométries restent inconnues ou non prises en charge, jamais remplacées par des cubes supposés corrects. La traversée GLSL conserve les états clear, hit, unknown, unsupported et budget exhaustion.
 
-## Compilation
+L'émission se configure dans **`assets/vintagertx/config/emission.json`**, modifiable par les patches JSON natifs. Les profils incluent feu/torche, lanterne, lampe à huile, bougie, chandelier, émission stable/pilotée par le moteur et enveloppe de foudre. Les règles utilisent les codes runtime et les variantes, pas le nom supposé d'un fichier. Documentation et exemples : [EMISSION-ASSETS.md](docs/EMISSION-ASSETS.md).
 
-SDK .NET 10.0.401 ; solution Visual Studio : `VintageRTX.slnx`.
+Chaque frame lumineuse est maintenant transférée vers sa propre texture RGBA32F, **indépendamment de la disponibilité géométrique**. Les consommateurs doivent utiliser la même frame et la même ancre. Aucun vacillement supplémentaire n'est calculé dans les requêtes GPU. L'éclairage diffus ponctuel et ses occultations sont testés sur cette chaîne CPU→GPU ; les reflets complets et les émetteurs surfaciques restent à raccorder.
+
+Commandes client : `.vrtxemissions` décrit le catalogue final, sa révision et ses erreurs ; `.vrtxrewrite` affiche les sources, régions et compteurs de transfert. Ces commandes n'annoncent pas un effet visuel absent.
+
+## Compilation et validation
+
+SDK .NET **10.0.401**, solution Visual Studio **`VintageRTX.slnx`**, client cible **Vintage Story 1.22.7**.
 
 ```powershell
 dotnet test .\tests\VintageRTX.Core.Tests\VintageRTX.Core.Tests.csproj -c Release
 $env:VINTAGE_STORY = 'C:\Chemin\Vers\Vintagestory'
-dotnet build .\src\VintageRTX.Client\VintageRTX.Client.csproj -c Release
+dotnet test .\tests\VintageRTX.Client.Tests\VintageRTX.Client.Tests.csproj -c Release
 ```
 
-Le cœur et ses tests n'ont pas besoin d'une installation du jeu. L'adaptateur cible le client **1.22.7**. Seule référence supplémentaire activée dans ce premier adaptateur : **Newtonsoft.Json** fourni par le jeu (non copié). Ni Harmony, ni OpenTK, ni Skia ne sont activés à ce stade.
+Les tests du cœur n'ont pas besoin du jeu. Les tests client ont besoin des références et assets officiels, et les tests graphiques créent un contexte OpenGL caché. La CI exécute aussi les requêtes GLSL sur les paquets exportés par le C# de production. Un test de patch utilise le **vrai `ModJsonPatchLoader`** du client sur des assets en mémoire ; ce n'est pas un second patcher maison.
 
-**Attention aux changements de branche :** utiliser de préférence un `git worktree` distinct. Ne pas déployer un ancien `bin/Debug/Mods/vintagertx` laissé par la branche recovery. Le nouveau projet a son propre chemin `src/VintageRTX.Client/bin/...` et n'importe aucun ancien asset automatiquement.
+Références supplémentaires activées pour le client : **Newtonsoft.Json, OpenTK.Core, OpenTK.Graphics et OpenTK.Mathematics**, fournies par le jeu et non redistribuées. Les bibliothèques OpenTK.Windowing sont utilisées seulement par les tests pour leur contexte caché. Harmony et Skia ne sont pas activés.
 
-## Suite du développement et conditions de réception
+Ne pas mélanger les fichiers `bin` de recovery et de rewrite. La sortie active est `src/VintageRTX.Client/bin/...`. Aucun ancien shader n'est importé automatiquement.
 
-Voir [ARCHITECTURE.md](docs/ARCHITECTURE.md) et [LIGHTING.md](docs/LIGHTING.md). R01 doit acquérir la vraie géométrie/matière du jeu et produire les premières passes GPU réactives. Les anciennes captures de référence restent dans l'historique ; les anciens succès CI ne sont pas une certification de cette nouvelle architecture.
+## Limites et réception
 
-La CI de réécriture ne publie **aucune archive intitulée mod final** : compilation, tests du cœur et vérification de l'adaptateur uniquement. Les validations numériques ne remplacent pas les scènes en jeu ni les budgets de performances sur un GPU réel.
+Voir [ARCHITECTURE.md](docs/ARCHITECTURE.md), [LIGHTING.md](docs/LIGHTING.md) et [R01-LIGHT-TRANSFER.md](docs/R01-LIGHT-TRANSFER.md). Les acquis de R00 restent documentés dans leur état historique ; ils ne décrivent pas seuls la situation actuelle.
+
+Manquent notamment la capture complète de la matière du jeu, les passes PBR visibles, les géométries animées et alpha-testées, les attaches précises des mains et mèches, les émetteurs surfaciques, la foudre météo réelle, les reflets rugueux/hors écran et la reconstruction temporelle. Le chandelier est encore une source agrégée, sans multiplication supplémentaire du nombre de bougies. Les intensités sont des grandeurs relatives provisoires, non des mesures SI.
+
+La CI ne livre pas d'archive annoncée comme mod final. Une compilation et des requêtes GPU réussies ne certifient ni les pixels d'un monde réel ni les budgets de performances sur le matériel du joueur.
