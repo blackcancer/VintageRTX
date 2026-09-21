@@ -54,7 +54,14 @@ public readonly record struct Bounds(DVec3 Minimum, DVec3 Maximum)
                 continue;
             }
             double a=(Minimum[axis]-o)/d, b=(Maximum[axis]-o)/d;
-            near=Math.Max(near,Math.Min(a,b)); far=Math.Min(far,Math.Max(a,b));
+            double lower=Math.Min(a,b), upper=Math.Max(a,b);
+            // Broad-phase interval only: round outwards so independently rounded triangle t
+            // values at a shared boundary are not culled. The exact triangle interval is unchanged.
+            // Sign-aware scaling avoids infinity-infinity; the final adjacent float covers zero.
+            const double slabRoundoff = 1.7763568394002505e-15; // eight binary64 machine epsilons
+            lower = Math.BitDecrement(lower * (1 - Math.CopySign(slabRoundoff, lower)));
+            upper = Math.BitIncrement(upper * (1 + Math.CopySign(slabRoundoff, upper)));
+            near=Math.Max(near,lower); far=Math.Min(far,upper);
             if (near>far) { entry=0; return false; }
         }
         entry=near; return true;
