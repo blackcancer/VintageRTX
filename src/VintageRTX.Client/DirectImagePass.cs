@@ -63,27 +63,31 @@ internal sealed class DirectImagePass : IDisposable
         if (surfaces.Width > maximumSize || surfaces.Height > maximumSize || surfaces.MaterialCount > maximumSize)
             throw new NotSupportedException("Surface packet exceeds the GPU texture extent.");
         CheckError("before direct pass");
-        using var state = new RewriteDrawState(Samplers.Length, 3);
-        state.Configure();
-        UploadSurfaces(surfaces); AllocateTargets(surfaces.Width, surfaces.Height);
-        inputs[0] = geometry.RegionTexture; inputs[1] = geometry.CellTexture; inputs[2] = geometry.GeometryTexture; inputs[3] = lights.Texture;
-        for (int i = 0; i < surfaceTextures.Length; i++) inputs[i + 4] = surfaceTextures[i];
-        GL.UseProgram(program);
-        for (int i = 0; i < inputs.Length; i++)
+        using (var state = new RewriteDrawState(Samplers.Length, 3))
         {
-            if (inputs[i] == 0 || inputs[i] == hdr || inputs[i] == diagnostic || inputs[i] == preview)
-                throw new InvalidOperationException("Missing input or framebuffer feedback in direct pass.");
-            GL.ActiveTexture((TextureUnit)((int)TextureUnit.Texture0 + i));
-            GL.BindTexture(TextureTarget.Texture2D, inputs[i]); GL.Uniform1(samplerLocations[i], i);
+            state.Configure();
+            UploadSurfaces(surfaces); AllocateTargets(surfaces.Width, surfaces.Height);
+            inputs[0] = geometry.RegionTexture; inputs[1] = geometry.CellTexture; inputs[2] = geometry.GeometryTexture; inputs[3] = lights.Texture;
+            for (int i = 0; i < surfaceTextures.Length; i++) inputs[i + 4] = surfaceTextures[i];
+            GL.UseProgram(program);
+            for (int i = 0; i < inputs.Length; i++)
+            {
+                if (inputs[i] == 0 || inputs[i] == hdr || inputs[i] == diagnostic || inputs[i] == preview)
+                    throw new InvalidOperationException("Missing input or framebuffer feedback in direct pass.");
+                GL.ActiveTexture((TextureUnit)((int)TextureUnit.Texture0 + i));
+                GL.BindTexture(TextureTarget.Texture2D, inputs[i]); GL.Uniform1(samplerLocations[i], i);
+            }
+            var camera = DirectSurfaceFrame.Relative(surfaces.Camera, surfaces.Anchor);
+            GL.Uniform3(anchorUniform, surfaces.Anchor.X, surfaces.Anchor.Y, surfaces.Anchor.Z);
+            GL.Uniform3(cameraUniform, camera.X, camera.Y, camera.Z); GL.Uniform1(countUniform, frame.Samples.Length);
+            GL.Uniform1(samplesUniform, finiteSamples); GL.Uniform1(minimumUniform, rayMinimum); GL.Uniform1(cellsUniform, maximumCells);
+            GL.Uniform2(rotationUniform, 0f, 0f); GL.Uniform1(exposureUniform, previewExposure);
+            GL.BindFramebuffer(FramebufferTarget.DrawFramebuffer, framebuffer); GL.Viewport(0, 0, surfaces.Width, surfaces.Height);
+            GL.BindVertexArray(vao); GL.DrawArrays(PrimitiveType.Triangles, 0, 3);
+            CheckError("drawing direct image");
         }
-        var camera = DirectSurfaceFrame.Relative(surfaces.Camera, surfaces.Anchor);
-        GL.Uniform3(anchorUniform, surfaces.Anchor.X, surfaces.Anchor.Y, surfaces.Anchor.Z);
-        GL.Uniform3(cameraUniform, camera.X, camera.Y, camera.Z); GL.Uniform1(countUniform, frame.Samples.Length);
-        GL.Uniform1(samplesUniform, finiteSamples); GL.Uniform1(minimumUniform, rayMinimum); GL.Uniform1(cellsUniform, maximumCells);
-        GL.Uniform2(rotationUniform, 0f, 0f); GL.Uniform1(exposureUniform, previewExposure);
-        GL.BindFramebuffer(FramebufferTarget.DrawFramebuffer, framebuffer); GL.Viewport(0, 0, surfaces.Width, surfaces.Height);
-        GL.BindVertexArray(vao); GL.DrawArrays(PrimitiveType.Triangles, 0, 3);
-        CheckError("drawing direct image");
+        // The image is not available until restoring the host state also succeeds.
+        CheckError("restoring direct pass state");
         previousWorld = frame.World; previousFrame = frame.Frame;
         PublishedSurfaces = surfaces; PublishedLights = frame; Ready = true;
     }
@@ -152,17 +156,22 @@ internal sealed class DirectImagePass : IDisposable
         ErrorCode error = status.Error();
         if (error != ErrorCode.NoError) throw new InvalidOperationException($"OpenGL error {error} {operation}; image not published.");
     }
-    private static int MakeProgram(params string[] parts)
+    private static int MakeProgram(params string[] parts) =>
+        LinkSources(Vertex, "#version 330 core\n" + string.Join("\n", parts));
+
+    // Shared production linker. Tests feed two independently valid but incompatible stages;
+    // unlike resource-limit guesses, their interface mismatch must fail at link time.
+    internal static int LinkSources(string vertexSource, string fragmentSource)
     {
         // Compile owns failure cleanup. After it succeeds, this scope unconditionally owns vertex.
-        int vertex = Compile(ShaderType.VertexShader, Vertex);
+        int vertex = Compile(ShaderType.VertexShader, vertexSource);
         int fragment = 0, result = 0;
         try
         {
-            fragment = Compile(ShaderType.FragmentShader, "#version 330 core\n" + string.Join("\n", parts));
+            fragment = Compile(ShaderType.FragmentShader, fragmentSource);
             result = GL.CreateProgram(); GL.AttachShader(result, vertex); GL.AttachShader(result, fragment); GL.LinkProgram(result);
             GL.GetProgram(result, GetProgramParameterName.LinkStatus, out int linked);
-            if (linked == 0) throw new InvalidOperationException(GL.GetProgramInfoLog(result));
+            if (linked == 0) throw new InvalidOperationException("Direct image shader link failed: " + GL.GetProgramInfoLog(result));
             return result;
         }
         catch { if (result != 0) GL.DeleteProgram(result); throw; }
@@ -173,7 +182,7 @@ internal sealed class DirectImagePass : IDisposable
         int shader = GL.CreateShader(type); GL.ShaderSource(shader, source); GL.CompileShader(shader);
         GL.GetShader(shader, ShaderParameter.CompileStatus, out int ok);
         if (ok != 0) return shader;
-        string error = GL.GetShaderInfoLog(shader); GL.DeleteShader(shader); throw new InvalidOperationException(error);
+        string error = GL.GetShaderInfoLog(shader); GL.DeleteShader(shader); throw new InvalidOperationException($"Direct image {type} compilation failed: {error}");
     }
     public void Dispose()
     {

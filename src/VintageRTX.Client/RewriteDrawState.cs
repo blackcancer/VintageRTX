@@ -6,7 +6,8 @@ namespace VintageRTX.Client;
 internal sealed class RewriteDrawState : IDisposable
 {
     private readonly int program, vao, drawFramebuffer, readFramebuffer, activeTexture;
-    private readonly int[] viewport = new int[4], polygon = new int[2], textures, samplers;
+    private readonly int[] viewport = new int[4], textures, samplers;
+    private readonly RewritePolygonModes polygon;
     private readonly bool[][] colorMasks;
     private readonly bool[] blends, enabled;
     private static readonly EnableCap[] Caps = [EnableCap.DepthTest, EnableCap.CullFace, EnableCap.ScissorTest,
@@ -17,7 +18,14 @@ internal sealed class RewriteDrawState : IDisposable
         program = GL.GetInteger(GetPName.CurrentProgram); vao = GL.GetInteger(GetPName.VertexArrayBinding);
         drawFramebuffer = GL.GetInteger(GetPName.DrawFramebufferBinding); readFramebuffer = GL.GetInteger(GetPName.ReadFramebufferBinding);
         activeTexture = GL.GetInteger(GetPName.ActiveTexture);
-        GL.GetInteger(GetPName.Viewport, viewport); GL.GetInteger(GetPName.PolygonMode, polygon);
+        GL.GetInteger(GetPName.Viewport, viewport);
+        // Keep room for both legacy values, but determine semantics from the actual context.
+        // Drivers need not write the second slot alike in a core context. A leftover zero is
+        // not evidence that separate front/back calls are legal.
+        int[] reportedPolygon = new int[2];
+        GL.GetInteger(GetPName.PolygonMode, reportedPolygon);
+        polygon = new RewritePolygonModes(GL.GetInteger(GetPName.ContextProfileMask),
+            GL.GetInteger(GetPName.ContextFlags), reportedPolygon[0], reportedPolygon[1]);
         enabled = new bool[Caps.Length];
         for (int i = 0; i < Caps.Length; i++) enabled[i] = GL.IsEnabled(Caps[i]);
         colorMasks = new bool[outputs][]; blends = new bool[outputs];
@@ -56,8 +64,7 @@ internal sealed class RewriteDrawState : IDisposable
         GL.BindFramebuffer(FramebufferTarget.DrawFramebuffer, drawFramebuffer);
         GL.BindFramebuffer(FramebufferTarget.ReadFramebuffer, readFramebuffer);
         GL.Viewport(viewport[0], viewport[1], viewport[2], viewport[3]);
-        if (polygon[0] == polygon[1]) GL.PolygonMode(TriangleFace.FrontAndBack, (PolygonMode)polygon[0]);
-        else { GL.PolygonMode(TriangleFace.Front, (PolygonMode)polygon[0]); GL.PolygonMode(TriangleFace.Back, (PolygonMode)polygon[1]); }
+        polygon.Restore();
         for (int i = 0; i < Caps.Length; i++) { if (enabled[i]) GL.Enable(Caps[i]); else GL.Disable(Caps[i]); }
         for (int i = 0; i < blends.Length; i++)
         {

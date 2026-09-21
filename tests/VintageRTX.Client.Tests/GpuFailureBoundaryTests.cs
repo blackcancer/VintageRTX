@@ -15,13 +15,7 @@ namespace VintageRTX.Client.Tests;
 [TestClass, DoNotParallelize]
 public sealed class GpuFailureBoundaryTests
 {
-    private static NativeWindow Context()
-    {
-        GLFWProvider.CheckForMainThread = false;
-        var w = new NativeWindow(new NativeWindowSettings {ClientSize = new(8, 8), StartVisible = false,
-            API = ContextAPI.OpenGL, APIVersion = new(3, 3), Profile = ContextProfile.Core});
-        w.Context.MakeCurrent(); GL.LoadBindings(new GLFWBindingsContext()); return w;
-    }
+    private static NativeWindow Context() => PortableGlContext.Create();
     private static DirectImagePass Pass() => new(Read("scene-query.glsl"), Read("light-query.glsl"), Read("material-query.glsl"), Read("direct-image.glsl"));
     private static string Read(string file) => File.ReadAllText(Path.Combine(AppContext.BaseDirectory, file));
     private static void Set(object target, string property, int value) => target.GetType().GetProperty(property)!.SetValue(target, value);
@@ -91,13 +85,9 @@ public sealed class GpuFailureBoundaryTests
     {
         using var gl = Context();
         Assert.ThrowsException<InvalidOperationException>(() => new DirectImagePass("", "", "", "invalid shader"));
-        int count = GL.GetInteger(GetPName.MaxTextureImageUnits) + 1;
-        // A missing varying can legally link with undefined values on some drivers. Instead,
-        // activate one more fragment sampler than the advertised limit: valid syntax, invalid link resources.
-        string declarations = string.Join("\n", Enumerable.Range(0, count).Select(i => $"uniform sampler2D t{i};"));
-        string sum = string.Join("+", Enumerable.Range(0, count).Select(i => $"texture(t{i},gl_FragCoord.xy)"));
-        string fragment = declarations + "\nout vec4 outputColor;void main(){outputColor=" + sum + ";}";
-        Assert.ThrowsException<InvalidOperationException>(() => new DirectImagePass("", "", "", fragment));
+        var linkError = Assert.ThrowsException<InvalidOperationException>(() => DirectImagePass.LinkSources(
+            ShaderLinkFailureFixture.Vertex, ShaderLinkFailureFixture.Fragment));
+        StringAssert.Contains(linkError.Message, "shader link failed");
         using var untouched = Pass(); Assert.AreEqual(0, untouched.DiagnosticTexture); untouched.Dispose(); untouched.Dispose();
         using var scene = new SceneTextureSet(); scene.NoUpload(); Assert.AreEqual(0L, scene.LastUploadBytes);
         Assert.ThrowsException<ArgumentException>(() => scene.Upload(new GpuSceneData()));

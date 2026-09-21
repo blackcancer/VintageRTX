@@ -3,7 +3,6 @@ using Microsoft.VisualStudio.TestTools.UnitTesting;
 using OpenTK.Graphics.OpenGL4;
 using OpenTK.Windowing.Common;
 using OpenTK.Windowing.Desktop;
-using OpenTK.Windowing.GraphicsLibraryFramework;
 using VintageRTX.Client;
 using VintageRTX.Core.Diagnostics;
 using VintageRTX.Core.Lighting;
@@ -15,14 +14,7 @@ namespace VintageRTX.Client.Tests;
 [TestClass, DoNotParallelize]
 public sealed class DriverFailureQualificationTests
 {
-    private static NativeWindow Context(ContextProfile profile = ContextProfile.Core)
-    {
-        GLFWProvider.CheckForMainThread = false;
-        var w = new NativeWindow(new NativeWindowSettings {ClientSize = new(8, 8), StartVisible = false,
-            API = ContextAPI.OpenGL, APIVersion = new(3, 3), Profile = profile,
-            Flags = profile == ContextProfile.Compatability ? ContextFlags.Default : ContextFlags.ForwardCompatible});
-        w.Context.MakeCurrent(); GL.LoadBindings(new GLFWBindingsContext()); return w;
-    }
+    private static NativeWindow Context(ContextProfile profile = ContextProfile.Core) => PortableGlContext.Create(profile);
     private sealed class Report : IGraphicsStatus
     {
         internal readonly Dictionary<GetPName, int> Limits = new();
@@ -83,15 +75,18 @@ public sealed class DriverFailureQualificationTests
     {
         using var gl = Context(); var frame = DirectLightLab.Create(2, 2);
         using var geometry = new SceneTextureSet(); using var lights = new LightTexture(); Upload(frame, geometry, lights);
-        for (int failure = 1; failure <= 4; failure++)
+        // The fifth boundary is AFTER host-state restoration, but BEFORE Ready is published.
+        for (int failure = 1; failure <= 5; failure++)
         {
             var report = new Report {ErrorOnRead = failure}; using var pass = Pass(report);
             int oldFramebuffer = GL.GetInteger(GetPName.DrawFramebufferBinding);
-            Assert.ThrowsException<InvalidOperationException>(() => pass.Render(frame, geometry, lights));
+            var error = Assert.ThrowsException<InvalidOperationException>(() => pass.Render(frame, geometry, lights));
+            if (failure == 5) StringAssert.Contains(error.Message, "restoring direct pass state");
             Assert.IsFalse(pass.Ready); Assert.IsNull(pass.PublishedLights); Assert.AreEqual(0, pass.RadianceTexture);
             Assert.AreEqual(oldFramebuffer, GL.GetInteger(GetPName.DrawFramebufferBinding));
             report.ErrorOnRead = 0; report.Reads = 0;
             pass.Render(frame, geometry, lights); Assert.IsTrue(pass.Ready);
+            Assert.AreEqual(ErrorCode.NoError, GL.GetError());
         }
         var incomplete = new Report {Incomplete = true}; using var retry = Pass(incomplete);
         StringAssert.Contains(Assert.ThrowsException<InvalidOperationException>(() => retry.Render(frame, geometry, lights)).Message, "incomplete");
@@ -117,9 +112,10 @@ public sealed class DriverFailureQualificationTests
     [TestMethod]
     public void CompatibilityFrontBackPolygonModesAreRestoredIndependently()
     {
+        // Exercise exactly the troublesome order: a forward-compatible core window followed by
+        // a compatibility window in the SAME process. Merely setting Flags=Default is not enough.
+        using (var core = Context()) Assert.AreNotEqual(0, GL.GetInteger(GetPName.ContextFlags) & 1);
         using var gl = Context(ContextProfile.Compatability);
-        // Forward-compatible creation removes legacy state even when a compatibility profile
-        // was requested. Verify that this test obtained the intended native context.
         Assert.AreEqual(0, GL.GetInteger(GetPName.ContextFlags) & 1);
         Assert.AreNotEqual(0, GL.GetInteger(GetPName.ContextProfileMask) & 2);
         GL.PolygonMode(TriangleFace.Front, PolygonMode.Line); GL.PolygonMode(TriangleFace.Back, PolygonMode.Point);
