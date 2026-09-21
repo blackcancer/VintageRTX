@@ -356,7 +356,7 @@ internal readonly record struct LiquidSurfaceBubbleSample(
 /// this is a bounded linear-wave approximation rather than a full Navier-Stokes solve. One world
 /// block equals one metre by renderer calibration.
 /// </remarks>
-internal sealed class LiquidSurfaceSimulation
+internal sealed partial class LiquidSurfaceSimulation
 {
     /// <summary>Deterministic solver step in seconds; decouples propagation from render FPS.</summary>
     internal const float FixedStepSeconds = 1.0f / 120.0f;
@@ -743,6 +743,7 @@ internal sealed class LiquidSurfaceSimulation
             throw new ArgumentOutOfRangeException(nameof(depthMetres));
         }
         surfacePhysics.Validate();
+        topologyDirty = true;
 
         profileIds[index] = profileId;
         dynamics[index] = surfaceDynamics;
@@ -764,6 +765,7 @@ internal sealed class LiquidSurfaceSimulation
     public void ClearSurfaceCell(int x, int z)
     {
         int index = GetIndexChecked(x, z);
+        topologyDirty = true;
         heights[index] = 0.0f;
         velocities[index] = 0.0f;
         nextHeights[index] = 0.0f;
@@ -1517,71 +1519,71 @@ internal sealed class LiquidSurfaceSimulation
         float directionX,
         float directionZ)
     {
-        for (int z = 0; z < Depth; z++)
+        EnsureActiveTopology();
+        for (int ordinal = 0; ordinal < activeStencilCount; ordinal++)
         {
-            for (int x = 0; x < Width; x++)
+            int index = activeStencils[ordinal].Center;
+            int x = index % Width;
+            int z = index / Width;
+            ref readonly CellWindCoefficients cached =
+                ref cachedWindCoefficients[index];
+            if (cached.AngularFrequencySquared <= 0.0f)
             {
-                int index = GetIndex(x, z);
-                ref readonly CellWindCoefficients cached =
-                    ref cachedWindCoefficients[index];
-                if (!IsActive(index) || cached.AngularFrequencySquared <= 0.0f)
-                {
-                    cachedWindAmplitudes[index] = 0.0f;
-                    cachedWindSpatialPhases[index] = 0.0f;
-                    cachedWindSpreadPhasesA[index] = 0.0f;
-                    cachedWindSpreadPhasesB[index] = 0.0f;
-                    continue;
-                }
-
-                LiquidSurfaceDynamics coefficients = dynamics[index];
-                LiquidSurfacePhysicalProperties physics = physicalProperties[index];
-                float wavePeriodSeconds = cached.Wavelength / cached.PhaseSpeed;
-                float flowExposure = Math.Clamp(coefficients.WindCoupling, 0.0f, 1.0f);
-                float exposedWindSpeedMetresPerSecond = windLength * flowExposure;
-                double incidentEnergyPerSquareMetre = 0.5
-                    * ReferenceAirDensityKilogramsPerCubicMetre
-                    * exposedWindSpeedMetresPerSecond
-                    * exposedWindSpeedMetresPerSecond
-                    * exposedWindSpeedMetresPerSecond
-                    * wavePeriodSeconds;
-                float windAmplitudeMetres = (float)LiquidPhysicalModel.ImpactDisplacementMetres(
-                    incidentEnergyPerSquareMetre,
-                    physics.ResolvedWaveEnergyFraction,
-                    physics.DensityKilogramsPerCubicMetre,
-                    1.0);
-                cachedWindAmplitudes[index] = Math.Min(
-                    coefficients.WaveAmplitude,
-                    windAmplitudeMetres / (float)LiquidPhysicalModel.MetresPerWorldBlock);
-                float worldX = OriginWorldX + (x + 0.5f) * CellSize;
-                float worldZ = OriginWorldZ + (z + 0.5f) * CellSize;
-                float crossX = -directionZ;
-                float crossZ = directionX;
-                const float spreadTangentA = 0.58f;
-                const float spreadTangentB = -0.72f;
-                float spreadNormalizationA = 1.0f / MathF.Sqrt(
-                    1.0f + spreadTangentA * spreadTangentA);
-                float spreadNormalizationB = 1.0f / MathF.Sqrt(
-                    1.0f + spreadTangentB * spreadTangentB);
-                float spreadDirectionAX = (
-                    directionX + crossX * spreadTangentA) * spreadNormalizationA;
-                float spreadDirectionAZ = (
-                    directionZ + crossZ * spreadTangentA) * spreadNormalizationA;
-                float spreadDirectionBX = (
-                    directionX + crossX * spreadTangentB) * spreadNormalizationB;
-                float spreadDirectionBZ = (
-                    directionZ + crossZ * spreadTangentB) * spreadNormalizationB;
-                cachedWindSpatialPhases[index] = (
-                    worldX * directionX + worldZ * directionZ)
-                    / cached.Wavelength;
-                cachedWindSpreadPhasesA[index] = (
-                    worldX * spreadDirectionAX + worldZ * spreadDirectionAZ)
-                    / (cached.Wavelength * 0.73f)
-                    + 0.173f;
-                cachedWindSpreadPhasesB[index] = (
-                    worldX * spreadDirectionBX + worldZ * spreadDirectionBZ)
-                    / (cached.Wavelength * 0.47f)
-                    + 0.619f;
+                cachedWindAmplitudes[index] = 0.0f;
+                cachedWindSpatialPhases[index] = 0.0f;
+                cachedWindSpreadPhasesA[index] = 0.0f;
+                cachedWindSpreadPhasesB[index] = 0.0f;
+                continue;
             }
+
+            LiquidSurfaceDynamics coefficients = dynamics[index];
+            LiquidSurfacePhysicalProperties physics = physicalProperties[index];
+            float wavePeriodSeconds = cached.Wavelength / cached.PhaseSpeed;
+            float flowExposure = Math.Clamp(coefficients.WindCoupling, 0.0f, 1.0f);
+            float exposedWindSpeedMetresPerSecond = windLength * flowExposure;
+            double incidentEnergyPerSquareMetre = 0.5
+                * ReferenceAirDensityKilogramsPerCubicMetre
+                * exposedWindSpeedMetresPerSecond
+                * exposedWindSpeedMetresPerSecond
+                * exposedWindSpeedMetresPerSecond
+                * wavePeriodSeconds;
+            float windAmplitudeMetres = (float)LiquidPhysicalModel.ImpactDisplacementMetres(
+                incidentEnergyPerSquareMetre,
+                physics.ResolvedWaveEnergyFraction,
+                physics.DensityKilogramsPerCubicMetre,
+                1.0);
+            cachedWindAmplitudes[index] = Math.Min(
+                coefficients.WaveAmplitude,
+                windAmplitudeMetres / (float)LiquidPhysicalModel.MetresPerWorldBlock);
+            float worldX = OriginWorldX + (x + 0.5f) * CellSize;
+            float worldZ = OriginWorldZ + (z + 0.5f) * CellSize;
+            float crossX = -directionZ;
+            float crossZ = directionX;
+            const float spreadTangentA = 0.58f;
+            const float spreadTangentB = -0.72f;
+            float spreadNormalizationA = 1.0f / MathF.Sqrt(
+                1.0f + spreadTangentA * spreadTangentA);
+            float spreadNormalizationB = 1.0f / MathF.Sqrt(
+                1.0f + spreadTangentB * spreadTangentB);
+            float spreadDirectionAX = (
+                directionX + crossX * spreadTangentA) * spreadNormalizationA;
+            float spreadDirectionAZ = (
+                directionZ + crossZ * spreadTangentA) * spreadNormalizationA;
+            float spreadDirectionBX = (
+                directionX + crossX * spreadTangentB) * spreadNormalizationB;
+            float spreadDirectionBZ = (
+                directionZ + crossZ * spreadTangentB) * spreadNormalizationB;
+            cachedWindSpatialPhases[index] = (
+                worldX * directionX + worldZ * directionZ)
+                / cached.Wavelength;
+            cachedWindSpreadPhasesA[index] = (
+                worldX * spreadDirectionAX + worldZ * spreadDirectionAZ)
+                / (cached.Wavelength * 0.73f)
+                + 0.173f;
+            cachedWindSpreadPhasesB[index] = (
+                worldX * spreadDirectionBX + worldZ * spreadDirectionBZ)
+                / (cached.Wavelength * 0.47f)
+                + 0.619f;
         }
 
         cachedWindX = windX;
@@ -1596,62 +1598,52 @@ internal sealed class LiquidSurfaceSimulation
     /// <param name="forcing">Environmental forcing for this fixed step.</param>
     private void Step(in LiquidSurfaceForcing forcing)
     {
+        EnsureActiveTopology();
         ApplyPendingImpulses();
         ApplyRain(in forcing);
         ApplyWind(in forcing);
         AdvanceBubbles();
 
         float inverseCellSizeSquared = 1.0f / (CellSize * CellSize);
-        for (int z = 0; z < Depth; z++)
+        for (int ordinal = 0; ordinal < activeStencilCount; ordinal++)
         {
-            for (int x = 0; x < Width; x++)
+            ref readonly CellStencil stencil = ref activeStencils[ordinal];
+            int index = stencil.Center;
+            ref readonly CellStepCoefficients cached =
+                ref cachedStepCoefficients[index];
+            float center = heights[index];
+            float laplacian = (
+                heights[stencil.Left]
+                + heights[stencil.Right]
+                + heights[stencil.Up]
+                + heights[stencil.Down]
+                - 4.0f * center) * inverseCellSizeSquared;
+
+            // The local field represents the envelope of a narrow-band
+            // impact packet, so its front advances at d(omega)/dk. Crest
+            // phase remains the responsibility of the procedural bands.
+            float acceleration = cached.PropagationSpeedSquared * laplacian;
+            float velocity = velocities[index] + acceleration * FixedStepSeconds;
+            velocity *= cached.VelocityRetention;
+
+            float height = Math.Clamp(
+                center + velocity * FixedStepSeconds,
+                -cached.MaximumHeight,
+                cached.MaximumHeight);
+            if (Math.Abs(height) >= cached.MaximumHeight
+                && Math.Sign(velocity) == Math.Sign(height))
             {
-                int index = GetIndex(x, z);
-                if (!IsActive(index))
-                {
-                    nextHeights[index] = 0.0f;
-                    nextVelocities[index] = 0.0f;
-                    transientEmission[index] = 0.0f;
-                    continue;
-                }
-
-                ref readonly CellStepCoefficients cached =
-                    ref cachedStepCoefficients[index];
-                float center = heights[index];
-                float laplacian = (
-                    ConnectedHeight(x - 1, z, index, center)
-                    + ConnectedHeight(x + 1, z, index, center)
-                    + ConnectedHeight(x, z - 1, index, center)
-                    + ConnectedHeight(x, z + 1, index, center)
-                    - 4.0f * center) * inverseCellSizeSquared;
-
-                // The local field represents the envelope of a narrow-band
-                // impact packet, so its front advances at d(omega)/dk. Crest
-                // phase remains the responsibility of the procedural bands.
-                float acceleration = cached.PropagationSpeedSquared * laplacian;
-                float velocity = velocities[index] + acceleration * FixedStepSeconds;
-                velocity *= cached.VelocityRetention;
-
-                float height = Math.Clamp(
-                    center + velocity * FixedStepSeconds,
-                    -cached.MaximumHeight,
-                    cached.MaximumHeight);
-                if (Math.Abs(height) >= cached.MaximumHeight
-                    && Math.Sign(velocity) == Math.Sign(height))
-                {
-                    velocity = 0.0f;
-                }
-
-                nextHeights[index] = float.IsFinite(height) ? height : 0.0f;
-                nextVelocities[index] = float.IsFinite(velocity) ? velocity : 0.0f;
-                transientEmission[index] *= cached.EmissionRetention;
+                velocity = 0.0f;
             }
+
+            nextHeights[index] = float.IsFinite(height) ? height : 0.0f;
+            nextVelocities[index] = float.IsFinite(velocity) ? velocity : 0.0f;
+            transientEmission[index] *= cached.EmissionRetention;
         }
 
-        // Every destination cell is assigned above, including inactive cells.
-        // Promote the completed state by swapping ownership instead of copying
-        // both full grids after every fixed step. The former current buffers
-        // become scratch storage and are completely overwritten on the next step.
+        // All active destinations are written. ClearSurfaceCell zeros BOTH banks when a cell
+        // is removed, so inactive cells remain zero without revisiting the entire dry grid.
+        // Preserve the existing ping-pong ownership and fixed-step update order.
         (heights, nextHeights) = (nextHeights, heights);
         (velocities, nextVelocities) = (nextVelocities, velocities);
         ComputeNormals();
@@ -2516,14 +2508,8 @@ internal sealed class LiquidSurfaceSimulation
             return;
         }
 
-        int exposedCellCount = 0;
-        for (int index = 0; index < heights.Length; index++)
-        {
-            if (IsRainExposed(index))
-            {
-                exposedCellCount++;
-            }
-        }
+        EnsureActiveTopology();
+        int exposedCellCount = rainExposedCellCount;
         if (exposedCellCount == 0)
         {
             return;
@@ -2566,28 +2552,20 @@ internal sealed class LiquidSurfaceSimulation
         for (int drop = 0; drop < representativeCount; drop++)
         {
             int start = (int)(NextRandomUInt() % (uint)heights.Length);
-            for (int probe = 0; probe < heights.Length; probe++)
-            {
-                int index = (start + probe) % heights.Length;
-                if (!IsRainExposed(index))
-                {
-                    continue;
-                }
+            int index = rainSuccessors[start];
+            int x = index % Width;
+            int z = index / Width;
+            float jitterX = NextRandomUnit();
+            float jitterZ = NextRandomUnit();
+            QueueImpulseAtCell(
+                index,
+                OriginWorldX + (x + jitterX) * CellSize,
+                OriginWorldZ + (z + jitterZ) * CellSize,
+                representativeEnergyJoules,
+                0.0f,
+                0.0f,
+                LiquidSurfaceImpulseKind.Rain);
 
-                int x = index % Width;
-                int z = index / Width;
-                float jitterX = NextRandomUnit();
-                float jitterZ = NextRandomUnit();
-                QueueImpulseAtCell(
-                    index,
-                    OriginWorldX + (x + jitterX) * CellSize,
-                    OriginWorldZ + (z + jitterZ) * CellSize,
-                    representativeEnergyJoules,
-                    0.0f,
-                    0.0f,
-                    LiquidSurfaceImpulseKind.Rain);
-                break;
-            }
         }
     }
 
@@ -2626,40 +2604,33 @@ internal sealed class LiquidSurfaceSimulation
         }
 
         float simulationTime = stepIndex * FixedStepSeconds;
-        for (int z = 0; z < Depth; z++)
+        EnsureActiveTopology();
+        for (int ordinal = 0; ordinal < activeStencilCount; ordinal++)
         {
-            for (int x = 0; x < Width; x++)
+            int index = activeStencils[ordinal].Center;
+            ref readonly CellWindCoefficients cached =
+                ref cachedWindCoefficients[index];
+            if (cached.AngularFrequencySquared <= 0.0f)
             {
-                int index = GetIndex(x, z);
-                if (!IsActive(index))
-                {
-                    continue;
-                }
-
-                ref readonly CellWindCoefficients cached =
-                    ref cachedWindCoefficients[index];
-                if (cached.AngularFrequencySquared <= 0.0f)
-                {
-                    continue;
-                }
-
-                float basePhaseTime = simulationTime * cached.PhaseSpeedOverWavelength;
-                float phase = 2.0f * MathF.PI
-                    * (cachedWindSpatialPhases[index] - basePhaseTime);
-                float spreadPhaseA = 2.0f * MathF.PI
-                    * (cachedWindSpreadPhasesA[index]
-                        - basePhaseTime * MathF.Sqrt(1.0f / 0.73f));
-                float spreadPhaseB = 2.0f * MathF.PI
-                    * (cachedWindSpreadPhasesB[index]
-                        - basePhaseTime * MathF.Sqrt(1.0f / 0.47f));
-                float targetHeight = cachedWindAmplitudes[index]
-                    * (0.57f * MathF.Sin(phase)
-                        + 0.28f * MathF.Sin(spreadPhaseA)
-                        + 0.15f * MathF.Sin(spreadPhaseB));
-                float forcingAcceleration = cached.AngularFrequencySquared
-                    * (targetHeight - heights[index]);
-                velocities[index] += forcingAcceleration * FixedStepSeconds;
+                continue;
             }
+
+            float basePhaseTime = simulationTime * cached.PhaseSpeedOverWavelength;
+            float phase = 2.0f * MathF.PI
+                * (cachedWindSpatialPhases[index] - basePhaseTime);
+            float spreadPhaseA = 2.0f * MathF.PI
+                * (cachedWindSpreadPhasesA[index]
+                    - basePhaseTime * MathF.Sqrt(1.0f / 0.73f));
+            float spreadPhaseB = 2.0f * MathF.PI
+                * (cachedWindSpreadPhasesB[index]
+                    - basePhaseTime * MathF.Sqrt(1.0f / 0.47f));
+            float targetHeight = cachedWindAmplitudes[index]
+                * (0.57f * MathF.Sin(phase)
+                    + 0.28f * MathF.Sin(spreadPhaseA)
+                    + 0.15f * MathF.Sin(spreadPhaseB));
+            float forcingAcceleration = cached.AngularFrequencySquared
+                * (targetHeight - heights[index]);
+            velocities[index] += forcingAcceleration * FixedStepSeconds;
         }
     }
 
@@ -2725,28 +2696,7 @@ internal sealed class LiquidSurfaceSimulation
                 bubble.Duration * BubbleBurstDecayFraction);
         }
 
-        Array.Clear(bubbleAreaByProfile);
-        Array.Clear(bubbleCellCountByProfile);
-        float cellArea = CellSize * CellSize;
-        for (int index = 0; index < heights.Length; index++)
-        {
-            if (!IsActive(index))
-            {
-                continue;
-            }
-
-            LiquidSurfaceDynamics coefficients = dynamics[index];
-            if (coefficients.BubbleRate <= 0.0f
-                || coefficients.BubbleRadiusMaximum <= 0.0f
-                || coefficients.BubbleRiseDuration <= 0.0f)
-            {
-                continue;
-            }
-
-            byte profileId = profileIds[index];
-            bubbleAreaByProfile[profileId] += cellArea;
-            bubbleCellCountByProfile[profileId]++;
-        }
+        EnsureActiveTopology();
 
         int spawnedThisStep = 0;
         for (int profileId = 1;
@@ -2814,20 +2764,10 @@ internal sealed class LiquidSurfaceSimulation
     /// <returns>Flat grid index; zero is a defensive fallback for inconsistent counts.</returns>
     private int FindProfileCell(int profileId, int ordinal)
     {
-        for (int index = 0; index < profileIds.Length; index++)
-        {
-            if (IsActive(index) && profileIds[index] == profileId)
-            {
-                if (ordinal == 0)
-                {
-                    return index;
-                }
-
-                ordinal--;
-            }
-        }
-
-        return 0;
+        EnsureActiveTopology();
+        if ((uint)profileId >= (uint)profileCellCounts.Length
+            || (uint)ordinal >= (uint)profileCellCounts[profileId]) return 0;
+        return profileCellIndices[profileCellOffsets[profileId] + ordinal];
     }
 
     /// <summary>Compares consecutive entity observations to classify one-shot crossings and periodic wakes.</summary>
@@ -3223,30 +3163,19 @@ internal sealed class LiquidSurfaceSimulation
     /// <summary>Derives unit normals from central differences of waves plus sub-cell bubble bulges.</summary>
     private void ComputeNormals()
     {
+        EnsureActiveTopology();
         float inverseDoubleCellSize = 0.5f / CellSize;
-        for (int z = 0; z < Depth; z++)
+        for (int ordinal = 0; ordinal < activeStencilCount; ordinal++)
         {
-            for (int x = 0; x < Width; x++)
-            {
-                int index = GetIndex(x, z);
-                if (!IsActive(index))
-                {
-                    normalX[index] = 0.0f;
-                    normalZ[index] = 0.0f;
-                    continue;
-                }
-
-                float center = heights[index] + bubbleBulge[index];
-                float slopeX = (
-                    ConnectedRenderedHeight(x + 1, z, index, center)
-                    - ConnectedRenderedHeight(x - 1, z, index, center)) * inverseDoubleCellSize;
-                float slopeZ = (
-                    ConnectedRenderedHeight(x, z + 1, index, center)
-                    - ConnectedRenderedHeight(x, z - 1, index, center)) * inverseDoubleCellSize;
-                float inverseLength = 1.0f / MathF.Sqrt(1.0f + slopeX * slopeX + slopeZ * slopeZ);
-                normalX[index] = -slopeX * inverseLength;
-                normalZ[index] = -slopeZ * inverseLength;
-            }
+            ref readonly CellStencil stencil = ref activeStencils[ordinal];
+            int index = stencil.Center;
+            float slopeX = ((heights[stencil.Right] + bubbleBulge[stencil.Right])
+                - (heights[stencil.Left] + bubbleBulge[stencil.Left])) * inverseDoubleCellSize;
+            float slopeZ = ((heights[stencil.Down] + bubbleBulge[stencil.Down])
+                - (heights[stencil.Up] + bubbleBulge[stencil.Up])) * inverseDoubleCellSize;
+            float inverseLength = 1.0f / MathF.Sqrt(1.0f + slopeX * slopeX + slopeZ * slopeZ);
+            normalX[index] = -slopeX * inverseLength;
+            normalZ[index] = -slopeZ * inverseLength;
         }
     }
 
