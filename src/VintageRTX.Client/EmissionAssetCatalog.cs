@@ -49,7 +49,9 @@ internal sealed class EmissionAssetCatalog(IAssetManager assets, ILogger logger)
             }
             return true;
         }
-        catch (Exception exception) when (exception is IOException or FormatException or JsonException)
+        // InvalidDataException does not derive from IOException. Parse rejection and a missing
+        // asset must take the same transactional fallback without terminating client bootstrap.
+        catch (Exception exception) when (exception is IOException or InvalidDataException or FormatException or JsonException)
         {
             LastError = exception.Message;
             logger.Error("[VintageRTX] Emission catalog rejected; previous revision {0} retained: {1}", Revision, LastError);

@@ -17,6 +17,9 @@ internal static class GameTestIsolation
     {
         if (AssemblyLoadContext.GetLoadContext(testType.Assembly) != AssemblyLoadContext.Default) return false;
         var context = new OfficialContext();
+        // TypeConverter attributes contain assembly-qualified strings. Framework reflection must
+        // resolve those names in the same game context, not create Default-context AssetLocations.
+        using var reflectionScope = context.EnterContextualReflection();
         Type? isolatedType = null;
         try
         {
