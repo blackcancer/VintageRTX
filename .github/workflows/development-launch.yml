@@ -29,16 +29,32 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/vs" artifacts/development-layout
           curl -fL --retry 2 --max-time 180 https://cdn.vintagestory.at/gamefiles/stable/vs_client_linux-x64_1.22.7.tar.gz -o "$RUNNER_TEMP/client.tar.gz"
-          tar -xzf "$RUNNER_TEMP/client.tar.gz" -C "$RUNNER_TEMP/vs"
           python - <<'PY'
-          import hashlib, os
-          from pathlib import Path
+          import hashlib, os, shutil, tarfile
+          from pathlib import Path, PurePosixPath
           temporary = Path(os.environ['RUNNER_TEMP'])
-          dlls = list((temporary/'vs').rglob('VintagestoryAPI.dll'))
+          archive = temporary/'client.tar.gz'
+          with archive.open('rb') as stream:
+              checksum = hashlib.file_digest(stream, 'sha256').hexdigest()
+          Path('artifacts/development-layout/client.sha256').write_text(checksum+'\n')
+          # These are managed assembly/layout tests, not a Linux game launch on Windows.
+          # Read paths through Python rather than treating a Windows drive colon as tar's remote host syntax.
+          destination = (temporary/'vs').resolve()
+          with tarfile.open(archive, 'r:gz') as bundle:
+              for member in bundle:
+                  if not member.isfile() or not member.name.lower().endswith('.dll'):
+                      continue
+                  relative = PurePosixPath(member.name)
+                  assert not relative.is_absolute() and '..' not in relative.parts, member.name
+                  target = destination.joinpath(*relative.parts).resolve()
+                  assert target.is_relative_to(destination), member.name
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  with bundle.extractfile(member) as source, target.open('wb') as output:
+                      shutil.copyfileobj(source, output)
+          dlls = list(destination.rglob('VintagestoryAPI.dll'))
           assert len(dlls) == 1, dlls
           with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as output:
               output.write('VINTAGE_STORY=' + str(dlls[0].parent.resolve()) + '\n')
-          Path('artifacts/development-layout/client.sha256').write_text(hashlib.sha256((temporary/'client.tar.gz').read_bytes()).hexdigest()+'\n')
           PY
       - name: Verify evaluated paths, packages and restored debugger profiles
         shell: bash
