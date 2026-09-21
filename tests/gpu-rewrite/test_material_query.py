@@ -23,7 +23,9 @@ class MaterialQueryTests(unittest.TestCase):
     def setUpClass(cls):
         os.environ.setdefault('LIBGL_ALWAYS_SOFTWARE','1')
         cls.ctx=moderngl.create_standalone_context(require=330,backend='egl')
-        source=(ROOT/'src/VintageRTX.Client/assets/vintagertx/shaderincludes/material-query.glsl').read_text()
+        folder=ROOT/'src/VintageRTX.Client/assets/vintagertx/shaderincludes'
+        source='\n'.join((folder/name).read_text() for name in
+            ('scene-query.glsl','light-query.glsl','material-query.glsl'))
         cls.program=cls.ctx.program(vertex_shader=VERTEX,fragment_shader='#version 330 core\n'+source+BODY)
         cls.vao=cls.ctx.vertex_array(cls.program,[])
     @classmethod

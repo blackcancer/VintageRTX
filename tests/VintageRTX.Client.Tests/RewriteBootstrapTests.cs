@@ -70,11 +70,17 @@ public sealed class RewriteBootstrapTests
             foreach(string mode in new[] {"on", "off", "dark", "lit"}) Assert.IsNotNull(commands.Invoke("vrtxlightlab", mode));
             StringAssert.Contains(commands.Invoke("vrtxlightlab", null).StatusMessage, "Utilisation");
             StringAssert.Contains(commands.Invoke("vrtxlightlab", new MissingText()).StatusMessage, "Utilisation");
+            Assert.IsInstanceOfType<WordArgParser>(commands.Arguments["vrtxworld"][0]);
+            foreach(string mode in new[]{"on","off","coverage","status","retry"})
+                StringAssert.Contains(commands.Invoke("vrtxworld",mode).StatusMessage,"VintageRTX world R03");
+            StringAssert.Contains(commands.Invoke("vrtxworld","bad").StatusMessage,"Utilisation");
+            StringAssert.Contains(commands.Invoke("vrtxworld",null).StatusMessage,"mode=");
             system.Dispose(); system.Dispose(); Assert.AreEqual(0, host.Renderers.Count);
             Assert.IsTrue(host.Events.Values.All(callback => callback is null));
             StringAssert.Contains(commands.Invoke("vrtxrewrite").StatusMessage, "stopped");
             StringAssert.Contains(commands.Invoke("vrtxemissions").StatusMessage, "stopped");
             StringAssert.Contains(commands.Invoke("vrtxlightlab", "on").StatusMessage, "stopped");
+            StringAssert.Contains(commands.Invoke("vrtxworld", "on").StatusMessage, "stopped");
         }
     }
 }

@@ -20,7 +20,7 @@ public sealed class NativeWorldLightingTests
     private static string Own(string name) => File.ReadAllText(Path.Combine(AppContext.BaseDirectory,name));
     private static WorldShaderPair Build(string name) => WorldShaderSource.Build(name,Native(name+".vsh"),Native(name+".fsh"),
         Native("fogandlight.fsh"),Own("scene-query.glsl"),Own("light-query.glsl"),Own("material-query.glsl"),Own("world-lighting.glsl"));
-    private static string Expand(string source,int ssao=0,int oit=0)
+    internal static string Expand(string source,int ssao=0,int oit=0,int shadows=0,int ssbo=0,int depth=0)
     {
         // Same single-inclusion rule as the native loader. Inputs are files from the actual game,
         // not hand-written stubs for fog, atlas mapping, warping, animation or SSAO.
@@ -28,24 +28,26 @@ public sealed class NativeWorldLightingTests
         string Recurse(string text) => Regex.Replace(text,@"(?m)^\s*#include\s+([\w.]+)\s*$",m=>
             seen.Add(m.Groups[1].Value)?Recurse(Native(m.Groups[1].Value)):"",RegexOptions.CultureInvariant);
         string result=Recurse(source).Replace("\r\n","\n",StringComparison.Ordinal);
+        if(ssbo>0)result=result.Replace("#version 330 core","#version 430 core",StringComparison.Ordinal);
         int line=result.IndexOf('\n');
-        return result.Insert(line+1,$"#define SSAOLEVEL {ssao}\n#define USEOIT {oit}\n#define USESSBO 0\n#define SHADOWQUALITY 0\n#define DYNLIGHTS 1\n#define MAXANIMATEDELEMENTS 1\n#define NORMALVIEW 0\n#define SHINYEFFECT 0\n#define ALLOWDEPTHOFFSET 0\n");
+        return result.Insert(line+1,$"#define SSAOLEVEL {ssao}\n#define USEOIT {oit}\n#define USESSBO {ssbo}\n#define SHADOWQUALITY {shadows}\n#define DYNLIGHTS 1\n#define MAXANIMATEDELEMENTS 1\n#define NORMALVIEW 0\n#define SHINYEFFECT 0\n#define ALLOWDEPTHOFFSET {depth}\n");
     }
-    private static int Program(string name,int ssao=0,int oit=0)
-    {var pair=Build(name);return DirectImagePass.LinkSources(Expand(pair.Vertex,ssao,oit),Expand(pair.Fragment,ssao,oit));}
+    private static int Program(string name,int ssao=0,int oit=0,int shadows=0,int ssbo=0,int depth=0)
+    {var pair=Build(name);return DirectImagePass.LinkSources(Expand(pair.Vertex,ssao,oit,shadows,ssbo,depth),Expand(pair.Fragment,ssao,oit,shadows,ssbo,depth));}
 
     [TestMethod]
     public void RealNativeTerrainEntitySsaoAndOitShaderVariantsCompile()
     {
         using var gl=PortableGlContext.Create();
-        foreach(var c in new[]{("chunkopaque",0,0),("chunkopaque",1,0),("entityanimated",0,0),("entityanimated",1,0),("entityanimated",0,1)})
+        foreach(var c in new[]{("chunkopaque",0,0,0,0,0),("chunkopaque",1,0,1,0,0),("chunkopaque",1,0,2,1,0),
+            ("entityanimated",0,0,0,0,0),("entityanimated",1,0,2,0,0),("entityanimated",0,1,0,0,0),("entityanimated",1,0,1,0,1)})
         {
-            int program=Program(c.Item1,c.Item2,c.Item3);
+            int program=Program(c.Item1,c.Item2,c.Item3,c.Item4,c.Item5,c.Item6);
             try
             {
                 Assert.IsTrue(GL.IsProgram(program));
-                if(c.Item3==0) {Assert.IsTrue(WorldLightingBinding.HasBridge(program));WorldLightingBinding.Prime(program);}
-                else Assert.IsFalse(WorldLightingBinding.HasBridge(program),"OIT must not accidentally run the opaque world integration.");
+                if(c.Item3==0 && c.Item6==0) {Assert.IsTrue(WorldLightingBinding.HasBridge(program));WorldLightingBinding.Prime(program);}
+                else Assert.IsFalse(WorldLightingBinding.HasBridge(program),"OIT and first-person depth-offset variants retain their native path.");
             }
             finally{GL.DeleteProgram(program);}
         }
@@ -91,6 +93,27 @@ public sealed class NativeWorldLightingTests
     }
 
     [TestMethod]
+    public void AnimatedNativeReceiverUsesTheSameFrameAndExtinguishesWithoutAGeometryUpload()
+    {
+        using var gl=PortableGlContext.Create();using var draw=new NativeProbe();
+        var scene=new CellScene(new(Guid.NewGuid(),0));
+        for(int z=0;z<8;z++)for(int y=0;y<8;y++)for(int x=0;x<8;x++)scene.Observe(new(x,y,z),CellGeometry.Empty);
+        var snapshot=scene.Capture();var gp=new GpuSceneData();gp.Update(snapshot);
+        using var geometry=new SceneTextureSet();geometry.Upload(gp);using var lights=new LightTexture();
+        var registry=new LightRegistry(snapshot.World);var lp=new GpuLightData();
+        registry.Upsert(default,new(new(3.5,3.5,4),new(8,2,.5f),EmissionProfile.Steady));
+        WorldGpuFrame Frame(long index){var f=registry.Capture(index,index);lp.Update(f,default);lights.Upload(lp);
+            return new(snapshot,f,default,geometry.RegionTexture,geometry.CellTexture,geometry.GeometryTexture,lights.Texture);}
+        var frame=Frame(1);float[] terrain=draw.Render(frame,1),entity=draw.Render(frame,1,entity:true);
+        for(int channel=0;channel<3;channel++)Assert.AreEqual(terrain[channel],entity[channel],.0001f);
+        float[] alteredNative=draw.Render(frame,1,blueBaked:true,entity:true);
+        CollectionAssert.AreEqual(entity,alteredNative);
+        long bytes=geometry.TotalUploadBytes;registry.Remove(default);
+        float[] dark=draw.Render(Frame(2),1,entity:true);
+        Assert.IsTrue(dark.Take(3).All(value=>value==0));Assert.AreEqual(bytes,geometry.TotalUploadBytes);
+    }
+
+    [TestMethod]
     public void ShaderContractsRejectUnexpectedEditsWithoutSilentlyGuessingAnAlbedo()
     {
         Assert.ThrowsException<InvalidDataException>(()=>WorldShaderSource.Build("chunkopaque","void main(){}","void main(){}",Native("fogandlight.fsh"),"a","b","c","d"));
@@ -104,10 +127,14 @@ public sealed class NativeWorldLightingTests
     private sealed class NativeProbe:IDisposable
     {
         internal readonly int[] Programs=[Program("chunkopaque"),Program("entityanimated")];
+        private readonly int animation=GL.GenBuffer();
         private readonly int vao=GL.GenVertexArray(),vbo=GL.GenBuffer(),target=GL.GenTexture(),atlas=GL.GenTexture(),fbo=GL.GenFramebuffer();
         internal NativeProbe()
         {
             foreach(int p in Programs)WorldLightingBinding.Prime(p);
+            GL.BindBuffer(BufferTarget.UniformBuffer,animation);
+            GL.BufferData(BufferTarget.UniformBuffer,16*sizeof(float),Identity,BufferUsageHint.StaticDraw);
+            GL.UniformBlockBinding(Programs[1],GL.GetUniformBlockIndex(Programs[1],"Animation"),0);
             GL.BindVertexArray(vao);GL.BindBuffer(BufferTarget.ArrayBuffer,vbo);
             float[] points=[3,3,2,4,3,2,4,4,2,3,3,2,4,4,2,3,4,2];
             GL.BufferData(BufferTarget.ArrayBuffer,points.Length*sizeof(float),points,BufferUsageHint.StaticDraw);
@@ -124,13 +151,13 @@ public sealed class NativeWorldLightingTests
             GL.DrawBuffer(DrawBufferMode.ColorAttachment0);GL.ReadBuffer(ReadBufferMode.ColorAttachment0);
             Assert.AreEqual(FramebufferErrorCode.FramebufferComplete,GL.CheckFramebufferStatus(FramebufferTarget.Framebuffer));
         }
-        internal float[] Render(WorldGpuFrame frame,int mode,bool blueBaked=false)
+        internal float[] Render(WorldGpuFrame frame,int mode,bool blueBaked=false,bool entity=false)
         {
             using var state=new RewriteDrawState(1,1);state.Configure();
             using var bindings=new WorldLightingBinding(Programs,frame,default,Math.Max(1,mode));
-            int p=Programs[0];GL.UseProgram(p);
+            int p=Programs[entity?1:0];GL.UseProgram(p);
             GL.Uniform1(GL.GetUniformLocation(p,"vrtxWorldEnabled"),mode);
-            Set("terrainTex",0);Set("terrainTexLinear",0);SetFloat("viewDistance",512f);SetFloat("viewDistanceLod0",512f);
+            Set("terrainTex",0);Set("terrainTexLinear",0);Set("entityTex",0);SetFloat("viewDistance",512f);SetFloat("viewDistanceLod0",512f);
             GL.Uniform3(GL.GetUniformLocation(p,"rgbaAmbientIn"),0f,0f,0f);GL.Uniform3(GL.GetUniformLocation(p,"lightPosition"),0f,0f,1f);
             GL.Uniform4(GL.GetUniformLocation(p,"rgbaFogIn"),0f,0f,0f,1f);
             GL.Uniform1(GL.GetUniformLocation(p,"shadowIntensity"),0f);
@@ -138,7 +165,18 @@ public sealed class NativeWorldLightingTests
             float[] projection=(float[])Identity.Clone();projection[0]=projection[5]=2;projection[10]=.1f;
             GL.UniformMatrix4(GL.GetUniformLocation(p,"modelViewMatrix"),1,false,view);
             GL.UniformMatrix4(GL.GetUniformLocation(p,"projectionMatrix"),1,false,projection);
-            GL.BindVertexArray(vao);GL.VertexAttrib4(2,blueBaked?.05f:.8f,.05f,blueBaked?.8f:.05f,0f);
+            GL.BindVertexArray(vao);
+            if(entity) {
+                GL.VertexAttrib4(2,1f,1f,1f,1f);GL.VertexAttrib1(4,0f);GL.VertexAttribI1(5,0);
+                GL.Uniform4(GL.GetUniformLocation(p,"renderColor"),1f,1f,1f,1f);
+                GL.Uniform4(GL.GetUniformLocation(p,"rgbaLightIn"),blueBaked?.05f:.8f,.05f,blueBaked?.8f:.05f,0f);
+                GL.UniformMatrix4(GL.GetUniformLocation(p,"viewMatrix"),1,false,view);
+                GL.UniformMatrix4(GL.GetUniformLocation(p,"modelMatrix"),1,false,Identity);
+                GL.BindBufferBase(BufferRangeTarget.UniformBuffer,0,animation);
+            } else {
+                GL.VertexAttribI1(4,0);
+                GL.VertexAttrib4(2,blueBaked?.05f:.8f,.05f,blueBaked?.8f:.05f,0f);
+            }
             GL.ActiveTexture(TextureUnit.Texture0);GL.BindTexture(TextureTarget.Texture2D,atlas);
             GL.BindFramebuffer(FramebufferTarget.Framebuffer,fbo);GL.Viewport(0,0,8,8);GL.Clear(ClearBufferMask.ColorBufferBit);
             GL.DrawArrays(PrimitiveType.Triangles,0,6);
@@ -147,6 +185,6 @@ public sealed class NativeWorldLightingTests
             void Set(string name,int value)=>GL.Uniform1(GL.GetUniformLocation(p,name),value);
             void SetFloat(string name,float value)=>GL.Uniform1(GL.GetUniformLocation(p,name),value);
         }
-        public void Dispose(){foreach(int p in Programs)GL.DeleteProgram(p);GL.DeleteVertexArray(vao);GL.DeleteBuffer(vbo);GL.DeleteFramebuffer(fbo);GL.DeleteTexture(target);GL.DeleteTexture(atlas);}
+        public void Dispose(){foreach(int p in Programs)GL.DeleteProgram(p);GL.DeleteVertexArray(vao);GL.DeleteBuffer(vbo);GL.DeleteBuffer(animation);GL.DeleteFramebuffer(fbo);GL.DeleteTexture(target);GL.DeleteTexture(atlas);}
     }
 }
