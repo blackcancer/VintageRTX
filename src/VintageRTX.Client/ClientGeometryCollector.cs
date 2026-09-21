@@ -8,10 +8,8 @@ using Vintagestory.API.MathTools;
 namespace VintageRTX.Client;
 
 /// <summary>
-/// Initial public-API static geometry provider. Its supported subset is deliberately explicit:
-/// plain opaque blocks with no random shape, procedural class, behaviour, extra LOD or block entity.
-/// Other cells are UNSUPPORTED, never replaced by cubes. Entities/decor and textured cutouts remain
-/// separate providers, so these data alone must not be advertised as complete world visibility.
+/// Public-API provider for plain static opaque blocks. Unsupported geometry is never replaced by
+/// cubes. Its local publication is independent of lights, rain, sun and other regions.
 /// </summary>
 internal sealed class ClientGeometryCollector(ICoreClientAPI api) : IDisposable
 {
@@ -24,7 +22,10 @@ internal sealed class ClientGeometryCollector(ICoreClientAPI api) : IDisposable
     public CellSceneFrame? Frame { get; private set; }
     public int TemplateCount=>templates.Count;
     public int GpuTemplateCount=>data.TemplateCount;
-    public bool GpuAllocated=>textures?.Ready==true && !gpuFaulted;
+    // Allocation alone is not publication. Reset, Clear and a newer CPU snapshot must never
+    // advertise an old world's GPU cache as ready while its replacement is still pending.
+    public bool GpuAllocated=>Frame is not null && textures?.Ready==true && !gpuFaulted
+        && ReferenceEquals(textures.PublishedFrame,Frame);
     public long LastUploadBytes=>textures?.LastUploadBytes??0;
     public long TotalUploadBytes=>textures?.TotalUploadBytes??0;
     public void Reset(WorldId world)
@@ -40,7 +41,6 @@ internal sealed class ClientGeometryCollector(ICoreClientAPI api) : IDisposable
     {
         if(scene is null)return;
         CellGeometry value;
-        // A solid/fluid combination needs a proper optical interface, not an opaque approximation.
         if(fluid is {Id:>0})value=CellGeometry.Unsupported;
         else if(solid.Id==0)value=CellGeometry.Empty;
         else if(templates.TryGetValue(solid.Id,out CellGeometry cached))value=cached;
@@ -67,7 +67,6 @@ internal sealed class ClientGeometryCollector(ICoreClientAPI api) : IDisposable
             || block.BlockBehaviors is {Length:>0} || block.BlockEntityBehaviors is {Length:>0}
             || block.Lod0Mesh is not null || block.Lod0Shape is not null
             || (block.DrawType!=EnumDrawType.Cube && block.DrawType!=EnumDrawType.JSON))return false;
-        // Only surfaces declared opaque by the engine are eligible without alpha texture sampling.
         for(int face=0;face<6;face++)if(!block.SideOpaque[face])return false;
         return true;
     }
@@ -86,7 +85,6 @@ internal sealed class ClientGeometryCollector(ICoreClientAPI api) : IDisposable
         return BlockMesh.CopyIndexed(mesh.xyz,mesh.VerticesCount,mesh.Indices,mesh.IndicesCount);
     }
     public void Publish()=>Frame=scene?.Capture();
-    /// <summary>Must be called in the client render callback. This uploads data; it does not replace the image.</summary>
     public void Upload()
     {
         if(Frame is null || gpuFaulted)return;
