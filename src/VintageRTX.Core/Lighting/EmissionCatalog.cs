@@ -5,50 +5,54 @@ using VintageRTX.Core.Geometry;
 
 namespace VintageRTX.Core.Lighting;
 
-/// <summary>How the runtime emission is obtained. An item includes a dropped or held collectible.</summary>
 public enum EmissionTarget { Block, Item, Entity, Weather }
-
-/// <summary>An invalid configuration is reported with its asset and JSON path, never silently repaired.</summary>
 public sealed class EmissionConfigurationException(string message) : FormatException(message);
 
-/// <summary>Optional per-type attributes override a matching catalog binding, not the runtime on/off state.</summary>
-public sealed record EmissionOverride(string? Profile = null, bool? Enabled = null, double? IntensityScale = null)
+/// <summary>Type attributes override only their named fields, not the provider's runtime on/off state.</summary>
+public sealed record EmissionOverride(string? Profile = null, bool? Enabled = null, double? IntensityScale = null,
+    double? SourceRadius = null)
 {
     public static EmissionOverride Parse(string json, string source = "attributes/vintageRtxEmission")
     {
         using JsonDocument document = EmissionJson.Read(json, source);
-        var fields = EmissionJson.Fields(document.RootElement, source, "profile", "enabled", "intensityScale");
+        var fields = EmissionJson.Fields(document.RootElement, source, "profile", "enabled", "intensityScale", "sourceRadius");
         string? profile = fields.ContainsKey("profile") ? EmissionJson.Name(fields["profile"], source + "/profile") : null;
         bool? enabled = fields.ContainsKey("enabled") ? EmissionJson.Boolean(fields, "enabled", true, source) : null;
-        double? scale = fields.ContainsKey("intensityScale")
-            ? EmissionJson.Number(fields, "intensityScale", 1, 0, 100, source) : null;
-        return new(profile, enabled, scale);
-    }
-}
-
-/// <summary>Immutable provenance and resolved parameters. Color and activation still come from the provider.</summary>
-public sealed record EmissionSelection(string? ProfileId, string? BindingId, EmissionProfile Profile,
-    bool Enabled = true, double IntensityScale = 1)
-{
-    /// <summary>Never manufactures energy when the current collectible/entity reports no emission.</summary>
-    public LightDefinition? CreateLight(DVec3 position, Vector3 runtimeIntensity, double birthSeconds = 0, double radius = 0)
-    {
-        if (!LightDefinition.FiniteNonnegative(runtimeIntensity)) throw new ArgumentOutOfRangeException(nameof(runtimeIntensity));
-        if (!Enabled || runtimeIntensity == Vector3.Zero || IntensityScale == 0) return null;
-        if (!double.IsFinite(IntensityScale) || IntensityScale < 0 || IntensityScale > 100)
-            throw new ArgumentOutOfRangeException(nameof(IntensityScale));
-        return new(position, runtimeIntensity * (float)IntensityScale, Profile, birthSeconds, radius);
+        double? scale = fields.ContainsKey("intensityScale") ? EmissionJson.Number(fields, "intensityScale", 1, 0, 100, source) : null;
+        double? radius = fields.ContainsKey("sourceRadius") ? EmissionJson.Number(fields, "sourceRadius", 0, 0, 16, source) : null;
+        return new(profile, enabled, scale, radius);
     }
 }
 
 /// <summary>
-/// A versioned, immutable asset contract. JSON patches are applied by Vintage Story BEFORE this parser.
-/// No filename/family/color heuristics, patch interpreter, world queries or frame-dependent selection.
+/// Resolved source parameters. Radius is equivalent spherical radius in block units, not range.
+/// ComponentCount modulates a total aggregate intensity; it never multiplies the provider's energy.
+/// </summary>
+public sealed record EmissionSelection(string? ProfileId, string? BindingId, EmissionProfile Profile,
+    bool Enabled = true, double IntensityScale = 1, double SourceRadius = 0, int ComponentCount = 1)
+{
+    public LightDefinition? CreateLight(DVec3 position, Vector3 runtimeIntensity, double birthSeconds = 0, double? radius = null)
+    {
+        if (!LightDefinition.FiniteNonnegative(runtimeIntensity)) throw new ArgumentOutOfRangeException(nameof(runtimeIntensity));
+        if (!double.IsFinite(IntensityScale) || IntensityScale < 0 || IntensityScale > 100)
+            throw new ArgumentOutOfRangeException(nameof(IntensityScale));
+        if (!double.IsFinite(SourceRadius) || SourceRadius < 0 || SourceRadius > 16)
+            throw new ArgumentOutOfRangeException(nameof(SourceRadius));
+        if (ComponentCount is < 0 or > 64) throw new ArgumentOutOfRangeException(nameof(ComponentCount));
+        if (!Enabled || runtimeIntensity == Vector3.Zero || IntensityScale == 0 || ComponentCount == 0) return null;
+        return new(position, runtimeIntensity * (float)IntensityScale, Profile, birthSeconds,
+            radius ?? SourceRadius, ComponentCount);
+    }
+}
+
+/// <summary>
+/// Immutable configuration after the native JSON patcher. No heuristic based on RGB or item stack size.
+/// A component-count lookup sees the CURRENT runtime code on every source observation.
 /// </summary>
 public sealed class EmissionCatalog
 {
     private sealed record Binding(string Id, string[] Codes, EmissionTarget[] Targets,
-        int Priority, EmissionSelection Selection);
+        int Priority, EmissionSelection Selection, EmissionComponentCounts? Counts);
     private readonly FrozenDictionary<string, EmissionProfile> profiles;
     private readonly Binding[] bindings;
     public string Source { get; }
@@ -93,7 +97,8 @@ public sealed class EmissionCatalog
         {
             string path = source + "/bindings/" + id;
             EmissionJson.ValidateName(id, path);
-            var fields = EmissionJson.Fields(element, path, "codes", "targets", "profile", "priority", "enabled", "intensityScale");
+            var fields = EmissionJson.Fields(element, path, "codes", "targets", "profile", "priority", "enabled",
+                "intensityScale", "sourceRadius", "componentCounts");
             string profileId = EmissionJson.Name(EmissionJson.Required(fields, "profile", path), path + "/profile");
             if (!profiles.TryGetValue(profileId, out EmissionProfile? profile))
                 throw EmissionJson.Error(path + "/profile", "unknown profile '" + profileId + "'");
@@ -111,7 +116,9 @@ public sealed class EmissionCatalog
             ValidateEventTarget(profile, targets, path);
             bindings.Add(new(id, codes, targets, priority, new(profileId, id, profile,
                 EmissionJson.Boolean(fields, "enabled", true, path),
-                EmissionJson.Number(fields, "intensityScale", 1, 0, 100, path))));
+                EmissionJson.Number(fields, "intensityScale", 1, 0, 100, path),
+                EmissionJson.Number(fields, "sourceRadius", 0, 0, 16, path)),
+                EmissionComponentCounts.Parse(fields, path)));
         }
         return new(source, profiles, bindings.ToArray());
     }
@@ -120,8 +127,8 @@ public sealed class EmissionCatalog
         ? profile : throw EmissionJson.Error(Source, "unknown profile '" + id + "'");
 
     /// <summary>
-    /// Highest priority wins, then exact match, then most literal characters. Conflicting equal-rank
-    /// rules are rejected, not resolved by asset enumeration or dictionary order. Attributes win last.
+    /// Highest priority, exact match, then literal specificity. Override every conflicting field:
+    /// an explicit profile must not silently select a different intensity, radius or candle count.
     /// </summary>
     public EmissionSelection Resolve(string code, EmissionTarget target, EmissionOverride? attributes = null)
     {
@@ -131,39 +138,52 @@ public sealed class EmissionCatalog
             target is EmissionTarget.Entity or EmissionTarget.Weather ? EmissionProfile.Engine : EmissionProfile.Steady);
         EmissionSelection? winner = null;
         (int Priority, int Exact, int Literals) winningRank = (int.MinValue, 0, 0);
-        string? conflict = null;
+        bool profileConflict = false, enabledConflict = false, scaleConflict = false, radiusConflict = false, countConflict = false;
         foreach (Binding binding in bindings)
         {
             if (!binding.Targets.Contains(target)) continue;
             (int Exact, int Literals) specificity = (-1, -1);
             foreach (string pattern in binding.Codes)
             {
-                if (!Matches(pattern, code)) continue;
+                if (!EmissionCodePattern.Matches(pattern, code)) continue;
                 var rank = (pattern.Contains('*') ? 0 : 1, pattern.Count(character => character != '*'));
                 if (rank.CompareTo(specificity) > 0) specificity = rank;
             }
             if (specificity.Exact < 0) continue;
             var candidateRank = (binding.Priority, specificity.Exact, specificity.Literals);
             int comparison = candidateRank.CompareTo(winningRank);
+            if (comparison < 0) continue;
+            EmissionSelection candidate = binding.Selection with { ComponentCount = binding.Counts?.Resolve(code) ?? 1 };
             if (comparison > 0)
-            { winner = binding.Selection; winningRank = candidateRank; conflict = null; }
-            else if (comparison == 0 && winner is not null
-                && (winner.Profile != binding.Selection.Profile || winner.Enabled != binding.Selection.Enabled
-                    || winner.IntensityScale != binding.Selection.IntensityScale))
-                conflict = winner.BindingId + " / " + binding.Id;
+            {
+                winner = candidate; winningRank = candidateRank;
+                profileConflict = enabledConflict = scaleConflict = radiusConflict = countConflict = false;
+            }
+            else if (winner is not null)
+            {
+                profileConflict |= winner.Profile != candidate.Profile;
+                enabledConflict |= winner.Enabled != candidate.Enabled;
+                scaleConflict |= winner.IntensityScale != candidate.IntensityScale;
+                radiusConflict |= winner.SourceRadius != candidate.SourceRadius;
+                countConflict |= winner.ComponentCount != candidate.ComponentCount;
+            }
         }
-        // An explicit profile is authoritative even over an ambiguous generic mapping.
-        if (conflict is not null && attributes?.Profile is null)
-            throw EmissionJson.Error(Source, "ambiguous bindings for " + target + " " + code + ": " + conflict + "; set distinct priorities");
+        if ((profileConflict && attributes?.Profile is null) || (enabledConflict && attributes?.Enabled is null)
+            || (scaleConflict && attributes?.IntensityScale is null) || (radiusConflict && attributes?.SourceRadius is null) || countConflict)
+            throw EmissionJson.Error(Source, "ambiguous bindings for " + target + " " + code
+                + "; set distinct priorities or override every conflicting field");
         EmissionSelection result = winner ?? fallback;
         if (attributes is not null)
         {
             EmissionProfile profile = attributes.Profile is null ? result.Profile : GetProfile(attributes.Profile);
             double scale = attributes.IntensityScale ?? result.IntensityScale;
+            double radius = attributes.SourceRadius ?? result.SourceRadius;
             if (!double.IsFinite(scale) || scale < 0 || scale > 100)
                 throw EmissionJson.Error(Source, "invalid attribute intensityScale");
+            if (!double.IsFinite(radius) || radius < 0 || radius > 16)
+                throw EmissionJson.Error(Source, "invalid attribute sourceRadius");
             result = result with { ProfileId = attributes.Profile ?? result.ProfileId, Profile = profile,
-                Enabled = attributes.Enabled ?? result.Enabled, IntensityScale = scale };
+                Enabled = attributes.Enabled ?? result.Enabled, IntensityScale = scale, SourceRadius = radius };
             ValidateEventTarget(profile, [target], Source + "/attributes/vintageRtxEmission");
         }
         return result;
@@ -174,24 +194,9 @@ public sealed class EmissionCatalog
         if (profile.Kind == EmissionKind.Lightning && targets.Any(target => target != EmissionTarget.Weather))
             throw EmissionJson.Error(path, "lightning requires a weather event with an explicit birth time, not a persistent block/item/entity");
     }
-
-    /// <summary>Ordinal full-code glob, '*' only. Bounded configuration strings, no regular expressions.</summary>
-    private static bool Matches(string pattern, string text)
-    {
-        int p = 0, t = 0, star = -1, retry = 0;
-        while (t < text.Length)
-        {
-            if (p < pattern.Length && pattern[p] == text[t]) { p++; t++; }
-            else if (p < pattern.Length && pattern[p] == '*') { star = p++; retry = t; }
-            else if (star >= 0) { p = star + 1; t = ++retry; }
-            else return false;
-        }
-        while (p < pattern.Length && pattern[p] == '*') p++;
-        return p == pattern.Length;
-    }
 }
 
-/// <summary>Parsing is transactional: a failed asset reload retains the previous complete catalog.</summary>
+/// <summary>A failed asset reload retains the previous complete catalog and its revision.</summary>
 public sealed class EmissionCatalogState
 {
     public EmissionCatalog Current { get; private set; } = EmissionCatalog.Empty;

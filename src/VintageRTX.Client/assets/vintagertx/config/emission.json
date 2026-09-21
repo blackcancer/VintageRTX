@@ -16,8 +16,27 @@
     "vintagertx:fire": { "codes": ["game:fire", "game:fire-*", "game:firepit", "game:firepit-*"], "targets": ["block", "item"], "profile": "vintagertx:fire" },
     "vintagertx:lantern": { "codes": ["game:lantern", "game:lantern-*"], "targets": ["block", "item"], "profile": "vintagertx:lantern" },
     "vintagertx:oillamp": { "codes": ["game:oillamp", "game:oillamp-*"], "targets": ["block", "item"], "profile": "vintagertx:oillamp" },
-    "vintagertx:candle": { "codes": ["game:candle", "game:candle-*", "game:candles", "game:candles-*", "game:bunchocandles", "game:bunchocandles-*"], "targets": ["block", "item"], "profile": "vintagertx:candle" },
-    "vintagertx:chandelier": { "codes": ["game:chandelier", "game:chandelier-*"], "targets": ["block", "item"], "profile": "vintagertx:chandelier" },
+    "vintagertx:candle": {
+      "codes": ["game:candle", "game:candle-*", "game:candles", "game:candles-*", "game:bunchocandles", "game:bunchocandles-*"],
+      "targets": ["block", "item"], "profile": "vintagertx:candle",
+      "componentCounts": {
+        "game:candle": 1,
+        "game:bunchocandles-1": 1, "game:bunchocandles-2": 2, "game:bunchocandles-3": 3,
+        "game:bunchocandles-4": 4, "game:bunchocandles-5": 5, "game:bunchocandles-6": 6,
+        "game:bunchocandles-7": 7, "game:bunchocandles-8": 8, "game:bunchocandles-9": 9,
+        "game:candles-1": 1, "game:candles-2": 2, "game:candles-3": 3,
+        "game:candles-4": 4, "game:candles-5": 5, "game:candles-6": 6,
+        "game:candles-7": 7, "game:candles-8": 8, "game:candles-9": 9
+      }
+    },
+    "vintagertx:chandelier": {
+      "codes": ["game:chandelier", "game:chandelier-*"], "targets": ["block", "item"], "profile": "vintagertx:chandelier",
+      "componentCounts": {
+        "game:chandelier-*-candle0": 0, "game:chandelier-*-candle1": 1, "game:chandelier-*-candle2": 2,
+        "game:chandelier-*-candle3": 3, "game:chandelier-*-candle4": 4, "game:chandelier-*-candle5": 5,
+        "game:chandelier-*-candle6": 6, "game:chandelier-*-candle7": 7, "game:chandelier-*-candle8": 8
+      }
+    },
     "vintagertx:locust": { "codes": ["game:locust", "game:locust-*"], "targets": ["entity"], "profile": "vintagertx:engine" }
   }
 }

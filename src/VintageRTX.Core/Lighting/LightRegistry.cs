@@ -15,7 +15,11 @@ public readonly record struct LightId(SourceKind Kind, long X, long Y, long Z, i
         ^ EmissionWaveform.Mix(unchecked((ulong)Incarnation)));
 }
 
-/// <summary>Linear RGB radiant intensity in a documented relative scale, not invented lux/candela.</summary>
+/// <summary>
+/// Linear RGB radiant intensity in a documented relative scale, not invented lux/candela.
+/// Intensity is the TOTAL for this aggregate, including ComponentCount. Radius is equivalent spherical
+/// source size, never illumination range. Wick positions are a separate geometry contract.
+/// </summary>
 public sealed record LightDefinition
 {
     public DVec3 Position { get; }
@@ -23,12 +27,14 @@ public sealed record LightDefinition
     public double Radius { get; }
     public EmissionProfile Profile { get; }
     public double BirthSeconds { get; }
+    public int ComponentCount { get; }
     public LightDefinition(DVec3 position, Vector3 intensity, EmissionProfile profile,
-        double birthSeconds = 0, double radius = 0)
+        double birthSeconds = 0, double radius = 0, int componentCount = 1)
     {
         if (!position.IsFinite || !FiniteNonnegative(intensity) || !double.IsFinite(radius) || radius < 0
-            || !double.IsFinite(birthSeconds)) throw new ArgumentOutOfRangeException(nameof(position));
-        Position = position; Intensity = intensity; Radius = radius;
+            || !double.IsFinite(birthSeconds) || componentCount is < 1 or > 64)
+            throw new ArgumentOutOfRangeException(nameof(position));
+        Position = position; Intensity = intensity; Radius = radius; ComponentCount = componentCount;
         Profile = profile ?? throw new ArgumentNullException(nameof(profile)); BirthSeconds = birthSeconds;
     }
     public static bool FiniteNonnegative(Vector3 c) => float.IsFinite(c.X) && float.IsFinite(c.Y)
@@ -81,6 +87,8 @@ public sealed class LightRegistry
             if (previous.Position != definition.Position || previous.Radius != definition.Radius) layout++;
         }
         else layout++;
+        // The block/chunk event invalidates its physical mesh independently. Component count alone
+        // changes this aggregate's modulation, not its position or equivalent spherical geometry.
         sources[id] = definition; emission++;
     }
     public bool Remove(LightId id)
@@ -93,11 +101,11 @@ public sealed class LightRegistry
         AssertOwner();
         if (!double.IsFinite(seconds) || !double.IsFinite(wind01) || frame <= lastFrame || seconds < lastTime)
             throw new ArgumentOutOfRangeException(nameof(frame), "Frames and simulation time must be monotonic within a world.");
-        // Emission evaluation never mutates visibility/topology versions.
         var output = new LightSample[sources.Count]; int index = 0;
         foreach ((LightId id, LightDefinition light) in sources)
         {
-            double modulation = EmissionWaveform.Evaluate(light.Profile, id.Seed, seconds, light.BirthSeconds, wind01);
+            double modulation = EmissionGroupWaveform.Evaluate(light.Profile, id.Seed, seconds,
+                light.BirthSeconds, light.ComponentCount, wind01);
             output[index++] = new(id, light.Position, light.Intensity * (float)modulation, light.Radius);
         }
         lastFrame = frame; lastTime = seconds;
