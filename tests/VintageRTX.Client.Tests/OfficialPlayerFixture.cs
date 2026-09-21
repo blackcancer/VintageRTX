@@ -3,14 +3,13 @@ using System.Runtime.CompilerServices;
 using System.Runtime.Loader;
 using Vintagestory.API.Client;
 using Vintagestory.API.Common;
+using Vintagestory.API.Common.Entities;
 
 namespace VintageRTX.Client.Tests;
 
 /// <summary>
-/// Uses the supported client's actual IClientPlayer implementation as a data-only fixture.
-/// DispatchProxy cannot legally implement the game's non-public player interface members.
-/// No method or interface in a game assembly is patched, rewritten or made public.
-/// Only Entity is used by these tests; world/render/event behavior remains explicitly provided.
+/// Data-only fixture using the supported client's real IClientPlayer implementation.
+/// DispatchProxy cannot implement its non-public interface members. No game assembly is patched.
 /// </summary>
 internal static class OfficialPlayerFixture
 {
@@ -26,17 +25,25 @@ internal static class OfficialPlayerFixture
         selected ??= implementations.Length == 1 ? implementations[0] : null;
         if (selected is null) throw new InvalidOperationException("Ambiguous native player implementations: "
             + string.Join(", ", implementations.Select(t => t.FullName)));
-        // Calling a live client constructor would start unrelated engine services. This fixture
-        // exercises only its real Entity getter; every required backing field is verified below.
         var player = (IClientPlayer)RuntimeHelpers.GetUninitializedObject(selected);
-        int assigned = 0;
+        var fields = new List<FieldInfo>();
         for (Type? current = selected; current is not null; current = current.BaseType)
-            foreach (FieldInfo field in current.GetFields(BindingFlags.Instance | BindingFlags.Public
-                | BindingFlags.NonPublic | BindingFlags.DeclaredOnly))
-                if (typeof(EntityPlayer).IsAssignableFrom(field.FieldType) && field.FieldType.IsInstanceOfType(entity))
-                { field.SetValue(player, entity); assigned++; }
+            fields.AddRange(current.GetFields(BindingFlags.Instance | BindingFlags.Public
+                | BindingFlags.NonPublic | BindingFlags.DeclaredOnly));
+        int assigned = 0;
+        foreach (FieldInfo field in fields)
+            // The implementation may store the controlled player through its Entity/EntityAgent
+            // base type, while the public getter returns EntityPlayer. Preserve that actual type.
+            if (typeof(Entity).IsAssignableFrom(field.FieldType) && field.FieldType.IsInstanceOfType(entity))
+            { field.SetValue(player, entity); assigned++; }
         if (assigned == 0 || !ReferenceEquals(player.Entity, entity))
-            throw new InvalidOperationException("The official player's Entity storage changed; update the fixture, not the API.");
+        {
+            MethodInfo getter = selected.GetProperty("Entity")!.GetMethod!;
+            byte[] il = getter.GetMethodBody()?.GetILAsByteArray() ?? [];
+            throw new InvalidOperationException("Native player fixture storage needs updating: " + selected.FullName
+                + "; assigned=" + assigned + "; fields=" + string.Join(",", fields.Select(f => f.FieldType.FullName + " " + f.Name))
+                + "; getterIL=" + Convert.ToHexString(il));
+        }
         return player;
     }
 }
