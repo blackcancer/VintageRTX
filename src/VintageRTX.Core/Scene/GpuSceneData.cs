@@ -2,11 +2,7 @@ using VintageRTX.Core.Geometry;
 
 namespace VintageRTX.Core.Scene;
 
-/// <summary>
-/// GPU ABI for a 3x3x3 ring of eight-block regions. Tags are INTEGER world region coordinates;
-/// triangle vertices stay block-local. Region edits change only an 8 KiB cell rectangle. Mesh
-/// BVHs are shared by all instances and appended only once per template. This object is owner-thread only.
-/// </summary>
+/// <summary>Versioned GPU packets for a collision-free ring of 27 world regions and shared mesh BVHs.</summary>
 public sealed class GpuSceneData
 {
     public const int RegionSlots=27,CellWidth=64,CellRowsPerRegion=8,GeometryWidth=256;
@@ -30,7 +26,6 @@ public sealed class GpuSceneData
     public int GeometryUsedTexels=>geometry.Count/4;
     public static int Slot(RegionId id)=>CellId.Mod(id.X,3)+3*CellId.Mod(id.Y,3)+9*CellId.Mod(id.Z,3);
 
-    /// <summary>Only accepts a collision-free working set. Missing regions invalidate old ring tags.</summary>
     public bool Update(CellSceneFrame frame)
     {
         ArgumentNullException.ThrowIfNull(frame);
@@ -43,6 +38,9 @@ public sealed class GpuSceneData
             next[slot]=region;
         }
         ResetOccurred=previous is null || previous.World!=frame.World;
+        // From the first mutation until successful completion, no old identity may describe this
+        // packet. Capacity/allocation failure leaves it unpublished; the next attempt rebuilds it.
+        previous=null;
         GeometryChanged=ResetOccurred;
         if(ResetOccurred)
         {
@@ -80,7 +78,10 @@ public sealed class GpuSceneData
             int rows=1;while(rows<requiredRows) rows=checked(rows*2);
             packedGeometry=new float[rows*GeometryWidth*4];geometry.CopyTo(packedGeometry);
         }
-        changed=writes.ToArray();previous=frame;return changed.Length>0 || GeometryChanged;
+        changed=writes.ToArray();previous=frame;
+        // Every geometry append belongs to a rewritten region; a reset rewrites all tags.
+        // GeometryChanged therefore cannot require an upload without a changed region.
+        return changed.Length>0;
     }
     private readonly record struct Node(Bounds Bounds,int First,int Count,int Escape);
     private (int Start,int End) Append(BlockMesh mesh)

@@ -6,13 +6,14 @@ using VintageRTX.Core.Transport;
 
 namespace VintageRTX.Core.Diagnostics;
 
-/// <summary>
-/// Explicit synthetic receiver scene for developing the real image pass. Primary rays use the same
-/// CPU mesh tracer, while direct visibility runs on the GPU. Not a snapshot of the player's world.
-/// </summary>
+/// <summary>Synthetic direct-light laboratory; never a capture of the player's world.</summary>
 public static class DirectLightLab
 {
     public static DirectSurfaceFrame Create(int width = 128, int height = 96, CellId offset = default, bool blocker = true)
+        => CreateFromView(new(4, 4, 7), width, height, offset, blocker);
+
+    /// <summary>Additional primary viewpoints qualify coverage and backfaces with unchanged scene/material data.</summary>
+    public static DirectSurfaceFrame CreateFromView(DVec3 cameraLocal, int width = 128, int height = 96, CellId offset = default, bool blocker = true)
     {
         if (width < 1 || height < 1 || (long)width * height > 1_048_576) throw new ArgumentOutOfRangeException(nameof(width));
         var scene = new CellScene(new WorldId(Guid.NewGuid(), 0));
@@ -21,7 +22,6 @@ public static class DirectLightLab
         SurfaceMaterial[] materials = [
             new(SurfaceKind.Diffuse, new(.55f, .48f, .38f)),
             new(SurfaceKind.Diffuse, new(.36f, .45f, .56f)),
-            // Deliberately authored test indices, not claimed measurements of a named metal.
             new(SurfaceKind.Conductor, Vector3.One, .22, new(.2f, .85f, 1.2f), new(3.2f, 2.8f, 2.5f)),
             new(SurfaceKind.Conductor, Vector3.One, .48, new(2, 2, 2), new(3, 3, 3)),
             new(SurfaceKind.Diffuse, new(.12f, .12f, .12f))];
@@ -31,7 +31,7 @@ public static class DirectLightLab
         for (int y = 0; y < 8; y++) for (int x = 0; x < 8; x++) scene.Observe(Cell(x, y, 0), wallMeshes[x / 2]);
         if (blocker) scene.Observe(Cell(3, 3, 2), CellGeometry.FromMesh(Box(4)));
         CellSceneFrame snapshot = scene.Capture();
-        DVec3 camera = offset.Position + new DVec3(4, 4, 7);
+        DVec3 camera = offset.Position + cameraLocal;
         var receivers = new SurfaceReceiver[width * height];
         for (int y = 0; y < height; y++) for (int x = 0; x < width; x++)
         {
@@ -44,7 +44,7 @@ public static class DirectLightLab
             DVec3 shading = geometric;
             DVec3 local = hit.Hit.Position - offset.Position;
             if (hit.Hit.Material == 1)
-                shading = new DVec3(.22 * Math.Sin(local.X * 9), .22 * Math.Cos(local.Y * 11), 1).Normalized();
+                shading = new DVec3(.22 * Math.Sin(local.X * 9), .22 * Math.Cos(local.Y * 11), 1).Normalized() * geometric.Z;
             float texel = ((int)Math.Floor(local.X * 4) + (int)Math.Floor(local.Y * 4)) % 2 == 0 ? 1f : .7f;
             receivers[y * width + x] = new(hit.Hit.Position, shading, geometric, new Vector3(texel), hit.Hit.Material);
         }

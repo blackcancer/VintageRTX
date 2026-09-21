@@ -12,7 +12,6 @@ using VintageRTX.Core.Transport;
 
 namespace VintageRTX.Client.Tests;
 
-/// <summary>Driver diagnostics may fail independently of numerically correct shaders. GL work remains real.</summary>
 [TestClass, DoNotParallelize]
 public sealed class DriverFailureQualificationTests
 {
@@ -20,7 +19,8 @@ public sealed class DriverFailureQualificationTests
     {
         GLFWProvider.CheckForMainThread = false;
         var w = new NativeWindow(new NativeWindowSettings {ClientSize = new(8, 8), StartVisible = false,
-            API = ContextAPI.OpenGL, APIVersion = new(3, 3), Profile = profile});
+            API = ContextAPI.OpenGL, APIVersion = new(3, 3), Profile = profile,
+            Flags = profile == ContextProfile.Compatability ? ContextFlags.Default : ContextFlags.ForwardCompatible});
         w.Context.MakeCurrent(); GL.LoadBindings(new GLFWBindingsContext()); return w;
     }
     private sealed class Report : IGraphicsStatus
@@ -118,6 +118,10 @@ public sealed class DriverFailureQualificationTests
     public void CompatibilityFrontBackPolygonModesAreRestoredIndependently()
     {
         using var gl = Context(ContextProfile.Compatability);
+        // Forward-compatible creation removes legacy state even when a compatibility profile
+        // was requested. Verify that this test obtained the intended native context.
+        Assert.AreEqual(0, GL.GetInteger(GetPName.ContextFlags) & 1);
+        Assert.AreNotEqual(0, GL.GetInteger(GetPName.ContextProfileMask) & 2);
         GL.PolygonMode(TriangleFace.Front, PolygonMode.Line); GL.PolygonMode(TriangleFace.Back, PolygonMode.Point);
         Assert.AreEqual(ErrorCode.NoError, GL.GetError());
         using (var state = new RewriteDrawState(1, 1)) state.Configure();
