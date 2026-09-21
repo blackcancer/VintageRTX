@@ -16,9 +16,8 @@ public readonly record struct LightId(SourceKind Kind, long X, long Y, long Z, i
 }
 
 /// <summary>
-/// Linear RGB radiant intensity in a documented relative scale, not invented lux/candela.
-/// Intensity is the TOTAL for this aggregate, including ComponentCount. Radius is equivalent spherical
-/// source size, never illumination range. Wick positions are a separate geometry contract.
+/// Total linear RGB radiant intensity in relative units. ComponentCount is already included in
+/// that total. Radius is equivalent spherical source size, not range or individual wick geometry.
 /// </summary>
 public sealed record LightDefinition
 {
@@ -44,7 +43,7 @@ public sealed record LightDefinition
 public readonly record struct LightSample(LightId Id, DVec3 Position, Vector3 Intensity, double Radius);
 public readonly record struct LightRevisions(long Layout, long Emission);
 
-/// <summary>One immutable evaluated frame is shared by primary and secondary transport.</summary>
+/// <summary>Immutable evaluated frame. The internal producer transfers ownership of the sample array.</summary>
 public sealed class LightFrame
 {
     private readonly LightSample[] samples;
@@ -55,15 +54,17 @@ public sealed class LightFrame
     public double TimeSeconds { get; }
     public LightRevisions Revisions { get; }
     public ReadOnlySpan<LightSample> Samples => samples;
+    internal bool SharesSamplesWith(LightFrame other) => ReferenceEquals(samples, other.samples);
 }
 
-/// <summary>Single-owner-thread registry. Geometry readiness, rain and GI are not prerequisites.</summary>
+/// <summary>Single-owner registry. Geometry, rain and GI are not prerequisites for publication.</summary>
 public sealed class LightRegistry
 {
     private readonly Dictionary<LightId, LightDefinition> sources = new();
     private readonly int ownerThread = Environment.CurrentManagedThreadId;
-    private long layout, emission, lastFrame = -1;
-    private double lastTime = double.NegativeInfinity;
+    private long layout, emission, lastFrame = -1, cachedEmission = -1;
+    private double lastTime = double.NegativeInfinity, lastWind, reuseBefore;
+    private LightSample[]? cachedSamples;
     public LightRegistry(WorldId world) => World = world;
     public WorldId World { get; private set; }
     public int Count => sources.Count;
@@ -75,7 +76,8 @@ public sealed class LightRegistry
     }
     public void Reset(WorldId world)
     {
-        AssertOwner(); World = world; sources.Clear(); layout++; emission++; lastFrame = -1; lastTime = double.NegativeInfinity;
+        AssertOwner(); World = world; sources.Clear(); layout++; emission++;
+        lastFrame = -1; lastTime = double.NegativeInfinity; cachedSamples = null;
     }
     public void Upsert(LightId id, LightDefinition definition)
     {
@@ -87,8 +89,6 @@ public sealed class LightRegistry
             if (previous.Position != definition.Position || previous.Radius != definition.Radius) layout++;
         }
         else layout++;
-        // The block/chunk event invalidates its physical mesh independently. Component count alone
-        // changes this aggregate's modulation, not its position or equivalent spherical geometry.
         sources[id] = definition; emission++;
     }
     public bool Remove(LightId id)
@@ -101,14 +101,29 @@ public sealed class LightRegistry
         AssertOwner();
         if (!double.IsFinite(seconds) || !double.IsFinite(wind01) || frame <= lastFrame || seconds < lastTime)
             throw new ArgumentOutOfRangeException(nameof(frame), "Frames and simulation time must be monotonic within a world.");
-        var output = new LightSample[sources.Count]; int index = 0;
-        foreach ((LightId id, LightDefinition light) in sources)
+        // Reuse immutable samples, NEVER overwrite a previous frame. Stable emission costs one frame
+        // header instead of an O(N) array, loop and subsequent packet comparison on every render.
+        // A future birth bounds the reuse interval; a live flame always expires it immediately.
+        bool reuse = cachedSamples is not null && cachedEmission == emission
+            && ((seconds == lastTime && wind01 == lastWind) || seconds < reuseBefore);
+        if (!reuse)
         {
-            double modulation = EmissionGroupWaveform.Evaluate(light.Profile, id.Seed, seconds,
-                light.BirthSeconds, light.ComponentCount, wind01);
-            output[index++] = new(id, light.Position, light.Intensity * (float)modulation, light.Radius);
+            var output = new LightSample[sources.Count]; int index = 0;
+            double nextChange = double.PositiveInfinity;
+            foreach ((LightId id, LightDefinition light) in sources)
+            {
+                double modulation = EmissionGroupWaveform.Evaluate(light.Profile, id.Seed, seconds,
+                    light.BirthSeconds, light.ComponentCount, wind01);
+                output[index++] = new(id, light.Position, light.Intensity * (float)modulation, light.Radius);
+                if (seconds < light.BirthSeconds) nextChange = Math.Min(nextChange, light.BirthSeconds);
+                else if (light.Profile.Kind == EmissionKind.Flame
+                    || (light.Profile.Kind == EmissionKind.Lightning && seconds - light.BirthSeconds < light.Profile.DurationSeconds))
+                    nextChange = seconds;
+            }
+            // A failed evaluation cannot partially replace the last valid cached frame or clock.
+            cachedSamples = output; cachedEmission = emission; reuseBefore = nextChange;
         }
-        lastFrame = frame; lastTime = seconds;
-        return new(World, frame, seconds, Revisions, output);
+        lastFrame = frame; lastTime = seconds; lastWind = wind01;
+        return new(World, frame, seconds, Revisions, cachedSamples!);
     }
 }

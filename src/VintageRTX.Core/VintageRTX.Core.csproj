@@ -1,3 +1,4 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup><AssemblyName>VintageRTX.Core</AssemblyName></PropertyGroup>
+  <ItemGroup><InternalsVisibleTo Include="VintageRTX.Core.Tests" /></ItemGroup>
 </Project>

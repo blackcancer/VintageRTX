@@ -4,10 +4,7 @@ using VintageRTX.Core.Scene;
 
 namespace VintageRTX.Client;
 
-/// <summary>
-/// Privately owned RGBA32F light texture. A frame becomes visible to consumers only after its
-/// upload succeeds. Changes to modulation do not require a geometry upload. No GPU readback.
-/// </summary>
+/// <summary>Owned light texture. Delta uploads require the exact preceding pixel revision.</summary>
 internal sealed class LightTexture : IDisposable
 {
     private readonly int owner = Environment.CurrentManagedThreadId;
@@ -22,8 +19,6 @@ internal sealed class LightTexture : IDisposable
     public CellId Anchor { get; private set; }
     public long LastUploadBytes { get; private set; }
     public long TotalUploadBytes { get; private set; }
-
-    /// <summary>Logical invalidation is safe before the next render-thread callback.</summary>
     public void Invalidate() { Ready = false; PublishedFrame = null; LastUploadBytes = 0; }
 
     public void Upload(GpuLightData data)
@@ -35,9 +30,13 @@ internal sealed class LightTexture : IDisposable
         LightFrame frame = data.SourceFrame ?? throw new ArgumentException("Missing evaluated light frame.", nameof(data));
         LastUploadBytes = 0;
         if (Ready && ReferenceEquals(data, uploadedData) && data.PixelRevision == uploadedRevision)
-        {
-            PublishedFrame = frame; Anchor = data.Anchor; return;
-        }
+        { PublishedFrame = frame; Anchor = data.Anchor; return; }
+        // A consumer can miss one or several frames. Apply a delta only from its exact predecessor;
+        // otherwise upload the complete packet. Never assume every render pass ran last frame.
+        bool delta = Ready && ReferenceEquals(data, uploadedData) && allocatedHeight == data.Height
+            && data.PixelRevision == uploadedRevision + 1;
+        int firstRow = delta ? data.ChangedRowStart : 0;
+        int rows = delta ? data.ChangedRowCount : data.Height;
         Invalidate();
         if (data.Height > GL.GetInteger(GetPName.MaxTextureSize))
             throw new InvalidOperationException("Light packet exceeds GPU texture capacity; no sources were silently dropped.");
@@ -54,10 +53,8 @@ internal sealed class LightTexture : IDisposable
             if (before != ErrorCode.NoError)
                 throw new InvalidOperationException($"Pre-existing OpenGL error {before}; light frame not published.");
             GL.BindBuffer(BufferTarget.PixelUnpackBuffer, 0);
-            GL.PixelStore(PixelStoreParameter.UnpackAlignment, 1);
-            GL.PixelStore(PixelStoreParameter.UnpackRowLength, 0);
-            GL.PixelStore(PixelStoreParameter.UnpackSkipRows, 0);
-            GL.PixelStore(PixelStoreParameter.UnpackSkipPixels, 0);
+            GL.PixelStore(PixelStoreParameter.UnpackAlignment, 1); GL.PixelStore(PixelStoreParameter.UnpackRowLength, 0);
+            GL.PixelStore(PixelStoreParameter.UnpackSkipRows, 0); GL.PixelStore(PixelStoreParameter.UnpackSkipPixels, 0);
             GL.PixelStore(PixelStoreParameter.UnpackSwapBytes, 0);
             if (Texture == 0) Texture = GL.GenTexture();
             GL.BindTexture(TextureTarget.Texture2D, Texture);
@@ -65,29 +62,27 @@ internal sealed class LightTexture : IDisposable
             GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureMagFilter, (int)TextureMagFilter.Nearest);
             GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapS, (int)TextureWrapMode.ClampToEdge);
             GL.TexParameter(TextureTarget.Texture2D, TextureParameterName.TextureWrapT, (int)TextureWrapMode.ClampToEdge);
-            if (upload.Length != data.Pixels.Length) upload = new float[data.Pixels.Length];
-            data.Pixels.CopyTo(upload);
+            int values = rows * GpuLightData.Width * 4;
+            if (upload.Length < values) upload = new float[Math.Max(values, upload.Length * 2)];
+            data.Pixels.Slice(firstRow * GpuLightData.Width * 4, values).CopyTo(upload);
             if (allocatedHeight != data.Height)
                 GL.TexImage2D(TextureTarget.Texture2D, 0, PixelInternalFormat.Rgba32f, GpuLightData.Width,
                     data.Height, 0, PixelFormat.Rgba, PixelType.Float, upload);
             else
-                GL.TexSubImage2D(TextureTarget.Texture2D, 0, 0, 0, GpuLightData.Width,
-                    data.Height, PixelFormat.Rgba, PixelType.Float, upload);
+                GL.TexSubImage2D(TextureTarget.Texture2D, 0, 0, firstRow, GpuLightData.Width,
+                    rows, PixelFormat.Rgba, PixelType.Float, upload);
             ErrorCode error = GL.GetError();
             if (error != ErrorCode.NoError) throw new InvalidOperationException($"OpenGL light upload failed: {error}.");
             allocatedHeight = data.Height; uploadedData = data; uploadedRevision = data.PixelRevision;
-            LastUploadBytes = (long)upload.Length * sizeof(float); TotalUploadBytes += LastUploadBytes;
+            LastUploadBytes = (long)values * sizeof(float); TotalUploadBytes += LastUploadBytes;
             PublishedFrame = frame; Anchor = data.Anchor; Ready = true;
         }
         finally
         {
-            GL.PixelStore(PixelStoreParameter.UnpackAlignment, alignment);
-            GL.PixelStore(PixelStoreParameter.UnpackRowLength, rowLength);
-            GL.PixelStore(PixelStoreParameter.UnpackSkipRows, skipRows);
-            GL.PixelStore(PixelStoreParameter.UnpackSkipPixels, skipPixels);
+            GL.PixelStore(PixelStoreParameter.UnpackAlignment, alignment); GL.PixelStore(PixelStoreParameter.UnpackRowLength, rowLength);
+            GL.PixelStore(PixelStoreParameter.UnpackSkipRows, skipRows); GL.PixelStore(PixelStoreParameter.UnpackSkipPixels, skipPixels);
             GL.PixelStore(PixelStoreParameter.UnpackSwapBytes, swapBytes);
-            GL.BindBuffer(BufferTarget.PixelUnpackBuffer, pbo);
-            GL.BindTexture(TextureTarget.Texture2D, texture);
+            GL.BindBuffer(BufferTarget.PixelUnpackBuffer, pbo); GL.BindTexture(TextureTarget.Texture2D, texture);
         }
     }
     public void Dispose()
