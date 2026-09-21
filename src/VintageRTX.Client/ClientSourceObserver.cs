@@ -32,6 +32,9 @@ internal sealed class ClientSourceObserver : IRenderer
     private readonly HashSet<LightId> blockSources = new(), entitySources = new(), seenEntities = new();
     private readonly Dictionary<LightId, Observation> observations = new();
     private readonly HashSet<string> failedProviders = new(StringComparer.Ordinal);
+    private GpuLightData lightData = new();
+    private LightTexture? lightTexture;
+    private bool lightGpuFaulted;
     private LightId[] watchedBlocks = [];
     private bool watchDirty;
     private readonly long tick;
@@ -60,6 +63,7 @@ internal sealed class ClientSourceObserver : IRenderer
     private void LeaveWorld()
     {
         Interlocked.Increment(ref epoch); lights = null; CurrentFrame = null; window.Clear(); edits.Clear(); chunkNotices.Clear(); geometry.Clear();
+        lightData = new(); lightTexture?.Invalidate(); lightGpuFaulted = false;
         blockSources.Clear(); entitySources.Clear(); seenEntities.Clear(); observations.Clear(); failedProviders.Clear();
         watchedBlocks = []; watchDirty = false; frame = 0; pollOffset = 0; appliedCatalogRevision = -1;
         emissionAssets.InvalidateResolutions();
@@ -148,8 +152,8 @@ internal sealed class ClientSourceObserver : IRenderer
                 EmissionSelection selection = emissionAssets.Resolve(code, EmissionTarget.Block, block.Attributes);
                 byte[]? hsv = block.GetLightHsv(api.World.BlockAccessor, pos);
                 bool candidate = Observe(id, code, hsv, new(x + .5, y + .5, z + .5), EmissionTarget.Block, block.Attributes);
-                bool potential = candidate || selection.ProfileId is not null
-                    || block.LightHsv is { Length: >= 3 } light && light[2] > 0;
+                // CollectibleObject.LightHsv is ThreeBytes in the supported API, not byte[].
+                bool potential = candidate || selection.ProfileId is not null || block.LightHsv[2] > 0;
                 if (potential) { if (blockSources.Add(id)) watchDirty = true; }
                 else Unwatch(id);
             }
@@ -209,7 +213,7 @@ internal sealed class ClientSourceObserver : IRenderer
     }
     public void OnRenderFrame(float dt, EnumRenderStage stage)
     {
-        if (disposed || lights is null) return;
+        if (disposed || lights is null || stage != EnumRenderStage.Before) return;
         if (appliedCatalogRevision != emissionAssets.Revision)
         {
             // One owner-thread configuration transaction before the immutable frame is captured.
@@ -217,9 +221,27 @@ internal sealed class ClientSourceObserver : IRenderer
             foreach ((LightId id, Observation observation) in observations) Apply(id, observation);
             appliedCatalogRevision = emissionAssets.Revision;
         }
-        CurrentFrame = lights.Capture(++frame, api.InWorldEllapsedMilliseconds / 1000.0); geometry.Upload();
+        CurrentFrame = lights.Capture(++frame, api.InWorldEllapsedMilliseconds / 1000.0);
+        // Emission is published independently and before geometry uploads. An empty/invalid scene
+        // must never prevent a source from being observed, extinguished or sent to the GPU.
+        if (!lightGpuFaulted && api.World?.Player?.Entity is { Pos: not null } player)
+        {
+            try
+            {
+                CellId anchor = new(checked((int)Math.Floor(player.Pos.X)), checked((int)Math.Floor(player.Pos.Y)),
+                    checked((int)Math.Floor(player.Pos.Z)));
+                lightData.Update(CurrentFrame, anchor);
+                lightTexture ??= new(); lightTexture.Upload(lightData);
+            }
+            catch (Exception exception)
+            {
+                lightGpuFaulted = true; lightTexture?.Invalidate();
+                api.Logger.Warning("[VintageRTX] Rewrite light GPU publication failed: {0}. Native image remains intact.", exception.Message);
+            }
+        }
+        geometry.Upload();
     }
-    public string Describe() => $"VintageRTX R01a: native image unchanged. Sources={lights?.Count ?? 0}, watched blocks={blockSources.Count}, pending regions={window.Pending}, published regions={geometry.Frame?.RegionCount ?? 0}, GPU templates={geometry.GpuTemplateCount}, GPU allocated={geometry.GpuAllocated}, last upload={geometry.LastUploadBytes} bytes, frame={frame}, emission catalog revision={emissionAssets.Revision}. Static opaque subset only; PBR image passes and animated sockets pending.";
+    public string Describe() => $"VintageRTX R01b: native image unchanged. Sources={lights?.Count ?? 0}, watched blocks={blockSources.Count}, pending regions={window.Pending}, published regions={geometry.Frame?.RegionCount ?? 0}, GPU templates={geometry.GpuTemplateCount}, GPU allocated={geometry.GpuAllocated}, geometry upload={geometry.LastUploadBytes} bytes, GPU light frame={lightTexture?.PublishedFrame?.Frame ?? -1}, light upload={lightTexture?.LastUploadBytes ?? 0} bytes, frame={frame}, emission catalog revision={emissionAssets.Revision}. Static opaque subset only; PBR image passes and animated sockets pending.";
     private void Warn(string? code, Exception exception)
     {
         string key = code ?? "unknown";
@@ -230,6 +252,7 @@ internal sealed class ClientSourceObserver : IRenderer
         if (disposed) return; disposed = true;
         api.Event.BlockChanged -= BlockChanged; api.Event.ChunkDirty -= ChunkDirty; api.Event.LeaveWorld -= LeaveWorld;
         api.Event.ReloadShapes -= ReloadAssets; api.Event.ReloadTextures -= ReloadAssets;
-        api.Event.UnregisterGameTickListener(tick); api.Event.UnregisterRenderer(this, EnumRenderStage.Before); LeaveWorld(); geometry.Dispose();
+        api.Event.UnregisterGameTickListener(tick); api.Event.UnregisterRenderer(this, EnumRenderStage.Before);
+        LeaveWorld(); lightTexture?.Dispose(); lightTexture = null; geometry.Dispose();
     }
 }
