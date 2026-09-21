@@ -1,17 +1,29 @@
 <Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup><AssemblyName>VintageRTX</AssemblyName></PropertyGroup>
+  <PropertyGroup>
+    <AssemblyName>VintageRTX</AssemblyName>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <!-- Match the previous project's game-discoverable layout and launch profiles.
+         Isolated --artifacts-path builds must not overwrite a running local mod. -->
+    <OutputPath Condition="'$(ArtifactsPath)' == ''">bin\$(Configuration)\Mods\vintagertx\</OutputPath>
+    <DebugType>portable</DebugType>
+  </PropertyGroup>
   <ItemGroup>
-    <ProjectReference Include="../VintageRTX.Core/VintageRTX.Core.csproj" />
+    <ProjectReference Include="../VintageRTX.Core/VintageRTX.Core.csproj" Private="true" />
     <Reference Include="VintagestoryAPI"><HintPath>$(VintageStoryPath)/VintagestoryAPI.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="Newtonsoft.Json"><HintPath>$(VintageStoryPath)/Lib/Newtonsoft.Json.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="OpenTK.Core"><HintPath>$(VintageStoryPath)/Lib/OpenTK.Core.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="OpenTK.Graphics"><HintPath>$(VintageStoryPath)/Lib/OpenTK.Graphics.dll</HintPath><Private>false</Private></Reference>
     <Reference Include="OpenTK.Mathematics"><HintPath>$(VintageStoryPath)/Lib/OpenTK.Mathematics.dll</HintPath><Private>false</Private></Reference>
-    <Content Include="modinfo.json" CopyToOutputDirectory="PreserveNewest" />
-    <Content Include="assets/**/*" CopyToOutputDirectory="Always" />
+    <Content Include="modinfo.json" CopyToOutputDirectory="Always" CopyToPublishDirectory="Always" />
+    <Content Include="assets/**/*" CopyToOutputDirectory="Always" CopyToPublishDirectory="Always" />
     <InternalsVisibleTo Include="VintageRTX.Client.Tests" />
   </ItemGroup>
   <Target Name="ValidateClient" BeforeTargets="ResolveAssemblyReferences">
-    <Error Condition="!Exists('$(VintageStoryPath)/VintagestoryAPI.dll')" Text="Set VINTAGE_STORY to a Vintage Story 1.22.7 client installation." />
+    <Error Condition="'$(VintageStoryPath)' == '' or !Exists('$(VintageStoryPath)/VintagestoryAPI.dll')" Text="Vintage Story 1.22.7 client references not found. Set VINTAGE_STORY to the installation root (legacy Lib/Mods paths are also accepted), or pass -p:VintageStoryPath=... . Resolved root: '$(VintageStoryPath)'; VINTAGE_STORY: '$(VINTAGE_STORY)'." />
+  </Target>
+  <Target Name="ValidateBuiltModLayout" AfterTargets="Build" Condition="'$(DesignTimeBuild)' != 'true'">
+    <Error Condition="!Exists('$(TargetDir)VintageRTX.dll') or !Exists('$(TargetDir)VintageRTX.Core.dll')" Text="VintageRTX deployment is incomplete: both VintageRTX.dll and VintageRTX.Core.dll must be together in $(TargetDir)." />
+    <Error Condition="!Exists('$(TargetDir)modinfo.json') or !Exists('$(TargetDir)assets/vintagertx/config/emission.json')" Text="VintageRTX deployment is incomplete: modinfo.json and emission assets are missing from $(TargetDir)." />
+    <Message Importance="high" Text="VintageRTX mod package: $(TargetDir) . For local Debug/Release builds, the Vintage Story Client launch profiles load its parent Mods directory." />
   </Target>
 </Project>

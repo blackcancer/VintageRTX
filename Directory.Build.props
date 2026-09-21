@@ -6,6 +6,10 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <Deterministic>true</Deterministic>
-    <VintageStoryPath Condition="'$(VintageStoryPath)' == ''">$(VINTAGE_STORY)</VintageStoryPath>
+    <!-- Preserve the recovery branch's root/Lib/Mods environment convention.
+         An explicit MSBuild VintageStoryPath remains authoritative. Both the
+         reference HintPaths and the debugger consume this same resolved root. -->
+    <VintageStoryPath Condition="'$(VintageStoryPath)' == '' and '$(VINTAGE_STORY)' != '' and Exists('$(VINTAGE_STORY)/VintagestoryAPI.dll')">$([System.IO.Path]::GetFullPath('$(VINTAGE_STORY)'))</VintageStoryPath>
+    <VintageStoryPath Condition="'$(VintageStoryPath)' == '' and '$(VINTAGE_STORY)' != '' and Exists('$(VINTAGE_STORY)/../VintagestoryAPI.dll')">$([System.IO.Path]::GetFullPath('$(VINTAGE_STORY)/..'))</VintageStoryPath>
   </PropertyGroup>
 </Project>

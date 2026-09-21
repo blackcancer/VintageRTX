@@ -118,7 +118,7 @@ jobs:
           assert (evidence/'direct-preview.ppm').is_file()
           print(c.attrib)
           PY
-          cmp src/VintageRTX.Client/assets/vintagertx/config/emission.json src/VintageRTX.Client/bin/Release/net10.0/assets/vintagertx/config/emission.json
+          cmp src/VintageRTX.Client/assets/vintagertx/config/emission.json src/VintageRTX.Client/bin/Release/Mods/vintagertx/assets/vintagertx/config/emission.json
           git diff --exit-code
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1, node24
         if: always()

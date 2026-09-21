@@ -1,9 +1,10 @@
 <Solution>
   <Folder Name="/src/">
-    <Project Path="src/VintageRTX.Core/VintageRTX.Core.csproj" />
     <Project Path="src/VintageRTX.Client/VintageRTX.Client.csproj" />
+    <Project Path="src/VintageRTX.Core/VintageRTX.Core.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/VintageRTX.Core.Tests/VintageRTX.Core.Tests.csproj" />
+    <Project Path="tests/VintageRTX.Client.Tests/VintageRTX.Client.Tests.csproj" />
   </Folder>
 </Solution>

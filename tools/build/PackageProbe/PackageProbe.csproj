@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>VintageRTX.DevelopmentPackageProbe</AssemblyName>
+  </PropertyGroup>
+</Project>
