@@ -58,8 +58,8 @@ public sealed class RewriteBootstrapTests
             if(assetsFirst) {system.AssetsLoaded(commands.Api); system.AssetsLoaded(commands.Api);}
             system.StartClientSide(commands.Api);
             if(!assetsFirst) system.AssetsLoaded(commands.Api);
-            CollectionAssert.AreEquivalent(new[] {"vrtxrewrite", "vrtxemissions", "vrtxlightlab"}, commands.Handlers.Keys.ToArray());
-            Assert.AreEqual(2, host.Renderers.Count);
+            CollectionAssert.AreEquivalent(new[] {"vrtxrewrite", "vrtxemissions", "vrtxlightlab", "vrtxworld"}, commands.Handlers.Keys.ToArray());
+            Assert.AreEqual(5, host.Renderers.Count);
             StringAssert.Contains(commands.Invoke("vrtxrewrite").StatusMessage, "Sources=0");
             StringAssert.Contains(commands.Invoke("vrtxemissions").StatusMessage, "revision=1");
             Assert.IsInstanceOfType<WordArgParser>(commands.Arguments["vrtxlightlab"][0]);

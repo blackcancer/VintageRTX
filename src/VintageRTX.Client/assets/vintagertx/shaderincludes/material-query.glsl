@@ -42,3 +42,39 @@ vec3 directBsdfCos(DirectMaterial m,vec3 baseColor,vec3 normal,vec3 outgoing,vec
     float visibility=0.5/(nl*sv+nv*sl);
     return conductorFresnel(m,dot(outgoing,h))*(distribution*visibility*nl);
 }
+
+// Shared estimator used by BOTH the full-screen reference pass and the native world shaders.
+// The caller owns valid unit directions, material, texture publication and sampling bounds.
+struct MaterialDirectResult { vec3 radiance; int unresolved; int blocked; int traced; };
+MaterialDirectResult evaluateMaterialDirect(vec3 position,vec3 normal,vec3 geometricNormal,
+    vec3 outgoing,vec3 color,DirectMaterial material,int finiteSamples,float rayMinimum,
+    int maximumCells,vec2 sampleRotation) {
+    vec3 radiance=vec3(0);int unresolved=0,blocked=0,traced=0;
+    for(int i=0;i<lightCount;i++) {
+        vec4 source=texelFetch(lightData,ivec2(0,i),0);
+        vec3 intensity=texelFetch(lightData,ivec2(1,i),0).rgb;
+        if(!validEmitter(source,intensity)) {unresolved++;continue;}
+        if(all(equal(intensity,vec3(0))))continue;
+        vec3 delta=source.xyz-position;
+        if(dot(delta,geometricNormal)+source.w<=0.0 || dot(delta,normal)+source.w<=0.0)continue;
+        int count=source.w>0.0 ? finiteSamples : 1;vec3 sum=vec3(0);
+        for(int j=0;j<64;j++) {
+            if(j>=count)break;
+            EmitterSegment sample=sampleEmitterSegment(position,source,intensity,
+                emitterQuadrature(j,count,sampleRotation));
+            if(sample.status!=0) {unresolved++;continue;}
+            if(dot(normal,sample.direction)<=0.0 || dot(geometricNormal,sample.direction)<=0.0)continue;
+            if(sample.distance<=rayMinimum) {unresolved++;continue;}
+            vec3 response=directBsdfCos(material,color,normal,outgoing,sample.direction);
+            if(!finiteRgb(response)) {unresolved++;continue;}
+            if(all(equal(response,vec3(0))))continue;
+            SceneQuery visibility=traceScene(position,sample.direction,rayMinimum,sample.distance,maximumCells);
+            traced++;
+            if(visibility.status==1)blocked++;
+            else if(visibility.status!=0)unresolved++;
+            else sum+=response*sample.weight;
+        }
+        radiance+=sum/float(count);
+    }
+    return MaterialDirectResult(radiance,unresolved,blocked,traced);
+}

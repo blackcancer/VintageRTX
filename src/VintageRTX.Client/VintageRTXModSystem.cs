@@ -9,6 +9,7 @@ public sealed class VintageRTXModSystem : ModSystem
     private ClientSourceObserver? observer;
     private EmissionAssetCatalog? emissionAssets;
     private DirectLightLabRenderer? lightLab;
+    private WorldLightingRenderer? worldRenderer;
     public override bool ShouldLoad(EnumAppSide forSide) => forSide == EnumAppSide.Client;
     public override double ExecuteOrder() => 0.15;
     public override void AssetsLoaded(ICoreAPI api)
@@ -22,9 +23,10 @@ public sealed class VintageRTXModSystem : ModSystem
         if (!emissionAssets.LoadAttempted) emissionAssets.LoadPatched();
         observer = new ClientSourceObserver(api, emissionAssets);
         lightLab = new DirectLightLabRenderer(api, emissionAssets);
+        worldRenderer = new WorldLightingRenderer(api, observer);
         api.ChatCommands.Create("vrtxrewrite")
-            .WithDescription("Report rewrite data and upload state; native world rendering remains active.")
-            .HandleWith(_ => TextCommandResult.Success(observer?.Describe() ?? "VintageRTX rewrite stopped."));
+            .WithDescription("Report rewrite data and world rendering state.")
+            .HandleWith(_ => TextCommandResult.Success((observer?.Describe() ?? "VintageRTX rewrite stopped.") + "\n" + (worldRenderer?.Describe() ?? "World renderer stopped.")));
         api.ChatCommands.Create("vrtxemissions")
             .WithDescription("Report patched emission catalog, revision and validation status.")
             .HandleWith(_ => TextCommandResult.Success(emissionAssets?.Describe() ?? "VintageRTX emission catalog stopped."));
@@ -32,10 +34,15 @@ public sealed class VintageRTXModSystem : ModSystem
             .WithDescription("Synthetic direct PBR image laboratory: on, off, dark or lit. Does not replace the world image.")
             .WithArgs(api.ChatCommands.Parsers.Word("mode"))
             .HandleWith(args => TextCommandResult.Success(lightLab?.Configure(args[0]?.ToString() ?? "") ?? "VintageRTX laboratory stopped."));
-        api.Logger.Notification("[VintageRTX] Rewrite R02: material-aware direct image pass available through .vrtxlightlab on. Laboratory disabled by default; native world image remains active.");
+        api.ChatCommands.Create("vrtxworld")
+            .WithDescription("Native world lighting: on, off, coverage, status or retry.")
+            .WithArgs(api.ChatCommands.Parsers.Word("mode"))
+            .HandleWith(args => TextCommandResult.Success(worldRenderer?.Configure(args[0]?.ToString() ?? "status") ?? "VintageRTX world renderer stopped."));
+        api.Logger.Notification("[VintageRTX] Rewrite R03: native world direct-light integration enabled. Shader connection is deferred to the first render frame; .vrtxworld status reports actual readiness. Laboratory remains opt-in.");
     }
     public override void Dispose()
     {
+        worldRenderer?.Dispose(); worldRenderer = null;
         lightLab?.Dispose(); lightLab = null; observer?.Dispose(); observer = null;
         emissionAssets = null; base.Dispose();
     }

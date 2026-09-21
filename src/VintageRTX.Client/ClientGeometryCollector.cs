@@ -20,6 +20,7 @@ internal sealed class ClientGeometryCollector(ICoreClientAPI api) : IDisposable
     private SceneTextureSet? textures;
     private bool gpuFaulted;
     public CellSceneFrame? Frame { get; private set; }
+    internal SceneTextureSet? PublishedTextures => GpuAllocated ? textures : null;
     public int TemplateCount=>templates.Count;
     public int GpuTemplateCount=>data.TemplateCount;
     // Allocation alone is not publication. Reset, Clear and a newer CPU snapshot must never

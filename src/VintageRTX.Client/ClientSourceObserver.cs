@@ -241,7 +241,19 @@ internal sealed class ClientSourceObserver : IRenderer
         }
         geometry.Upload();
     }
-    public string Describe() => $"VintageRTX R01b: native image unchanged. Sources={lights?.Count ?? 0}, watched blocks={blockSources.Count}, pending regions={window.Pending}, published regions={geometry.Frame?.RegionCount ?? 0}, GPU templates={geometry.GpuTemplateCount}, GPU allocated={geometry.GpuAllocated}, geometry upload={geometry.LastUploadBytes} bytes, GPU light frame={lightTexture?.PublishedFrame?.Frame ?? -1}, light upload={lightTexture?.LastUploadBytes ?? 0} bytes, frame={frame}, emission catalog revision={emissionAssets.Revision}. Static opaque subset only; PBR image passes and animated sockets pending.";
+    internal bool TryBorrowWorldFrame(out WorldGpuFrame frame)
+    {
+        frame = default;
+        SceneTextureSet? scene = geometry.PublishedTextures;
+        if (disposed || CurrentFrame is null || scene?.PublishedFrame is not { } currentScene
+            || lightTexture?.Ready != true || lightGpuFaulted
+            || !ReferenceEquals(lightTexture.PublishedFrame, CurrentFrame)
+            || currentScene.World != CurrentFrame.World) return false;
+        frame = new(currentScene, CurrentFrame, lightTexture.Anchor, scene.RegionTexture,
+            scene.CellTexture, scene.GeometryTexture, lightTexture.Texture);
+        return frame.Valid;
+    }
+    public string Describe() => $"VintageRTX R03: world-source publication. Sources={lights?.Count ?? 0}, watched blocks={blockSources.Count}, pending regions={window.Pending}, published regions={geometry.Frame?.RegionCount ?? 0}, GPU templates={geometry.GpuTemplateCount}, GPU allocated={geometry.GpuAllocated}, geometry upload={geometry.LastUploadBytes} bytes, GPU light frame={lightTexture?.PublishedFrame?.Frame ?? -1}, light upload={lightTexture?.LastUploadBytes ?? 0} bytes, frame={frame}, emission catalog revision={emissionAssets.Revision}. Static opaque subset only; Animated caster geometry and exact sockets pending.";
     private void Warn(string? code, Exception exception)
     {
         string key = code ?? "unknown";

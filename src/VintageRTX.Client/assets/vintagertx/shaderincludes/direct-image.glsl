@@ -55,33 +55,9 @@ void main() {
     outgoing*=inversesqrt(outgoing2);
     if(dot(outgoing,n.xyz)<=0.0 || dot(outgoing,g.xyz)<=0.0) {invalidDirect(3.0);return;}
     if(material.kind==1 && material.roughness==0.0) {invalidDirect(3.0);return;}
-    vec3 radiance=vec3(0);int unresolved=0,blocked=0,traced=0;
-    for(int i=0;i<lightCount;i++) {
-        vec4 source=texelFetch(lightData,ivec2(0,i),0);
-        vec3 intensity=texelFetch(lightData,ivec2(1,i),0).rgb;
-        if(!validEmitter(source,intensity)) {unresolved++;continue;}
-        if(all(equal(intensity,vec3(0))))continue;
-        vec3 delta=source.xyz-p.xyz;
-        if(dot(delta,g.xyz)+source.w<=0.0 || dot(delta,n.xyz)+source.w<=0.0)continue;
-        int count=source.w>0.0 ? finiteSourceSamples : 1;vec3 sum=vec3(0);
-        for(int j=0;j<64;j++) {
-            if(j>=count)break;
-            EmitterSegment sample=sampleEmitterSegment(p.xyz,source,intensity,
-                emitterQuadrature(j,count,directSampleRotation));
-            if(sample.status!=0) {unresolved++;continue;}
-            if(dot(n.xyz,sample.direction)<=0.0 || dot(g.xyz,sample.direction)<=0.0)continue;
-            if(sample.distance<=directRayMinimum) {unresolved++;continue;}
-            vec3 response=directBsdfCos(material,color,n.xyz,outgoing,sample.direction);
-            if(!finiteRgb(response)) {unresolved++;continue;}
-            if(all(equal(response,vec3(0))))continue;
-            SceneQuery visibility=traceScene(p.xyz,sample.direction,directRayMinimum,sample.distance,directMaximumCells);
-            traced++;
-            if(visibility.status==1)blocked++;
-            else if(visibility.status!=0)unresolved++;
-            else sum+=response*sample.weight;
-        }
-        radiance+=sum/float(count);
-    }
+    MaterialDirectResult result=evaluateMaterialDirect(p.xyz,n.xyz,g.xyz,outgoing,color,material,
+        finiteSourceSamples,directRayMinimum,directMaximumCells,directSampleRotation);
+    vec3 radiance=result.radiance;int unresolved=result.unresolved,blocked=result.blocked,traced=result.traced;
     if(!finiteRgb(radiance) || any(lessThan(radiance,vec3(0)))) {invalidDirect(5.0);return;}
     directRadiance=vec4(radiance,1);
     directDiagnostics=vec4(float(unresolved),float(blocked),float(traced),unresolved>0 ? 2.0 : 1.0);
