@@ -1,63 +1,7 @@
-# Visual Studio and IDE state
+**/bin/
+**/obj/
 .vs/
-.idea/
-*.suo
+TestResults/
+artifacts/
 *.user
-*.userosscache
-*.sln.docstates
-
-# .NET build and package outputs
-[Bb]in/
-[Oo]bj/
-[Oo]bj-*/
-[Aa]rtifacts/
-[Rr]eleases/
-packages/
-.codex-temp/
-*.nupkg
-*.snupkg
-
-# Test, coverage, benchmark, and capture outputs
-[Tt]est[Rr]esults/
-coverage-results/
-coverage/
-/tests/coverage-*/
-*.coverage
-*.coveragexml
-coverage.cobertura.xml
-lcov.info
-BenchmarkDotNet.Artifacts/
-/.vintagertx-*/
-/.buildcheck/
-
-# Generated PBR assets, validation workspaces, and packages. The authored
-# runtime sidecars live under src/VintageRTX/assets and remain versioned.
-/generated/
-
-# Generated diagnostics and logs
-*.log
-*.sarif
-*.trx
-*.check.xml
-
-# Local configuration and credentials
-.env
-.env.*
-!.env.example
-*.local
-*.local.*
-appsettings.Local.json
-appsettings.*.local.json
-*.pfx
-*.p12
-*.key
-*.pem
-
-# OS and temporary files
-.DS_Store
-Thumbs.db
-Desktop.ini
-*.tmp
-*.bak
-*.swp
-*~
+*.suo

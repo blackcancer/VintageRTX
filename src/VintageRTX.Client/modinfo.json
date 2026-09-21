@@ -1,0 +1,6 @@
+{
+  "type": "code", "modid": "vintagertx", "name": "VintageRTX Rewrite - Foundation",
+  "authors": ["InitSysRev"], "version": "0.3.0-dev.1", "side": "Client",
+  "description": "Rewrite foundation and source-observation diagnostics. GPU world rendering is NOT implemented in this milestone.",
+  "dependencies": {"game": "1.22.7"}
+}

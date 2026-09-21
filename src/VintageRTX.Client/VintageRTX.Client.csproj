@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><AssemblyName>VintageRTX</AssemblyName></PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../VintageRTX.Core/VintageRTX.Core.csproj" />
+    <Reference Include="VintagestoryAPI"><HintPath>$(VintageStoryPath)/VintagestoryAPI.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Newtonsoft.Json"><HintPath>$(VintageStoryPath)/Lib/Newtonsoft.Json.dll</HintPath><Private>false</Private></Reference>
+    <Content Include="modinfo.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+  <Target Name="ValidateClient" BeforeTargets="ResolveAssemblyReferences">
+    <Error Condition="!Exists('$(VintageStoryPath)/VintagestoryAPI.dll')" Text="Set VINTAGE_STORY to a Vintage Story 1.22.7 client installation." />
+  </Target>
+</Project>

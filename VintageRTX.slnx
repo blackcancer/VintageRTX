@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/VintageRTX.Core/VintageRTX.Core.csproj" />
+    <Project Path="src/VintageRTX.Client/VintageRTX.Client.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/VintageRTX.Core.Tests/VintageRTX.Core.Tests.csproj" />
+  </Folder>
+</Solution>

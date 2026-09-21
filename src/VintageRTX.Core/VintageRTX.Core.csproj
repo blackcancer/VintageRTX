@@ -1,0 +1,3 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><AssemblyName>VintageRTX.Core</AssemblyName></PropertyGroup>
+</Project>
