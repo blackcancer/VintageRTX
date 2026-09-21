@@ -16,7 +16,8 @@ jobs:
     timeout-minutes: 10
     env:
       LIBGL_ALWAYS_SOFTWARE: '1'
-      VINTAGERTX_GPU_CASES: artifacts/scene-gpu-cases.json
+      # The test host and Python need not have the same working directory.
+      VINTAGERTX_GPU_CASES: '${{ github.workspace }}/artifacts/scene-gpu-cases.json'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9
@@ -27,11 +28,12 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p artifacts
+          rm -f "$VINTAGERTX_GPU_CASES"
           git rev-parse HEAD > artifacts/commit.txt
           dotnet --info > artifacts/dotnet.txt
           dotnet test tests/VintageRTX.Core.Tests/VintageRTX.Core.Tests.csproj -c Release --logger 'trx;LogFileName=core.trx' --results-directory artifacts 2>&1 | tee artifacts/core.log
           python3 - <<'PY'
-          import xml.etree.ElementTree as ET
+          import hashlib, json, os, xml.etree.ElementTree as ET
           from pathlib import Path
           r=ET.parse('artifacts/core.trx').getroot()
           c=r.find('.//{*}Counters')
@@ -40,6 +42,11 @@ jobs:
           assert any('EmissionCatalogTests' in t.get('className','') for t in r.findall('.//{*}TestMethod'))
           assert len(list(Path('src').rglob('*ModSystem.cs')))==1
           assert not Path('src/VintageRTX').exists()
+          p=Path(os.environ['VINTAGERTX_GPU_CASES'])
+          assert p.is_absolute() and p.is_file(), f'Production packet was not exported: {p}'
+          data=p.read_bytes()
+          assert len(json.loads(data))==6, 'Incomplete production GPU cases'
+          Path('artifacts/scene-packets.sha256').write_text(hashlib.sha256(data).hexdigest()+'\n')
           print(c.attrib)
           PY
       - name: Execute GLSL on the CSharp-produced scene layout
