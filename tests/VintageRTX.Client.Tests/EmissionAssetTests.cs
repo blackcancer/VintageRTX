@@ -264,9 +264,9 @@ public sealed class EmissionAssetTests
 /// <summary>Explicitly routed interfaces; unexpected world reads fail the test rather than being hidden.</summary>
 public class Stub : DispatchProxy
 {
-    public Func<MethodInfo, object?[], object?> Route { get; set; } = null!;
+    public System.Func<MethodInfo, object?[], object?> Route { get; set; } = null!;
     protected override object? Invoke(MethodInfo? targetMethod, object?[]? args) => Route(targetMethod!, args ?? []);
-    public static T Create<T>(Func<MethodInfo, object?[], object?> route) where T : class => (T)Create(typeof(T), route);
-    public static object Create(Type type, Func<MethodInfo, object?[], object?> route)
+    public static T Create<T>(System.Func<MethodInfo, object?[], object?> route) where T : class => (T)Create(typeof(T), route);
+    public static object Create(Type type, System.Func<MethodInfo, object?[], object?> route)
     { object value = DispatchProxy.Create(type, typeof(Stub)); ((Stub)value).Route = route; return value; }
 }
