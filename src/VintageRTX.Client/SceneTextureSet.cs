@@ -3,10 +3,7 @@ using VintageRTX.Core.Scene;
 
 namespace VintageRTX.Client;
 
-/// <summary>
-/// Three privately owned scene textures. An immutable source frame is advertised only after upload;
-/// consumers can reject mismatched geometry instead of shading against a previous world/revision.
-/// </summary>
+/// <summary>Owned scene textures; a matching immutable frame is published only after all writes succeed.</summary>
 internal sealed class SceneTextureSet : IDisposable
 {
     public int RegionTexture { get; private set; }
@@ -16,10 +13,12 @@ internal sealed class SceneTextureSet : IDisposable
     public CellSceneFrame? PublishedFrame { get; private set; }
     public long LastUploadBytes { get; private set; }
     public long TotalUploadBytes { get; private set; }
+    private readonly IGraphicsStatus status;
     private int geometryHeight, uploadedGeometryTexels;
     private readonly int[] regionScratch = new int[2048], tagScratch = new int[4];
     private readonly int owner = Environment.CurrentManagedThreadId;
     private bool disposed;
+    public SceneTextureSet(IGraphicsStatus? status = null) => this.status = status ?? NativeGraphicsStatus.Instance;
     internal void NoUpload() => LastUploadBytes = 0;
     public void Upload(GpuSceneData data)
     {
@@ -28,10 +27,9 @@ internal sealed class SceneTextureSet : IDisposable
         Ready = false; PublishedFrame = null; LastUploadBytes = 0;
         ArgumentNullException.ThrowIfNull(data);
         CellSceneFrame frame = data.SourceFrame ?? throw new ArgumentException("Missing geometry source frame.");
-        ErrorCode before = GL.GetError();
+        ErrorCode before = status.Error();
         if (before != ErrorCode.NoError) throw new InvalidOperationException($"Pre-existing OpenGL error {before}; geometry not published.");
-        if (data.GeometryHeight > GL.GetInteger(GetPName.MaxTextureSize)) throw new NotSupportedException("Scene texture capacity exceeded.");
-        // In addition to PBO/strides, swapping must be disabled for integer tags and float BVH data.
+        if (data.GeometryHeight > status.Limit(GetPName.MaxTextureSize)) throw new NotSupportedException("Scene texture capacity exceeded.");
         using var unpack = new RewriteUnpackState();
         bool first = RegionTexture == 0;
         if (first)
@@ -75,7 +73,7 @@ internal sealed class SceneTextureSet : IDisposable
             GL.TexSubImage2D(TextureTarget.Texture2D, 0, slot, 0, 1, 1, PixelFormat.RgbaInteger, PixelType.Int, tagScratch);
             LastUploadBytes += 16;
         }
-        ErrorCode error = GL.GetError();
+        ErrorCode error = status.Error();
         if (error != ErrorCode.NoError) throw new InvalidOperationException($"OpenGL scene upload reported {error}; cache not published.");
         PublishedFrame = frame; Ready = true; TotalUploadBytes += LastUploadBytes;
     }

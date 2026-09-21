@@ -4,16 +4,14 @@ using VintageRTX.Core.Transport;
 
 namespace VintageRTX.Client;
 
-/// <summary>
-/// First material-aware opaque image pass. It writes owned linear HDR, raw diagnostic and preview
-/// targets, never the game framebuffer. Geometry readiness is regional, not a complete-scene barrier.
-/// </summary>
+/// <summary>Owned direct HDR image targets with explicit geometry, light and driver-state validation.</summary>
 internal sealed class DirectImagePass : IDisposable
 {
     private const string Vertex = "#version 330 core\nvoid main(){vec2 p=vec2((gl_VertexID<<1)&2,gl_VertexID&2);gl_Position=vec4(p*2.0-1.0,0,1);}";
     private static readonly string[] Samplers = ["regionData", "cellData", "geometryData", "lightData",
         "receiverPosition", "receiverNormal", "receiverGeometricNormal", "receiverColor", "materialData"];
     private readonly int owner = Environment.CurrentManagedThreadId;
+    private readonly IGraphicsStatus status;
     private readonly int[] surfaceTextures = new int[5], inputs = new int[9];
     private readonly int[] samplerLocations = new int[9];
     private readonly int program, vao;
@@ -33,10 +31,10 @@ internal sealed class DirectImagePass : IDisposable
     public int Height => targetHeight;
     public long LastSurfaceUploadBytes { get; private set; }
 
-    public DirectImagePass(string sceneSource, string lightSource, string materialSource, string imageSource)
+    public DirectImagePass(string sceneSource, string lightSource, string materialSource, string imageSource, IGraphicsStatus? status = null)
     {
-        if (GL.GetInteger(GetPName.MaxTextureImageUnits) < Samplers.Length
-            || GL.GetInteger(GetPName.MaxDrawBuffers) < 3)
+        this.status = status ?? NativeGraphicsStatus.Instance;
+        if (this.status.Limit(GetPName.MaxTextureImageUnits) < Samplers.Length || this.status.Limit(GetPName.MaxDrawBuffers) < 3)
             throw new NotSupportedException("The direct pass requires nine fragment samplers and three color outputs.");
         program = MakeProgram(sceneSource, lightSource, materialSource, imageSource);
         vao = GL.GenVertexArray();
@@ -61,7 +59,7 @@ internal sealed class DirectImagePass : IDisposable
         if (finiteSamples is < 1 or > 64 || !float.IsFinite(rayMinimum) || rayMinimum < 0
             || maximumCells is < 1 or > 256 || !float.IsFinite(previewExposure) || Math.Abs(previewExposure) > 16)
             throw new ArgumentOutOfRangeException(nameof(finiteSamples));
-        int maximumSize = GL.GetInteger(GetPName.MaxTextureSize);
+        int maximumSize = status.Limit(GetPName.MaxTextureSize);
         if (surfaces.Width > maximumSize || surfaces.Height > maximumSize || surfaces.MaterialCount > maximumSize)
             throw new NotSupportedException("Surface packet exceeds the GPU texture extent.");
         CheckError("before direct pass");
@@ -110,8 +108,6 @@ internal sealed class DirectImagePass : IDisposable
     private static void Write(int texture, int width, int height, ReadOnlySpan<float> data, bool allocated)
     {
         GL.BindTexture(TextureTarget.Texture2D, texture); Parameters();
-        // Only changed immutable receiver packets enter this path; stable light-only frames allocate
-        // no surface arrays and upload no receiver pixels. A native raster producer can own these planes later.
         if (allocated) GL.TexSubImage2D(TextureTarget.Texture2D, 0, 0, 0, width, height, PixelFormat.Rgba, PixelType.Float, data.ToArray());
         else GL.TexImage2D(TextureTarget.Texture2D, 0, PixelInternalFormat.Rgba32f, width, height, 0, PixelFormat.Rgba, PixelType.Float, data.ToArray());
     }
@@ -121,13 +117,11 @@ internal sealed class DirectImagePass : IDisposable
         using var unpack = new RewriteUnpackState();
         if (framebuffer == 0) framebuffer = GL.GenFramebuffer();
         if (hdr == 0) hdr = GL.GenTexture(); if (diagnostic == 0) diagnostic = GL.GenTexture(); if (preview == 0) preview = GL.GenTexture();
-        // Keep texture names stable across resize, so restoring an externally bound preview cannot
-        // accidentally resurrect a deleted texture name. Availability stays false until the new draw.
         Allocate(hdr, PixelInternalFormat.Rgba32f); Allocate(diagnostic, PixelInternalFormat.Rgba32f); Allocate(preview, PixelInternalFormat.Rgba8);
         GL.BindFramebuffer(FramebufferTarget.DrawFramebuffer, framebuffer);
         Attach(FramebufferAttachment.ColorAttachment0, hdr); Attach(FramebufferAttachment.ColorAttachment1, diagnostic); Attach(FramebufferAttachment.ColorAttachment2, preview);
         GL.DrawBuffers(3, new[] { DrawBuffersEnum.ColorAttachment0, DrawBuffersEnum.ColorAttachment1, DrawBuffersEnum.ColorAttachment2 });
-        if (GL.CheckFramebufferStatus(FramebufferTarget.DrawFramebuffer) != FramebufferErrorCode.FramebufferComplete)
+        if (status.Framebuffer(FramebufferTarget.DrawFramebuffer) != FramebufferErrorCode.FramebufferComplete)
             throw new InvalidOperationException("Direct image framebuffer is incomplete.");
         CheckError("allocating direct targets"); targetWidth = width; targetHeight = height;
         void Allocate(int texture, PixelInternalFormat format)
@@ -153,17 +147,18 @@ internal sealed class DirectImagePass : IDisposable
         ObjectDisposedException.ThrowIf(disposed, this);
         if (Environment.CurrentManagedThreadId != owner) throw new InvalidOperationException("Direct image operations require their owning render thread.");
     }
-    private static void CheckError(string operation)
+    private void CheckError(string operation)
     {
-        ErrorCode error = GL.GetError();
+        ErrorCode error = status.Error();
         if (error != ErrorCode.NoError) throw new InvalidOperationException($"OpenGL error {error} {operation}; image not published.");
     }
     private static int MakeProgram(params string[] parts)
     {
-        int vertex = 0, fragment = 0, result = 0;
+        // Compile owns failure cleanup. After it succeeds, this scope unconditionally owns vertex.
+        int vertex = Compile(ShaderType.VertexShader, Vertex);
+        int fragment = 0, result = 0;
         try
         {
-            vertex = Compile(ShaderType.VertexShader, Vertex);
             fragment = Compile(ShaderType.FragmentShader, "#version 330 core\n" + string.Join("\n", parts));
             result = GL.CreateProgram(); GL.AttachShader(result, vertex); GL.AttachShader(result, fragment); GL.LinkProgram(result);
             GL.GetProgram(result, GetProgramParameterName.LinkStatus, out int linked);
@@ -171,7 +166,7 @@ internal sealed class DirectImagePass : IDisposable
             return result;
         }
         catch { if (result != 0) GL.DeleteProgram(result); throw; }
-        finally { if (vertex != 0) GL.DeleteShader(vertex); if (fragment != 0) GL.DeleteShader(fragment); }
+        finally { GL.DeleteShader(vertex); if (fragment != 0) GL.DeleteShader(fragment); }
     }
     private static int Compile(ShaderType type, string source)
     {
