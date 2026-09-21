@@ -181,7 +181,7 @@ public sealed class DirectImagePassTests
             }
             GL.BindFramebuffer(FramebufferTarget.DrawFramebuffer,draw);GL.BindFramebuffer(FramebufferTarget.ReadFramebuffer,read);
             GL.Viewport(3,4,8,7);GL.Enable(EnableCap.DepthTest);GL.Enable(EnableCap.ScissorTest);GL.Scissor(0,0,0,0);
-            GL.Enable(EnableCap.RasterizerDiscard);GL.Enable(EnableCap.FramebufferSrgb);GL.PolygonMode(MaterialFace.FrontAndBack,PolygonMode.Line);
+            GL.Enable(EnableCap.RasterizerDiscard);GL.Enable(EnableCap.FramebufferSrgb);GL.PolygonMode(TriangleFace.FrontAndBack,PolygonMode.Line);
             GL.Enable(IndexedEnableCap.Blend,0);GL.Disable(IndexedEnableCap.Blend,1);GL.Enable(IndexedEnableCap.Blend,2);
             GL.ColorMask(0,false,true,false,true);GL.ColorMask(1,true,false,true,false);GL.ColorMask(2,false,false,false,false);
             GL.ActiveTexture(TextureUnit.Texture6);GL.BindTexture(TextureTarget.Texture2D,texture);GL.BindSampler(6,sampler);GL.BindVertexArray(vao);

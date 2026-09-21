@@ -41,7 +41,7 @@ internal sealed class RewriteDrawState : IDisposable
         foreach (EnableCap cap in Caps) GL.Disable(cap);
         for (int i = 0; i < blends.Length; i++)
         { GL.Disable(IndexedEnableCap.Blend, i); GL.ColorMask(i, true, true, true, true); }
-        GL.PolygonMode(MaterialFace.FrontAndBack, PolygonMode.Fill);
+        GL.PolygonMode(TriangleFace.FrontAndBack, PolygonMode.Fill);
         for (int i = 0; i < samplers.Length; i++) GL.BindSampler(i, 0);
     }
     public void Dispose()
@@ -56,8 +56,8 @@ internal sealed class RewriteDrawState : IDisposable
         GL.BindFramebuffer(FramebufferTarget.DrawFramebuffer, drawFramebuffer);
         GL.BindFramebuffer(FramebufferTarget.ReadFramebuffer, readFramebuffer);
         GL.Viewport(viewport[0], viewport[1], viewport[2], viewport[3]);
-        if (polygon[0] == polygon[1]) GL.PolygonMode(MaterialFace.FrontAndBack, (PolygonMode)polygon[0]);
-        else { GL.PolygonMode(MaterialFace.Front, (PolygonMode)polygon[0]); GL.PolygonMode(MaterialFace.Back, (PolygonMode)polygon[1]); }
+        if (polygon[0] == polygon[1]) GL.PolygonMode(TriangleFace.FrontAndBack, (PolygonMode)polygon[0]);
+        else { GL.PolygonMode(TriangleFace.Front, (PolygonMode)polygon[0]); GL.PolygonMode(TriangleFace.Back, (PolygonMode)polygon[1]); }
         for (int i = 0; i < Caps.Length; i++) { if (enabled[i]) GL.Enable(Caps[i]); else GL.Disable(Caps[i]); }
         for (int i = 0; i < blends.Length; i++)
         {
