@@ -27,8 +27,6 @@ jobs:
           mkdir -p "$RUNNER_TEMP/perf-evidence"
           git rev-parse HEAD > "$RUNNER_TEMP/perf-evidence/staging-commit.txt"
           python3 tools/performance/staging/apply.py
-          # The zero-weight GLSL experiment passed numerical equivalence, but does not have
-          # an established GPU benefit. Withdraw it before build: this lot is CPU-only.
           git restore --source=cdcc00ae42e9e4ddc279ac10cd5f4b72237b6ceb -- src/VintageRTX/assets/vintagertx/shaders/display.frag
           git diff --exit-code -- src/VintageRTX/assets
           git diff --check
@@ -59,11 +57,14 @@ jobs:
             dotnet restore "$project" --source https://api.nuget.org/v3/index.json
             dotnet build "$project" -c Release --no-restore
           done 2>&1 | tee "$RUNNER_TEMP/perf-evidence/build.log"
-      - name: Compare exact historical solver and measure both CPU implementations
+          dotnet build-server shutdown
+      - name: Qualify the unchanged cold-cache multipass RenderLab before CPU benchmarks
         run: |
           set -euo pipefail
-          dotnet build-server shutdown
-          python3 tools/performance/compare_liquid.py --output-directory "$RUNNER_TEMP/perf-evidence" 2>&1 | tee "$RUNNER_TEMP/perf-evidence/liquid-comparison.log"
+          export LD_LIBRARY_PATH="$VINTAGE_STORY/Lib:${LD_LIBRARY_PATH:-}"
+          export MESA_SHADER_CACHE_DIR="$RUNNER_TEMP/perf-renderlab-cold"
+          mkdir -p "$MESA_SHADER_CACHE_DIR"
+          timeout 180s xvfb-run -a dotnet test tools/VintageRTX.RenderLab/VintageRTX.RenderLab.csproj -c Release --no-build --no-restore --filter 'FullyQualifiedName~ProductionShaderCompilesAndRendersHeadlessly' --logger 'trx;LogFileName=renderlab.trx' --results-directory "$RUNNER_TEMP/perf-evidence" 2>&1 | tee "$RUNNER_TEMP/perf-evidence/renderlab.log"
       - name: Execute both shared selections and all liquid classes
         run: |
           set -euo pipefail
@@ -72,16 +73,17 @@ jobs:
             xvfb-run -a dotnet test tests/VintageRTX.Test/VintageRTX.Test.csproj -c Release --no-build --no-restore --settings "tests/$selection.runsettings" --logger "trx;LogFileName=$selection.trx" --results-directory "$RUNNER_TEMP/perf-evidence" 2>&1 | tee "$RUNNER_TEMP/perf-evidence/$selection.log"
           done
           xvfb-run -a dotnet test tests/VintageRTX.Test/VintageRTX.Test.csproj -c Release --no-build --no-restore --filter 'FullyQualifiedName~Liquid' --logger 'trx;LogFileName=liquids.trx' --results-directory "$RUNNER_TEMP/perf-evidence" 2>&1 | tee "$RUNNER_TEMP/perf-evidence/liquids.log"
-      - name: Execute GLSL regressions and cold-cache multipass RenderLab
+      - name: Execute unchanged numerical GLSL suites
         run: |
           set -euo pipefail
-          export LD_LIBRARY_PATH="$VINTAGE_STORY/Lib:${LD_LIBRARY_PATH:-}"
           for suite in recovery feedback materials transport; do
             "$RUNNER_TEMP/glsl-tests/bin/python" -m unittest discover -s "tests/$suite" -v 2>&1 | tee "$RUNNER_TEMP/perf-evidence/glsl-$suite.log"
           done
-          export MESA_SHADER_CACHE_DIR="$RUNNER_TEMP/perf-renderlab-cold"
-          mkdir -p "$MESA_SHADER_CACHE_DIR"
-          timeout 180s xvfb-run -a dotnet test tools/VintageRTX.RenderLab/VintageRTX.RenderLab.csproj -c Release --no-build --no-restore --filter 'FullyQualifiedName~ProductionShaderCompilesAndRendersHeadlessly' --logger 'trx;LogFileName=renderlab.trx' --results-directory "$RUNNER_TEMP/perf-evidence" 2>&1 | tee "$RUNNER_TEMP/perf-evidence/renderlab.log"
+      - name: Compare exact historical solver and measure both CPU implementations
+        run: |
+          set -euo pipefail
+          dotnet build-server shutdown
+          python3 tools/performance/compare_liquid.py --output-directory "$RUNNER_TEMP/perf-evidence" 2>&1 | tee "$RUNNER_TEMP/perf-evidence/liquid-comparison.log"
       - name: Reject incomplete results and publish tested ordinary sources without force
         run: |
           set -euo pipefail
