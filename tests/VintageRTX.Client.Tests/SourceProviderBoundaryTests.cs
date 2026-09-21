@@ -36,7 +36,7 @@ public sealed class SourceProviderBoundaryTests
     private sealed class EmitterEntity : EntityPlayer
     {
         internal byte[]? Hsv = [5, 7, 16]; internal bool Fail;
-        internal void Attributes(JsonObject attributes) => Properties = new EntityProperties {Attributes = attributes};
+        internal void SetDefinitionAttributes(JsonObject attributes) => Properties = new EntityProperties {Attributes = attributes};
         public override byte[] LightHsv => Fail ? throw new InvalidOperationException("controlled-entity-provider") : Hsv!;
     }
     private static EmissionAssetCatalog Catalog(LifecycleHost host)
@@ -87,9 +87,9 @@ public sealed class SourceProviderBoundaryTests
         host.Tick(); int warnings = host.Messages.Count(m => m.Contains("Source provider")); Assert.AreEqual(128, warnings);
         host.Tick(); Assert.AreEqual(warnings, host.Messages.Count(m => m.Contains("Source provider")));
         host.Entities!.Clear(); var valid = new EmitterEntity {EntityId = 1000, Code = new("test:configured")}; valid.Pos.SetPos(5, 4, 4);
-        valid.Attributes(JsonObject.FromJson("""{"vintageRtxEmission":{"enabled":false}}""")); host.Entities[1000] = valid;
+        valid.SetDefinitionAttributes(JsonObject.FromJson("""{"vintageRtxEmission":{"enabled":false}}""")); host.Entities[1000] = valid;
         host.Tick(); observer.OnRenderFrame(0, EnumRenderStage.Before); Assert.AreEqual(0, observer.CurrentFrame!.Samples.Length);
-        valid.Attributes(JsonObject.FromJson("""{"vintageRtxEmission":{"enabled":true}}""")); host.Tick(); host.Milliseconds++;
+        valid.SetDefinitionAttributes(JsonObject.FromJson("""{"vintageRtxEmission":{"enabled":true}}""")); host.Tick(); host.Milliseconds++;
         observer.OnRenderFrame(0, EnumRenderStage.Before); Assert.AreEqual(1, observer.CurrentFrame!.Samples.Length);
         valid.Pos.X = double.NaN; host.Tick(); host.Milliseconds++; observer.OnRenderFrame(0, EnumRenderStage.Before);
         Assert.AreEqual(0, observer.CurrentFrame!.Samples.Length);
