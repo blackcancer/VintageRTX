@@ -8,8 +8,11 @@ uniform ivec3 sceneAnchor;
 struct SceneQuery { int status; float distance; vec3 normal; int primitive; int visited; };
 // 0 clear, 1 mesh hit, 2 unknown, 3 unsupported, 4 budget exhaustion, 5 invalid input.
 vec4 geometryAt(int index) { return texelFetch(geometryData,ivec2(index%256,index/256),0); }
-int floorDiv8(int x) { int q=x/8;return q-((x<0 && x%8!=0)?1:0); }
-int positiveMod(int x,int m) { return (x%m+m)%m; }
+// GLSL does not define % with a negative operand. -(x+1) is nonnegative even
+// for INT_MIN, unlike abs(x). Keep the division exact; floating floor loses
+// block precision at large world coordinates. Both callers use m > 0.
+int floorDiv8(int x) { return x>=0 ? x/8 : -1-(-(x+1))/8; }
+int positiveMod(int x,int m) { return x>=0 ? x%m : m-1-(-(x+1))%m; }
 ivec4 cellAt(ivec3 cell) {
     ivec3 r=ivec3(floorDiv8(cell.x),floorDiv8(cell.y),floorDiv8(cell.z));
     int slot=positiveMod(r.x,3)+3*positiveMod(r.y,3)+9*positiveMod(r.z,3);
