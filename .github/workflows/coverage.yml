@@ -1,0 +1,61 @@
+name: Production line and branch coverage
+on:
+  push:
+    branches: ['dev/renderer-rewrite-20260921']
+  pull_request:
+    branches: ['dev/renderer-rewrite-20260921']
+permissions:
+  contents: read
+concurrency:
+  group: rewrite-coverage-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  coverage:
+    name: Measure ALL production CSharp sources (100 percent target)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      LIBGL_ALWAYS_SOFTWARE: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68
+        with:
+          dotnet-version: '10.0.401'
+      - name: Prepare official client references and report provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/vs" artifacts/coverage
+          git rev-parse HEAD > artifacts/commit.txt
+          dotnet --info > artifacts/dotnet.txt
+          git archive --format=zip HEAD -o artifacts/measured-sources.zip
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb libglfw3 libgl1-mesa-dri libegl1-mesa-dev
+          curl -fL --retry 2 --max-time 180 https://cdn.vintagestory.at/gamefiles/stable/vs_client_linux-x64_1.22.7.tar.gz -o "$RUNNER_TEMP/client.tar.gz"
+          sha256sum "$RUNNER_TEMP/client.tar.gz" > artifacts/client.sha256
+          tar -xzf "$RUNNER_TEMP/client.tar.gz" -C "$RUNNER_TEMP/vs"
+          dll=$(find "$RUNNER_TEMP/vs" -name VintagestoryAPI.dll -print -quit)
+          test -n "$dll"
+          echo "VINTAGE_STORY=$(dirname "$dll")" >> "$GITHUB_ENV"
+      - name: Instrument and run every core test
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet test tests/VintageRTX.Core.Tests/VintageRTX.Core.Tests.csproj -c Release --collect:'XPlat Code Coverage' --settings tools/coverage/production.runsettings --logger 'trx;LogFileName=core.trx' --results-directory artifacts/coverage/core 2>&1 | tee artifacts/core-coverage.log
+      - name: Instrument and run every client and actual OpenGL test
+        shell: bash
+        run: |
+          set -euo pipefail
+          export LD_LIBRARY_PATH="$VINTAGE_STORY/Lib:${LD_LIBRARY_PATH:-}"
+          xvfb-run -a dotnet test tests/VintageRTX.Client.Tests/VintageRTX.Client.Tests.csproj -c Release --collect:'XPlat Code Coverage' --settings tools/coverage/production.runsettings --logger 'trx;LogFileName=client.trx' --results-directory artifacts/coverage/client 2>&1 | tee artifacts/client-coverage.log
+      - name: Merge actual hits and list every uncovered source and edge
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/coverage/report.py --require-full
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: rewrite-coverage-${{ github.sha }}
+          path: artifacts/
+          if-no-files-found: error

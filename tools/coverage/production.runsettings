@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RunSettings>
+  <DataCollectionRunSettings>
+    <DataCollectors>
+      <DataCollector friendlyName="XPlat Code Coverage">
+        <Configuration>
+          <Format>json,cobertura,opencover</Format>
+          <Include>[VintageRTX.Core]*,[VintageRTX]*</Include>
+          <IncludeTestAssembly>false</IncludeTestAssembly>
+          <SkipAutoProps>false</SkipAutoProps>
+          <SingleHit>false</SingleHit>
+          <UseSourceLink>false</UseSourceLink>
+        </Configuration>
+      </DataCollector>
+    </DataCollectors>
+  </DataCollectionRunSettings>
+</RunSettings>
