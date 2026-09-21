@@ -65,7 +65,9 @@ public sealed class SourceProviderBoundaryTests
         StringAssert.Contains(observer.Describe(), "watched blocks=0");
         host.Loaded = true; block.Fail = true; host.Raise("BlockChanged", pos, block); host.Tick();
         Assert.IsTrue(host.Messages.Any(m => m.Contains("controlled-block-provider")));
-        block.Fail = false; block.Code = new("other:intrinsic"); block.Hsv = [5, 7, 0]; block.LightHsv[2] = 16;
+        block.Fail = false; block.Code = new("other:intrinsic"); block.Hsv = [5, 7, 0];
+        block.LightHsv = new ThreeBytes(new byte[] {5, 7, 16});
+        Assert.AreEqual((byte)16, block.LightHsv[2], "Fixture must expose the intended intrinsic emission.");
         host.Raise("BlockChanged", pos, block); host.Tick(); StringAssert.Contains(observer.Describe(), "watched blocks=1");
         block.Hsv = [5, 7, 16]; host.Tick(); host.Milliseconds++;
         observer.OnRenderFrame(0, EnumRenderStage.Before); Assert.AreEqual(1, observer.CurrentFrame!.Samples.Length);
@@ -106,7 +108,6 @@ public sealed class SourceProviderBoundaryTests
         for(int f = 0; f < 6; f++) block.SideOpaque[f] = true;
         host.Set(new(4, 4, 4, 0), block); host.Raise("BlockChanged", new BlockPos(4, 4, 4, 0), host.Air); host.Tick();
         Assert.IsTrue(host.Messages.Any(m => m.Contains("geometry:test:missing-tessellator")));
-        // The CPU registry exists, but this invalid anchor is rejected before any light texture allocation.
         host.Player.Pos.X = (double)int.MaxValue + 8; observer.OnRenderFrame(0, EnumRenderStage.Before);
         Assert.IsNotNull(observer.CurrentFrame); StringAssert.Contains(observer.Describe(), "GPU light frame=-1");
         host.Player.Pos.X = 4; host.Raise("LeaveWorld"); host.Tick();
@@ -124,7 +125,6 @@ public sealed class SourceProviderBoundaryTests
     {
         if(GameTestIsolation.InvokeIfDefault(typeof(SourceProviderBoundaryTests), nameof(TeardownMakesRetainedCallbacksInertAndLargeNoticeBatchesRemainBounded))) return;
         var host = new LifecycleHost(); var observer = new ClientSourceObserver(host.Api, Catalog(host));
-        // Simulate provider callbacks retained before the world lifecycle initialized its registry.
         InvokeCallback(observer, "SampleRegion", new RegionId(), 0);
         InvokeCallback(observer, "ObserveBlock", 0, 0, 0, 0, true);
         InvokeCallback(observer, "RemoveSource", new LightId());
