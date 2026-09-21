@@ -13,8 +13,7 @@
     <Reference Include="OpenTK.Windowing.Common"><HintPath>$(VintageStoryPath)/Lib/OpenTK.Windowing.Common.dll</HintPath></Reference>
     <Reference Include="OpenTK.Windowing.Desktop"><HintPath>$(VintageStoryPath)/Lib/OpenTK.Windowing.Desktop.dll</HintPath></Reference>
     <Reference Include="OpenTK.Windowing.GraphicsLibraryFramework"><HintPath>$(VintageStoryPath)/Lib/OpenTK.Windowing.GraphicsLibraryFramework.dll</HintPath></Reference>
-    <Content Include="../../src/VintageRTX.Client/assets/vintagertx/shaderincludes/scene-query.glsl" Link="scene-query.glsl" CopyToOutputDirectory="PreserveNewest" />
-    <Content Include="../../src/VintageRTX.Client/assets/vintagertx/shaderincludes/light-query.glsl" Link="light-query.glsl" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="../../src/VintageRTX.Client/assets/vintagertx/shaderincludes/*.glsl" Link="%(Filename)%(Extension)" CopyToOutputDirectory="Always" />
     <Content Include="../../src/VintageRTX.Client/assets/vintagertx/config/emission.json" Link="Fixtures/emission.json" CopyToOutputDirectory="Always" />
     <Content Include="../../examples/emission-assets/assets/vrtxemissionexample/patches/emission.json" Link="Fixtures/example-patch.json" CopyToOutputDirectory="Always" />
   </ItemGroup>

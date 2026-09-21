@@ -18,6 +18,7 @@ public sealed class GpuSceneData
     private float[] packedGeometry=new float[GeometryWidth*4];
     private CellSceneFrame? previous;
     private int[] changed=Array.Empty<int>();
+    public CellSceneFrame? SourceFrame=>previous;
     public ReadOnlySpan<int> RegionData=>regions;
     public ReadOnlySpan<int> CellData=>cells;
     public ReadOnlySpan<float> GeometryData=>packedGeometry;
@@ -90,7 +91,6 @@ public sealed class GpuSceneData
         if(nodeEnd+triangles.Length*3>MaximumGeometryTexels) throw new InvalidOperationException("Geometry cache capacity exceeded; coverage is NOT a miss.");
         foreach(Node node in nodes)
         {
-            // Outward-rounded bounds include vertices rounded to GPU single precision.
             Add(MathF.BitDecrement((float)node.Bounds.Minimum.X),MathF.BitDecrement((float)node.Bounds.Minimum.Y),MathF.BitDecrement((float)node.Bounds.Minimum.Z),0);
             Add(MathF.BitIncrement((float)node.Bounds.Maximum.X),MathF.BitIncrement((float)node.Bounds.Maximum.Y),MathF.BitIncrement((float)node.Bounds.Maximum.Z),0);
             Add(nodeEnd+node.First*3,node.Count,start+node.Escape*3,0);
