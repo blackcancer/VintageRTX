@@ -14,13 +14,13 @@ jobs:
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68
         with:
           dotnet-version: '10.0.401'
-      - name: Restore exact project packages and acquire official reference files
+      - name: Restore exact packages and acquire official references
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/vs" artifacts
+          mkdir -p "$RUNNER_TEMP/vs" artifacts/sdk artifacts/packages artifacts/game
           curl -fL --retry 2 --max-time 180 https://cdn.vintagestory.at/gamefiles/stable/vs_client_linux-x64_1.22.7.tar.gz -o "$RUNNER_TEMP/client.tar.gz"
-          sha256sum "$RUNNER_TEMP/client.tar.gz" > artifacts/client.sha256
+          sha256sum "$RUNNER_TEMP/client.tar.gz" > artifacts/game/client.sha256
           tar -xzf "$RUNNER_TEMP/client.tar.gz" -C "$RUNNER_TEMP/vs"
           dll=$(find "$RUNNER_TEMP/vs" -name VintagestoryAPI.dll -print -quit)
           test -n "$dll"
@@ -28,20 +28,50 @@ jobs:
           dotnet restore tests/VintageRTX.Core.Tests/VintageRTX.Core.Tests.csproj
           dotnet restore tests/VintageRTX.Client.Tests/VintageRTX.Client.Tests.csproj
           stage="$RUNNER_TEMP/offline"
-          mkdir -p "$stage/sdk" "$stage/packages" "$stage/game"
-          cp -a "$DOTNET_ROOT"/. "$stage/sdk/"
-          cp -a "$HOME/.nuget/packages"/. "$stage/packages/"
+          mkdir -p "$stage/sdk/sdk" "$stage/sdk/host/fxr" "$stage/sdk/shared/Microsoft.NETCore.App" "$stage/sdk/packs" "$stage/game"
+          cp "$DOTNET_ROOT/dotnet" "$stage/sdk/"
+          cp -a "$DOTNET_ROOT/sdk/10.0.401" "$stage/sdk/sdk/"
+          for family in host/fxr shared/Microsoft.NETCore.App; do
+            version=$(find "$DOTNET_ROOT/$family" -mindepth 1 -maxdepth 1 -type d -name '10.*' | sort -V | tail -1)
+            test -n "$version"
+            cp -a "$version" "$stage/sdk/$family/"
+          done
+          for family in Microsoft.NETCore.App.Ref Microsoft.NETCore.App.Host.linux-x64 Microsoft.AspNetCore.App.Ref; do
+            version=$(find "$DOTNET_ROOT/packs/$family" -mindepth 1 -maxdepth 1 -type d -name '10.*' | sort -V | tail -1)
+            test -n "$version"
+            mkdir -p "$stage/sdk/packs/$family"
+            cp -a "$version" "$stage/sdk/packs/$family/"
+          done
           cd "$VINTAGE_STORY"
-          find . -type f \( -iname '*.dll' -o -iname '*.runtimeconfig.json' -o -iname '*.deps.json' -o -path './assets/*/shaders/*' -o -path './assets/*/shaderincludes/*' -o -path './assets/*/blocktypes/*' -o -path './assets/*/itemtypes/*' \) -print0 | tar --null -T - -cf - | tar -xf - -C "$stage/game"
+          find . -type f \( -iname '*.dll' -o -iname '*.so' -o -iname '*.runtimeconfig.json' -o -iname '*.deps.json' -o -path './assets/*/shaders/*' -o -path './assets/*/shaderincludes/*' -o -path './assets/*/blocktypes/*' -o -path './assets/*/itemtypes/*' -o -path './assets/*/shapes/*' \) -print0 | tar --null -T - -cf - | tar -xf - -C "$stage/game"
           cd "$GITHUB_WORKSPACE"
-          git rev-parse HEAD > artifacts/commit.txt
-          dotnet --info > artifacts/dotnet.txt
-          tar -czf artifacts/offline-toolchain.tar.gz -C "$stage" sdk packages game
-          sha256sum artifacts/offline-toolchain.tar.gz > artifacts/offline-toolchain.sha256
+          git archive --format=zip HEAD -o artifacts/packages/sources.zip
+          git rev-parse HEAD > artifacts/packages/commit.txt
+          dotnet --info > artifacts/sdk/dotnet.txt
+          tar -czf artifacts/sdk/sdk.tar.gz -C "$stage" sdk
+          tar -czf artifacts/packages/packages.tar.gz -C "$HOME/.nuget" packages
+          tar -czf artifacts/game/game.tar.gz -C "$stage" game
+          for part in sdk packages game; do
+            sha256sum artifacts/$part/* > artifacts/$part/SHA256SUMS
+          done
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: rewrite-offline-toolchain-${{ github.sha }}
-          path: artifacts/
+          name: rewrite-sdk-${{ github.sha }}
+          path: artifacts/sdk/
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: rewrite-packages-${{ github.sha }}
+          path: artifacts/packages/
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: rewrite-game-refs-${{ github.sha }}
+          path: artifacts/game/
           retention-days: 1
           compression-level: 0
           if-no-files-found: error
