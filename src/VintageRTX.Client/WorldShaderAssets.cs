@@ -9,7 +9,7 @@ internal sealed class WorldShaderAssets(IAssetManager assets) : IDisposable
 {
     private sealed record Edit(IAsset Asset, byte[] Original, byte[] Patched);
     private readonly List<Edit> edits = new();
-    public bool Installed => edits.Count == 4;
+    public bool Installed => edits.Count == 8;
     public string? LastError { get; private set; }
     public bool Install()
     {
@@ -22,14 +22,14 @@ internal sealed class WorldShaderAssets(IAssetManager assets) : IDisposable
             string material = Read("vintagertx:shaderincludes/material-query.glsl");
             string world = Read("vintagertx:shaderincludes/world-lighting.glsl");
             var candidate = new List<Edit>();
-            foreach (string name in new[] { "chunkopaque", "entityanimated" })
+            foreach (string name in new[] { "chunkopaque", "chunktopsoil", "entityanimated", "standard" })
             {
                 IAsset vertex = Get("game:shaders/" + name + ".vsh"), fragment = Get("game:shaders/" + name + ".fsh");
                 WorldShaderPair pair = WorldShaderSource.Build(name, vertex.ToText(), fragment.ToText(), fog, scene, light, material, world);
                 candidate.Add(new(vertex, vertex.Data, Encoding.UTF8.GetBytes(pair.Vertex)));
                 candidate.Add(new(fragment, fragment.Data, Encoding.UTF8.GetBytes(pair.Fragment)));
             }
-            // Validation of both stage pairs has succeeded. No partly patched native pipeline.
+            // Validation of every stage pair has succeeded. No partly patched native pipeline.
             foreach (Edit edit in candidate) edit.Asset.Data = edit.Patched;
             edits.AddRange(candidate); LastError = null; return true;
         }

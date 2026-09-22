@@ -4,7 +4,7 @@
 uniform sampler2D lightData;
 uniform int lightCount;
 struct PointIncident { vec3 radiance; vec3 direction; int status; };
-// Counters count sampled visibility rays; an unresolved sample is never renormalized away.
+// Counters count sampled visibility rays; an unresolved emitterSample is never renormalized away.
 struct DiffuseDirect { vec3 radiance; int unresolved; int blocked; };
 struct EmitterSegment { vec3 weight; vec3 direction; float distance; int status; };
 
@@ -52,14 +52,14 @@ EmitterSegment sampleEmitterSegment(vec3 receiver,vec4 source,vec3 intensity,vec
 PointIncident traceEmitterIncident(vec3 receiver,vec4 source,vec3 intensity,vec2 sampleUv,
     float rayMinimum,int maximumCells) {
     if(rayMinimum<0.0 || isnan(rayMinimum) || isinf(rayMinimum))return PointIncident(vec3(0),vec3(0),5);
-    EmitterSegment sample=sampleEmitterSegment(receiver,source,intensity,sampleUv);
-    if(sample.status!=0)return PointIncident(vec3(0),sample.direction,sample.status);
-    if(all(equal(sample.weight,vec3(0))))return PointIncident(vec3(0),sample.direction,0);
-    if(sample.distance<=rayMinimum)return PointIncident(vec3(0),sample.direction,5);
+    EmitterSegment emitterSample=sampleEmitterSegment(receiver,source,intensity,sampleUv);
+    if(emitterSample.status!=0)return PointIncident(vec3(0),emitterSample.direction,emitterSample.status);
+    if(all(equal(emitterSample.weight,vec3(0))))return PointIncident(vec3(0),emitterSample.direction,0);
+    if(emitterSample.distance<=rayMinimum)return PointIncident(vec3(0),emitterSample.direction,5);
     // Stop at the sampled near surface, not the center: an obstacle behind that surface cannot
     // occlude this path. Every real obstacle in front is retained, including the source's cage.
-    SceneQuery visibility=traceScene(receiver,sample.direction,rayMinimum,sample.distance,maximumCells);
-    return PointIncident(visibility.status==0 ? sample.weight : vec3(0),sample.direction,visibility.status);
+    SceneQuery visibility=traceScene(receiver,emitterSample.direction,rayMinimum,emitterSample.distance,maximumCells);
+    return PointIncident(visibility.status==0 ? emitterSample.weight : vec3(0),emitterSample.direction,visibility.status);
 }
 PointIncident queryEmitterIncident(vec3 receiver,int index,vec2 sampleUv,float rayMinimum,int maximumCells) {
     if(!validLightTable() || index<0 || index>=lightCount)return PointIncident(vec3(0),vec3(0),5);
@@ -109,16 +109,16 @@ DiffuseDirect queryDiffuseDirectSampled(vec3 receiver,vec3 shadingNormal,vec3 ge
         vec3 sum=vec3(0);
         for(int j=0;j<64;j++) {
             if(j>=count)break;
-            EmitterSegment sample=sampleEmitterSegment(receiver,source,intensity,emitterQuadrature(j,count,rotation));
-            if(sample.status!=0){result.unresolved++;continue;}
-            float cosine=dot(shadingNormal,sample.direction);
-            if(cosine<=0.0 || dot(geometricNormal,sample.direction)<=0.0)continue;
-            if(rayMinimum<0.0 || isnan(rayMinimum) || isinf(rayMinimum) || sample.distance<=rayMinimum)
+            EmitterSegment emitterSample=sampleEmitterSegment(receiver,source,intensity,emitterQuadrature(j,count,rotation));
+            if(emitterSample.status!=0){result.unresolved++;continue;}
+            float cosine=dot(shadingNormal,emitterSample.direction);
+            if(cosine<=0.0 || dot(geometricNormal,emitterSample.direction)<=0.0)continue;
+            if(rayMinimum<0.0 || isnan(rayMinimum) || isinf(rayMinimum) || emitterSample.distance<=rayMinimum)
             {result.unresolved++;continue;}
-            SceneQuery visibility=traceScene(receiver,sample.direction,rayMinimum,sample.distance,maximumCells);
+            SceneQuery visibility=traceScene(receiver,emitterSample.direction,rayMinimum,emitterSample.distance,maximumCells);
             if(visibility.status>1)result.unresolved++;
             else if(visibility.status==1)result.blocked++;
-            else sum+=sample.weight*cosine;
+            else sum+=emitterSample.weight*cosine;
         }
         // Divide by ALL generated directions. Renormalizing only clear samples would erase penumbrae.
         result.radiance+=linearAlbedo*sum/(3.141592653589793*float(count));

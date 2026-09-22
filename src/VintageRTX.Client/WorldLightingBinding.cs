@@ -46,8 +46,8 @@ internal sealed class WorldLightingBinding : IDisposable
         if (!frame.Valid || !reference.IsFinite || mode is < 1 or > 2 || finiteSamples is < 1 or > 64
             || !float.IsFinite(exposure) || Math.Abs(exposure) > 16)
             throw new ArgumentException("Invalid world frame or lighting options.");
-        if (programIds.Length != 2 || programIds.Distinct().Count() != 2 || programIds.Any(p => !HasBridge(p)))
-            throw new InvalidOperationException("Both native opaque programs must carry the world bridge.");
+        if (programIds.Length < 1 || programIds.Distinct().Count() != programIds.Length || programIds.Any(p => !HasBridge(p)))
+            throw new InvalidOperationException("All requested native programs must carry the world bridge.");
         int limit = GL.GetInteger(GetPName.MaxTextureImageUnits);
         if (limit < 16) throw new NotSupportedException("World lighting requires 16 fragment texture units.");
         programs = (int[])programIds.Clone(); firstUnit = limit - 4;

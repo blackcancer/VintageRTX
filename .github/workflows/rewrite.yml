@@ -75,6 +75,7 @@ jobs:
     env:
       LIBGL_ALWAYS_SOFTWARE: '1'
       VINTAGERTX_DIRECT_EVIDENCE: '${{ github.workspace }}/artifacts/direct-image'
+      VINTAGERTX_WORLD_EVIDENCE: '${{ github.workspace }}/artifacts/native-world'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1, node24
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0, node24
@@ -109,13 +110,20 @@ jobs:
           assert c is not None and int(c.get('total','0'))>=25
           assert c.get('total')==c.get('executed')==c.get('passed'),c.attrib
           methods=r.findall('.//{*}TestMethod')
-          for name in ('EmissionAssetTests','CandleRuntimeCountTests','DirectImagePassTests'):
+          for name in ('EmissionAssetTests','CandleRuntimeCountTests','DirectImagePassTests','NativeWorldLightingTests','WorldShaderAssetTests'):
               assert any(name in t.get('className','') for t in methods),name
           evidence=Path(os.environ['VINTAGERTX_DIRECT_EVIDENCE'])
           meta=json.loads((evidence/'direct-image.json').read_text())
           assert meta['width']==40 and meta['height']==24
           assert (evidence/'direct-hdr-rgba32f.bin').stat().st_size==40*24*4*4
           assert (evidence/'direct-preview.ppm').is_file()
+          world=json.loads((Path(os.environ['VINTAGERTX_WORLD_EVIDENCE'])/'native-world-pixels.json').read_text())
+          assert {p['name'] for p in world['programs']}=={'chunkopaque','chunktopsoil','entityanimated','standard'}
+          assert world['geometryBytesBeforeExtinction']==world['geometryBytesAfterExtinction']
+          for p in world['programs']:
+              assert p['lit']==p['changedBakedLight'],p['name']
+              assert p['extinguished'][:3]==[0,0,0],p['name']
+              assert p['lit'][0]>p['lit'][2],p['name']
           print(c.attrib)
           PY
           cmp src/VintageRTX.Client/assets/vintagertx/config/emission.json src/VintageRTX.Client/bin/Release/Mods/vintagertx/assets/vintagertx/config/emission.json

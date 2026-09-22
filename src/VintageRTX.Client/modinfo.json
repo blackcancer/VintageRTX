@@ -1,6 +1,14 @@
 {
-  "type": "code", "modid": "vintagertx", "name": "VintageRTX Rewrite - Foundation",
-  "authors": ["InitSysRev"], "version": "0.3.0-dev.1", "side": "Client",
-  "description": "Rewrite foundation and source-observation diagnostics. GPU world rendering is NOT implemented in this milestone.",
-  "dependencies": {"game": "1.22.7"}
+  "type": "code",
+  "modid": "vintagertx",
+  "name": "VintageRTX Rewrite - Native World Lighting",
+  "authors": [
+    "InitSysRev"
+  ],
+  "version": "0.3.1-dev.1",
+  "side": "Client",
+  "description": "Native world diffuse ray-lighting bridge with patchable block/entity emission and explicit coverage diagnostics. Experimental: secondary reflections, liquid optics and animated caster geometry are not replaced.",
+  "dependencies": {
+    "game": "1.22.7"
+  }
 }

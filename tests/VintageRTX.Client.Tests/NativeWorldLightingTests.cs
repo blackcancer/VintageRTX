@@ -40,6 +40,8 @@ public sealed class NativeWorldLightingTests
     {
         using var gl=PortableGlContext.Create();
         foreach(var c in new[]{("chunkopaque",0,0,0,0,0),("chunkopaque",1,0,1,0,0),("chunkopaque",1,0,2,1,0),
+            ("chunktopsoil",0,0,0,0,0),("chunktopsoil",1,0,2,1,0),
+            ("standard",0,0,0,0,0),("standard",1,0,2,0,0),("standard",1,0,1,0,1),
             ("entityanimated",0,0,0,0,0),("entityanimated",1,0,2,0,0),("entityanimated",0,1,0,0,0),("entityanimated",1,0,1,0,1)})
         {
             int program=Program(c.Item1,c.Item2,c.Item3,c.Item4,c.Item5,c.Item6);
@@ -114,6 +116,101 @@ public sealed class NativeWorldLightingTests
     }
 
     [TestMethod]
+    public void TopsoilAndDroppedItemShadersConsumeRealAlbedoAndImmediateLightChanges()
+    {
+        using var gl=PortableGlContext.Create();using var draw=new NativeProbe();
+        var scene=new CellScene(new(Guid.NewGuid(),0));
+        for(int z=0;z<8;z++)for(int y=0;y<8;y++)for(int x=0;x<8;x++)scene.Observe(new(x,y,z),CellGeometry.Empty);
+        var snapshot=scene.Capture();var gp=new GpuSceneData();gp.Update(snapshot);
+        using var geometry=new SceneTextureSet();geometry.Upload(gp);using var lights=new LightTexture();
+        var registry=new LightRegistry(snapshot.World);var lp=new GpuLightData();
+        registry.Upsert(default,new(new(3.5,3.5,4),new(8,2,.5f),EmissionProfile.Steady));
+        WorldGpuFrame Frame(long index) {var f=registry.Capture(index,index);lp.Update(f,default);lights.Upload(lp);
+            return new(snapshot,f,default,geometry.RegionTexture,geometry.CellTexture,geometry.GeometryTexture,lights.Texture);}
+        var first=Frame(1);float[] terrain=draw.Render(first,1);
+        var names=new[]{"chunkopaque","entityanimated","chunktopsoil","standard"};
+        var native=new float[4][];var lit=new float[4][];var blue=new float[4][];var dark=new float[4][];
+        for(int index=0;index<4;index++) {
+            native[index]=draw.Render(first,0,programIndex:index);
+            lit[index]=draw.Render(first,1,programIndex:index);
+            blue[index]=draw.Render(first,1,blueBaked:true,programIndex:index);
+            Assert.IsTrue(lit[index][0]>lit[index][2]);
+            for(int channel=0;channel<3;channel++)Assert.AreEqual(terrain[channel],lit[index][channel],.0001f);
+            CollectionAssert.AreEqual(lit[index],blue[index]);
+        }
+        long bytes=geometry.TotalUploadBytes;registry.Remove(default);var off=Frame(2);
+        for(int index=0;index<4;index++) {
+            dark[index]=draw.Render(off,1,programIndex:index);
+            Assert.IsTrue(dark[index].Take(3).All(c=>c==0));
+        }
+        Assert.AreEqual(bytes,geometry.TotalUploadBytes);
+        if(Environment.GetEnvironmentVariable("VINTAGERTX_WORLD_EVIDENCE") is {Length:>0} destination) {
+            Directory.CreateDirectory(destination);
+            var report=new {
+                scope="Official 1.22.7 native shader programs rasterizing a controlled textured mesh; NOT a game-world capture",
+                renderer=GL.GetString(StringName.Renderer),
+                geometryBytesBeforeExtinction=bytes,geometryBytesAfterExtinction=geometry.TotalUploadBytes,
+                programs=Enumerable.Range(0,4).Select(i=>new {name=names[i],native=native[i],lit=lit[i],changedBakedLight=blue[i],extinguished=dark[i]})
+            };
+            File.WriteAllText(Path.Combine(destination,"native-world-pixels.json"),
+                System.Text.Json.JsonSerializer.Serialize(report,new System.Text.Json.JsonSerializerOptions {WriteIndented=true}));
+        }
+    }
+
+    [TestMethod]
+    public void DistantUnknownSourceDoesNotDisableNearbyResolvedLightOrFakeAnOccluder()
+    {
+        using var gl=PortableGlContext.Create();using var draw=new NativeProbe();
+        var scene=new CellScene(new(Guid.NewGuid(),0));
+        for(int z=0;z<8;z++)for(int y=0;y<8;y++)for(int x=0;x<8;x++)scene.Observe(new(x,y,z),CellGeometry.Empty);
+        // Real mesh pixels are at Z=2. The block behind this visible surface has no certified
+        // caster provider (e.g. topsoil). Its outgoing ray is nevertheless entirely known air.
+        scene.Observe(new(3,3,1),CellGeometry.Unsupported);
+        using var geometry=new SceneTextureSet();using var lights=new LightTexture();
+        var gp=new GpuSceneData();var lp=new GpuLightData();var registry=new LightRegistry(scene.Capture().World);
+        registry.Upsert(default,new(new(3.5,3.5,4),new(8,2,.5f),EmissionProfile.Steady));
+        WorldGpuFrame Frame(long i) {var snapshot=scene.Capture();gp.Update(snapshot);geometry.Upload(gp);
+            var f=registry.Capture(i,i);lp.Update(f,default);lights.Upload(lp);
+            return new(snapshot,f,default,geometry.RegionTexture,geometry.CellTexture,geometry.GeometryTexture,lights.Texture);}
+        var first=Frame(1);float[] near=draw.Render(first,1);float[] native=draw.Render(first,0);
+        Assert.IsTrue(near[0]>near[2]);Assert.IsTrue(Math.Abs(near[0]-native[0])>.01);
+        LightId far=new(SourceKind.Entity,12,0,0,0,0);
+        registry.Upsert(far,new(new(3.5,3.5,12),new(0,0,400),EmissionProfile.Steady));
+        var partial=Frame(2);
+        CollectionAssert.AreEqual(near,draw.Render(partial,1),"An untraced far source must not discard or recolor measured near light.");
+        CollectionAssert.AreEqual(new float[]{0,1,1},draw.Render(partial,2).Take(3).ToArray(),"Partial transport is reported explicitly.");
+        registry.Remove(default);var onlyUnknown=Frame(3);
+        CollectionAssert.AreEqual(native,draw.Render(onlyUnknown,1),"No proven segment means native fallback, not an invented black shadow.");
+        registry.Remove(far);registry.Upsert(default,new(new(3.5,3.5,4),new(8,2,.5f),EmissionProfile.Steady));
+        scene.Observe(new(3,3,3),CellGeometry.Unsupported);
+        CollectionAssert.AreEqual(native,draw.Render(Frame(4),1),"Unsupported geometry in FRONT remains unresolved, never skipped.");
+    }
+
+    [TestMethod]
+    public void ActualNativePixelsKeepBlockPrecisionAtPositiveAndNegativeWorldOrigins()
+    {
+        using var gl=PortableGlContext.Create();using var draw=new NativeProbe();float[]? reference=null;
+        foreach(CellId anchor in new[]{new CellId(0,0,0),new CellId(-8,-8,-8),new CellId(1000000000,0,-1000000000)})
+        {
+            var scene=new CellScene(new(Guid.NewGuid(),0));
+            for(int z=0;z<8;z++)for(int y=0;y<8;y++)for(int x=0;x<8;x++)
+                scene.Observe(new(anchor.X+x,anchor.Y+y,anchor.Z+z),CellGeometry.Empty);
+            var snapshot=scene.Capture();var gp=new GpuSceneData();gp.Update(snapshot);
+            using var geometry=new SceneTextureSet();geometry.Upload(gp);using var lights=new LightTexture();
+            var registry=new LightRegistry(snapshot.World);var lp=new GpuLightData();
+            registry.Upsert(default,new(anchor.Position+new DVec3(3.5,3.5,4),new(8,2,.5f),EmissionProfile.Steady));
+            var evaluated=registry.Capture(1,1);lp.Update(evaluated,anchor);lights.Upload(lp);
+            var frame=new WorldGpuFrame(snapshot,evaluated,anchor,geometry.RegionTexture,geometry.CellTexture,geometry.GeometryTexture,lights.Texture);
+            for(int index=0;index<4;index++)
+            {
+                var pixel=draw.Render(frame,1,programIndex:index,nativeReference:anchor.Position);
+                reference ??= pixel;
+                CollectionAssert.AreEqual(reference,pixel,"Absolute world coordinates must not round through a float before subtracting the anchor.");
+            }
+        }
+    }
+
+    [TestMethod]
     public void ShaderContractsRejectUnexpectedEditsWithoutSilentlyGuessingAnAlbedo()
     {
         Assert.ThrowsException<InvalidDataException>(()=>WorldShaderSource.Build("chunkopaque","void main(){}","void main(){}",Native("fogandlight.fsh"),"a","b","c","d"));
@@ -126,7 +223,7 @@ public sealed class NativeWorldLightingTests
 
     private sealed class NativeProbe:IDisposable
     {
-        internal readonly int[] Programs=[Program("chunkopaque"),Program("entityanimated")];
+        internal readonly int[] Programs=[Program("chunkopaque"),Program("entityanimated"),Program("chunktopsoil"),Program("standard")];
         private readonly int animation=GL.GenBuffer();
         private readonly int vao=GL.GenVertexArray(),vbo=GL.GenBuffer(),target=GL.GenTexture(),atlas=GL.GenTexture(),fbo=GL.GenFramebuffer();
         internal NativeProbe()
@@ -151,13 +248,13 @@ public sealed class NativeWorldLightingTests
             GL.DrawBuffer(DrawBufferMode.ColorAttachment0);GL.ReadBuffer(ReadBufferMode.ColorAttachment0);
             Assert.AreEqual(FramebufferErrorCode.FramebufferComplete,GL.CheckFramebufferStatus(FramebufferTarget.Framebuffer));
         }
-        internal float[] Render(WorldGpuFrame frame,int mode,bool blueBaked=false,bool entity=false)
+        internal float[] Render(WorldGpuFrame frame,int mode,bool blueBaked=false,bool entity=false,int? programIndex=null,DVec3? nativeReference=null)
         {
             using var state=new RewriteDrawState(1,1);state.Configure();
-            using var bindings=new WorldLightingBinding(Programs,frame,default,Math.Max(1,mode));
-            int p=Programs[entity?1:0];GL.UseProgram(p);
+            using var bindings=new WorldLightingBinding(Programs,frame,nativeReference ?? default,Math.Max(1,mode));
+            int index=programIndex ?? (entity?1:0);int p=Programs[index];GL.UseProgram(p);
             GL.Uniform1(GL.GetUniformLocation(p,"vrtxWorldEnabled"),mode);
-            Set("terrainTex",0);Set("terrainTexLinear",0);Set("entityTex",0);SetFloat("viewDistance",512f);SetFloat("viewDistanceLod0",512f);
+            Set("terrainTex",0);Set("terrainTexLinear",0);Set("entityTex",0);Set("tex",0);Set("tex2dOverlay",0);SetFloat("viewDistance",512f);SetFloat("viewDistanceLod0",512f);
             GL.Uniform3(GL.GetUniformLocation(p,"rgbaAmbientIn"),0f,0f,0f);GL.Uniform3(GL.GetUniformLocation(p,"lightPosition"),0f,0f,1f);
             GL.Uniform4(GL.GetUniformLocation(p,"rgbaFogIn"),0f,0f,0f,1f);
             GL.Uniform1(GL.GetUniformLocation(p,"shadowIntensity"),0f);
@@ -166,15 +263,16 @@ public sealed class NativeWorldLightingTests
             GL.UniformMatrix4(GL.GetUniformLocation(p,"modelViewMatrix"),1,false,view);
             GL.UniformMatrix4(GL.GetUniformLocation(p,"projectionMatrix"),1,false,projection);
             GL.BindVertexArray(vao);
-            if(entity) {
+            if(index is 1 or 3) {
                 GL.VertexAttrib4(2,1f,1f,1f,1f);GL.VertexAttrib1(4,0f);GL.VertexAttribI1(5,0);
                 GL.Uniform4(GL.GetUniformLocation(p,"renderColor"),1f,1f,1f,1f);
+                GL.Uniform4(GL.GetUniformLocation(p,"rgbaTint"),1f,1f,1f,1f);
                 GL.Uniform4(GL.GetUniformLocation(p,"rgbaLightIn"),blueBaked?.05f:.8f,.05f,blueBaked?.8f:.05f,0f);
                 GL.UniformMatrix4(GL.GetUniformLocation(p,"viewMatrix"),1,false,view);
                 GL.UniformMatrix4(GL.GetUniformLocation(p,"modelMatrix"),1,false,Identity);
                 GL.BindBufferBase(BufferRangeTarget.UniformBuffer,0,animation);
             } else {
-                GL.VertexAttribI1(4,0);
+                if(index==2) {GL.VertexAttrib2(4,.25f,.25f);GL.VertexAttribI1(5,0);} else GL.VertexAttribI1(4,0);
                 GL.VertexAttrib4(2,blueBaked?.05f:.8f,.05f,blueBaked?.8f:.05f,0f);
             }
             GL.ActiveTexture(TextureUnit.Texture0);GL.BindTexture(TextureTarget.Texture2D,atlas);

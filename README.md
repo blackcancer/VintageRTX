@@ -2,7 +2,9 @@
 
 Branche de développement : `dev/renderer-rewrite-20260921`. L'ancienne implémentation reste dans `dev/renderer-recovery-20260918` et l'historique Git. Les étapes de la réécriture continuent sur la même branche.
 
-**État : R02, données régionales, émissions configurables et laboratoire d'éclairage direct PBR. Le rendu natif du monde reste actif.** La passe d'image est exercée sur des surfaces contrôlées ; la capture complète de la matière et la composition PBR du monde ne sont pas encore raccordées. Ce build ne doit pas être présenté comme le mod photoréaliste terminé.
+**État : R03, éclairage diffus local raccordé aux shaders natifs du monde.** Le raccordement est activé par défaut et consomme les surfaces réellement rasterisées, sans reconstruction de l'albédo depuis une image déjà éclairée. Terrain opaque, sols herbeux, entités opaques et objets utilisant le shader `standard` sont reliés. Les reflets secondaires, les métaux GGX dans le monde et l'optique de l'eau ne sont pas encore remplacés. Ce build reste expérimental, pas le renderer photoréaliste terminé.
+
+**[R03 — raccordement, commandes, qualification et limites](docs/R03-NATIVE-WORLD.md).** `.vrtxworld status` décrit l'état réel de liaison ; `.vrtxworld off` rétablit la voie native sans retirer le mod. Le laboratoire R02 reste facultatif et distinct du rendu du monde.
 
 ## Objectif
 
@@ -56,6 +58,6 @@ Ne pas mélanger les fichiers `bin` de recovery et de rewrite. Aucun ancien shad
 
 Voir [ARCHITECTURE.md](docs/ARCHITECTURE.md), [LIGHTING.md](docs/LIGHTING.md), [R01-LIGHT-TRANSFER.md](docs/R01-LIGHT-TRANSFER.md) et [R02-DIRECT-IMAGE.md](docs/R02-DIRECT-IMAGE.md). Les acquis des lots antérieurs restent documentés dans leur état historique.
 
-Manquent notamment la capture complète de la matière du jeu, la composition PBR du monde, les géométries animées et alpha-testées, les attaches précises des mains et mèches, la foudre météo réelle, les reflets rugueux/hors écran et la reconstruction temporelle. Le chandelier est encore une source agrégée, sans multiplication supplémentaire du nombre de bougies. Les intensités sont des grandeurs relatives provisoires, non des mesures SI.
+Manquent notamment les normal maps et matériaux physiques complets du monde, la composition PBR multirebond, les géométries animées et alpha-testées, les attaches précises des mains et mèches, la foudre météo réelle, les reflets rugueux/hors écran et la reconstruction temporelle. Le chandelier est encore une source agrégée, sans multiplication supplémentaire du nombre de bougies. Les intensités sont des grandeurs relatives provisoires, non des mesures SI.
 
-La CI ne livre pas d'archive annoncée comme mod final. Une compilation et des requêtes GPU réussies ne certifient ni les pixels d'un monde réel ni les budgets de performances sur le matériel du joueur.
+Les paquets R03 sont des builds expérimentaux installables, jamais annoncés comme un mod final. Une compilation et des requêtes GPU réussies ne certifient ni les pixels d'un monde réel ni les budgets de performances sur le matériel du joueur.

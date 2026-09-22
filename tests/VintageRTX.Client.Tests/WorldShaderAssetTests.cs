@@ -19,7 +19,7 @@ public sealed class WorldShaderAssetTests
         internal Memory()
         {
             string game=Environment.GetEnvironmentVariable("VINTAGE_STORY")!;
-            foreach(string n in new[]{"chunkopaque.vsh","chunkopaque.fsh","entityanimated.vsh","entityanimated.fsh","fogandlight.fsh"})
+            foreach(string n in new[]{"chunkopaque.vsh","chunkopaque.fsh","entityanimated.vsh","entityanimated.fsh","chunktopsoil.vsh","chunktopsoil.fsh","standard.vsh","standard.fsh","fogandlight.fsh"})
                 Add("game:"+(n=="fogandlight.fsh"?"shaderincludes/":"shaders/")+n,
                     File.ReadAllText(Directory.GetFiles(Path.Combine(game,"assets"),n,SearchOption.AllDirectories).Single()));
             foreach(string n in new[]{"scene-query.glsl","light-query.glsl","material-query.glsl","world-lighting.glsl"})
@@ -45,13 +45,14 @@ public sealed class WorldShaderAssetTests
         var catalog=new EmissionAssetCatalog(host.Assets,host.Logger);Assert.IsTrue(catalog.LoadPatched());
         using var observer=new ClientSourceObserver(host.Api,catalog);
         var programs=new Dictionary<int,IShaderProgram>();var handles=new List<int>();int reloads=0;
-        bool failReload=true;
+        bool failReload=true,throwReload=false;
         var shaders=Stub.Create<IShaderAPI>((m,a)=> {
             if(m.Name=="GetProgram")return programs.GetValueOrDefault((int)a[0]!);
             if(m.Name!="ReloadShaders")throw new InvalidOperationException(m.Name);
             reloads++;
+            if(throwReload){throwReload=false;throw new InvalidOperationException("driver reload exception");}
             if(failReload){failReload=false;return false;}
-            foreach(var pair in new[]{("chunkopaque",EnumShaderProgram.Chunkopaque),("entityanimated",EnumShaderProgram.Entityanimated)}) {
+            foreach(var pair in new[]{("chunkopaque",EnumShaderProgram.Chunkopaque),("entityanimated",EnumShaderProgram.Entityanimated),("chunktopsoil",EnumShaderProgram.Chunktopsoil),("standard",EnumShaderProgram.Standard)}) {
                 int handle=DirectImagePass.LinkSources(
                     NativeWorldLightingTests.Expand(memory.Assets["game:shaders/"+pair.Item1+".vsh"].ToText()),
                     NativeWorldLightingTests.Expand(memory.Assets["game:shaders/"+pair.Item1+".fsh"].ToText()));
@@ -61,7 +62,7 @@ public sealed class WorldShaderAssetTests
             }
             return true;
         });
-        var uniform=new DefaultShaderUniforms();uniform.playerReferencePos.Set(4,4,4);
+        var uniform=new DefaultShaderUniforms();uniform.playerReferencePos = new Vintagestory.API.MathTools.Vec3d(4,4,4);
         var render=Stub.Create<IRenderAPI>((m,a)=>m.Name=="get_ShaderUniforms"?uniform:m.Invoke(host.Api.Render,a));
         var api=Stub.Create<ICoreClientAPI>((m,a)=>m.Name switch {
             "get_Assets"=>memory.Manager,"get_Shader"=>shaders,"get_Render"=>render,_=>m.Invoke(host.Api,a)});
@@ -72,6 +73,9 @@ public sealed class WorldShaderAssetTests
             host.HasPlayer=true;renderer.OnRenderFrame(0,EnumRenderStage.Before);
             Assert.IsNotNull(renderer.LastError);Assert.AreEqual(2,reloads);
             Assert.IsFalse(memory.Assets["game:shaders/chunkopaque.fsh"].ToText().Contains(WorldShaderSource.Marker,StringComparison.Ordinal));
+            throwReload=true;renderer.Configure("retry");renderer.OnRenderFrame(0,EnumRenderStage.Before);
+            StringAssert.Contains(renderer.LastError!,"driver reload exception");
+            Assert.IsFalse(memory.Assets["game:shaders/standard.fsh"].ToText().Contains(WorldShaderSource.Marker,StringComparison.Ordinal));
             renderer.Configure("retry");renderer.OnRenderFrame(0,EnumRenderStage.Before);Assert.IsNull(renderer.LastError,renderer.LastError);
             renderer.OnRenderFrame(0,EnumRenderStage.Opaque);StringAssert.Contains(renderer.Describe(),"waiting for coherent");
             host.Tick();observer.OnRenderFrame(0,EnumRenderStage.Before);Assert.IsTrue(observer.TryBorrowWorldFrame(out var frame));
@@ -80,7 +84,7 @@ public sealed class WorldShaderAssetTests
                 GL.GetUniform(p.ProgramId,GL.GetUniformLocation(p.ProgramId,"vrtxWorldEnabled"),out int enabled);Assert.AreEqual(1,enabled);
                 GL.GetUniform(p.ProgramId,GL.GetUniformLocation(p.ProgramId,"lightCount"),out int count);Assert.AreEqual(frame.Lights.Samples.Length,count);
             }
-            host.Renderers.Single(r=>r.RenderOrder==.41).OnRenderFrame(0,EnumRenderStage.Opaque);
+            host.Renderers.Single(r=>r.RenderOrder==.79).OnRenderFrame(0,EnumRenderStage.Opaque);
             foreach(var p in programs.Values) {GL.GetUniform(p.ProgramId,GL.GetUniformLocation(p.ProgramId,"vrtxWorldEnabled"),out int value);Assert.AreEqual(0,value);}
             renderer.Configure("off");renderer.OnRenderFrame(0,EnumRenderStage.Opaque);StringAssert.Contains(renderer.Describe(),"native mode");
             renderer.Configure("coverage");renderer.OnRenderFrame(0,EnumRenderStage.Opaque);
@@ -95,7 +99,7 @@ public sealed class WorldShaderAssetTests
     }
 
     [TestMethod]
-    public void BothNativeProgramsArePatchedOnceAndOwnedBytesAreRestored()
+    public void AllNativeProgramsArePatchedOnceAndOwnedBytesAreRestored()
     {
         var memory=new Memory();var originals=memory.Assets.ToDictionary(p=>p.Key,p=>p.Value.Data);
         var assets=new WorldShaderAssets(memory.Manager);

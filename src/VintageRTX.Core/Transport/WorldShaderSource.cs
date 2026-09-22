@@ -13,7 +13,7 @@ public static class WorldShaderSource
     public static WorldShaderPair Build(string name, string vertex, string fragment,
         string fog, string scene, string lights, string material, string world)
     {
-        if (name is not ("chunkopaque" or "entityanimated")) throw new ArgumentOutOfRangeException(nameof(name));
+        if (name is not ("chunkopaque" or "chunktopsoil" or "entityanimated" or "standard")) throw new ArgumentOutOfRangeException(nameof(name));
         vertex = Normalize(vertex); fragment = Normalize(fragment); fog = Normalize(fog);
         if (vertex.Contains(Marker, StringComparison.Ordinal) || fragment.Contains(Marker, StringComparison.Ordinal))
             throw new InvalidDataException("Native shader was already transformed; use the retained original asset.");
@@ -49,7 +49,7 @@ public static class WorldShaderSource
                 }
                 """);
         }
-        else
+        else if (name == "entityanimated")
         {
             vertex = Once(vertex, "color = renderColor * colorIn * applyLight(rgbaAmbientIn, rgbaLightIn, renderFlags, cameraPos);", """
                 color = renderColor * colorIn * applyLight(rgbaAmbientIn, rgbaLightIn, renderFlags, cameraPos);
@@ -71,6 +71,63 @@ public static class WorldShaderSource
                 }
                 #endif
                 if (glitchFlicker >0 && glitchEffectStrength > 0)
+                """);
+        }
+        else if (name == "chunktopsoil")
+        {
+            vertex = Once(vertex, "rgba = applyLight(rgbaAmbientIn, rgbaLightIn, renderFlags, cameraPos);", """
+                rgba = applyLight(rgbaAmbientIn, rgbaLightIn, renderFlags, cameraPos);
+                vrtxSkyLight = max(rgbaLightIn.a, 0.0) * rgbaAmbientIn;
+                vrtxSurfaceTint = vec4(1.0);
+                vrtxOutgoing = transpose(mat3(modelViewMatrix)) * -cameraPos.xyz;
+                """);
+            fragment = Once(fragment, "vec4 brownSoilColor = texture(terrainTex, uv) * rgba;", """
+                vec4 vrtxRawColor = texture(terrainTex, uv);
+                vec4 brownSoilColor = vrtxRawColor * rgba;
+                """);
+            fragment = Once(fragment,
+                "vec4 grassColor = getColorMapped(terrainTexLinear, texture(terrainTex, uv2 + vec2(blockTextureSize.x * normal.y, 0))) * rgba;", """
+                vec4 vrtxGrass = getColorMapped(terrainTexLinear, texture(terrainTex, uv2 + vec2(blockTextureSize.x * normal.y, 0)));
+                vec4 grassColor = vrtxGrass * rgba;
+                vrtxRawColor = vrtxRawColor * (1.0 - vrtxGrass.a) + vrtxGrass * vrtxGrass.a;
+                """);
+            string original = "outColor = applyFogAndShadowWithNormal(outColor, clamp(fogAmount - 50*murkiness, 0, 1), normal, 1, intensity, worldPos.xyz);";
+            fragment = Once(fragment, original, original + "\n" + """
+                vec3 vrtxLit;
+                if (vrtxResolveWorld(vrtxRawColor.rgb, worldPos.xyz, normal, vrtxOutgoing,
+                    min(vrtxSkyBrightness(), getBrightnessFromNormal(normal, 1.0, intensity)),
+                    renderFlags, glowLevel, vrtxLit)) {
+                    float vrtxFog = clamp(fogAmount - 50*murkiness, 0, 1);
+                    outColor = applySpheresFog(applyFog(vec4(vrtxLit, outColor.a), vrtxFog), vrtxFog, worldPos.xyz);
+                }
+                """);
+        }
+        else // standard: dropped items and native block-entity meshes, NOT inventory/first-person draws
+        {
+            vertex = Once(vertex, "color = rgbaTint * applyLight(rgbaAmbientIn, rgbaLightIn, renderFlags, camPos) * colorIn;", """
+                color = rgbaTint * applyLight(rgbaAmbientIn, rgbaLightIn, renderFlags, camPos) * colorIn;
+                vrtxSkyLight = max(rgbaLightIn.a, 0.0) * rgbaAmbientIn;
+                vrtxSurfaceTint = rgbaTint * colorIn;
+                vrtxOutgoing = transpose(mat3(viewMatrix)) * -camPos.xyz;
+                """);
+            // Capture the exact native atlas/overlay mixture before the native light multiplication.
+            // Preserve the installed overlay's channel order instead of changing its artistic result.
+            fragment = Once(fragment, "if (overlayOpacity > 0)", "vec4 vrtxRawColor;\n\tif (overlayOpacity > 0)");
+            fragment = Once(fragment, "outColor = vec4(\n", "vrtxRawColor = vec4(\n");
+            fragment = Once(fragment, "a1 + a2\n\t\t) * color;", "a1 + a2\n\t\t);\n\t\toutColor = vrtxRawColor * color;");
+            fragment = Once(fragment, "outColor = texture(tex, uv) * color;", "vrtxRawColor = texture(tex, uv);\n\t\toutColor = vrtxRawColor * color;");
+            fragment = Once(fragment, "#if NORMALVIEW == 0", """
+                #if (!defined(ALLOWDEPTHOFFSET) || ALLOWDEPTHOFFSET == 0) && !defined(GLOWSUB)
+                vec3 vrtxLit;
+                if (vrtxResolveWorld(vrtxRawColor.rgb * vrtxSurfaceTint.rgb, worldPos.xyz, normal, vrtxOutgoing,
+                    min(vrtxSkyBrightness(), normalShaded > 0 ? getBrightnessFromNormal(normal, 1.0, 0.45) : 1.0),
+                    renderFlags, glowLevel, vrtxLit)) {
+                    float vrtxFog = murkiness > 0.0 ? 0.0 : fogAmount;
+                    outColor = applySpheresFog(applyFog(vec4(vrtxLit, outColor.a), vrtxFog), vrtxFog, worldPos.xyz);
+                    if (murkiness > 0.0) outColor.rgb = applyUnderwaterEffects(outColor.rgb, murkiness);
+                }
+                #endif
+                #if NORMALVIEW == 0
                 """);
         }
         return new(vertex, fragment);
