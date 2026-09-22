@@ -12,7 +12,7 @@ namespace VintageRTX.Client.Tests;
 public sealed class WorldShaderAssetTests
 {
     public static void Initialize(TestContext? _) { }
-    private sealed class Memory
+    internal sealed class Memory
     {
         internal readonly Dictionary<string,IAsset> Assets = new();
         internal readonly IAssetManager Manager;

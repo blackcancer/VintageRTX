@@ -42,6 +42,23 @@ internal sealed class ClientSourceObserver : IRenderer
     private long epoch, frame, appliedCatalogRevision = -1;
     private int pollOffset, reloadRequested;
     private volatile bool disposed;
+    private volatile bool enabled = true;
+    private bool awaitingFreshTick;
+    internal bool Enabled => enabled;
+    internal void RequestRefresh() => Interlocked.Exchange(ref reloadRequested, 1);
+    // Monotonic within this host, including while rendering is disabled. Used only to reject
+    // invalid runtime A/B comparisons, never to establish geometric visibility.
+    internal long EditRevision => Interlocked.Read(ref editRevision);
+    private long editRevision;
+    internal void SetEnabled(bool value)
+    {
+        if (disposed || enabled == value) return;
+        enabled = value; CurrentFrame = null; awaitingFreshTick = value;
+        if (value && lightGpuFaulted) RequestRefresh();
+        // Leave valid geometry cached and continue accepting bounded dirty notices. Re-enabling
+        // must observe the current entities/edits before any old light frame can be published.
+        lightTexture?.Invalidate();
+    }
     public LightFrame? CurrentFrame { get; private set; }
     public double RenderOrder => 0;
     public int RenderRange => 0;
@@ -56,9 +73,18 @@ internal sealed class ClientSourceObserver : IRenderer
         api.Event.RegisterRenderer(this, EnumRenderStage.Before, "vintagertx-rewrite-source-frame");
     }
     private void BlockChanged(BlockPos p, Block oldBlock)
-    { if (!disposed) edits[new(Interlocked.Read(ref epoch), p.dimension, p.X, p.Y, p.Z)] = 0; }
+    {
+        if (disposed) return;
+        Interlocked.Increment(ref editRevision);
+        if (edits.Count >= 4096) { Interlocked.Exchange(ref reloadRequested, 1); return; }
+        edits[new(Interlocked.Read(ref epoch), p.dimension, p.X, p.Y, p.Z)] = 0;
+    }
     private void ChunkDirty(Vec3i coordinate, IWorldChunk chunk, EnumChunkDirtyReason reason)
-    { if (!disposed) chunkNotices[new(Interlocked.Read(ref epoch), coordinate.X, coordinate.Y, coordinate.Z)] = 0; }
+    {
+        if (disposed) return;
+        if (chunkNotices.Count >= 1024) { Interlocked.Exchange(ref reloadRequested, 1); return; }
+        chunkNotices[new(Interlocked.Read(ref epoch), coordinate.X, coordinate.Y, coordinate.Z)] = 0;
+    }
     private void ReloadAssets() => Interlocked.Exchange(ref reloadRequested, 1);
     private void LeaveWorld()
     {
@@ -70,12 +96,17 @@ internal sealed class ClientSourceObserver : IRenderer
     }
     private void Tick(float dt)
     {
-        if (disposed || api.World?.Player?.Entity is not { Pos: not null } player) return;
+        if (disposed || !enabled || api.World?.Player?.Entity is not { Pos: not null } player) return;
         int dimension = player.Pos.Dimension;
         if (lights is null || lights.World.Dimension != dimension)
         { LeaveWorld(); lights = new(new WorldId(Guid.NewGuid(), dimension)); geometry.Reset(lights.World); }
         if (Interlocked.Exchange(ref reloadRequested, 0) != 0)
-        { geometry.Reset(lights.World); window.Clear(); emissionAssets.InvalidateResolutions(); appliedCatalogRevision = -1; }
+        {
+            // A bounded notification queue may have overflowed while disabled. Invalidate BOTH
+            // geometry and sources; do not retain an emitter whose removal was not queued.
+            var world = lights.World;
+            LeaveWorld(); lights = new(world); geometry.Reset(world);
+        }
         DVec3 camera = new(player.Pos.X, player.Pos.Y, player.Pos.Z);
         window.MoveTo(DiscoveryWindow.At(camera));
         // Broad invalidations precede exact edits: same-tick notices cannot erase a newly observed cell.
@@ -112,7 +143,7 @@ internal sealed class ClientSourceObserver : IRenderer
             if (blockSources.Contains(id)) ObserveBlock((int)id.X, (int)id.Y, (int)id.Z, dimension, captureGeometry: false);
         }
         if (pollOffset > 1000000) pollOffset = 0;
-        ObserveEntities(camera, dimension); geometry.Publish();
+        ObserveEntities(camera, dimension); geometry.Publish(); awaitingFreshTick = false;
     }
     private void SampleRegion(RegionId id, int index)
     { if (lights is not null) ObserveBlock(id.X * 8 + index % 8, id.Y * 8 + index / 8 % 8, id.Z * 8 + index / 64, lights.World.Dimension); }
@@ -213,7 +244,7 @@ internal sealed class ClientSourceObserver : IRenderer
     }
     public void OnRenderFrame(float dt, EnumRenderStage stage)
     {
-        if (disposed || lights is null || stage != EnumRenderStage.Before) return;
+        if (disposed || !enabled || awaitingFreshTick || lights is null || stage != EnumRenderStage.Before) return;
         if (appliedCatalogRevision != emissionAssets.Revision)
         {
             // One owner-thread configuration transaction before the immutable frame is captured.
@@ -245,15 +276,15 @@ internal sealed class ClientSourceObserver : IRenderer
     {
         frame = default;
         SceneTextureSet? scene = geometry.PublishedTextures;
-        if (disposed || CurrentFrame is null || scene?.PublishedFrame is not { } currentScene
+        if (disposed || !enabled || awaitingFreshTick || CurrentFrame is null || scene?.PublishedFrame is not { } currentScene
             || lightTexture?.Ready != true || lightGpuFaulted
             || !ReferenceEquals(lightTexture.PublishedFrame, CurrentFrame)
             || currentScene.World != CurrentFrame.World) return false;
         frame = new(currentScene, CurrentFrame, lightTexture.Anchor, scene.RegionTexture,
-            scene.CellTexture, scene.GeometryTexture, lightTexture.Texture);
+            scene.CellTexture, scene.GeometryTexture, lightTexture.Texture, scene.MaterialTexture);
         return frame.Valid;
     }
-    public string Describe() => $"VintageRTX R03: world-source publication. Sources={lights?.Count ?? 0}, watched blocks={blockSources.Count}, pending regions={window.Pending}, published regions={geometry.Frame?.RegionCount ?? 0}, GPU templates={geometry.GpuTemplateCount}, GPU allocated={geometry.GpuAllocated}, geometry upload={geometry.LastUploadBytes} bytes, GPU light frame={lightTexture?.PublishedFrame?.Frame ?? -1}, light upload={lightTexture?.LastUploadBytes ?? 0} bytes, frame={frame}, emission catalog revision={emissionAssets.Revision}. Static opaque subset only; Animated caster geometry and exact sockets pending.";
+    public string Describe() => $"VintageRTX R03: world-source publication. enabled={enabled}, fresh tick pending={awaitingFreshTick}, Sources={lights?.Count ?? 0}, watched blocks={blockSources.Count}, pending regions={window.Pending}, published regions={geometry.Frame?.RegionCount ?? 0}, GPU templates={geometry.GpuTemplateCount}, GPU allocated={geometry.GpuAllocated}, geometry upload={geometry.LastUploadBytes} bytes, GPU light frame={lightTexture?.PublishedFrame?.Frame ?? -1}, light upload={lightTexture?.LastUploadBytes ?? 0} bytes, frame={frame}, emission catalog revision={emissionAssets.Revision}. Static opaque subset only; Animated caster geometry and exact sockets pending.";
     private void Warn(string? code, Exception exception)
     {
         string key = code ?? "unknown";

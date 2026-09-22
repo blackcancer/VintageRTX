@@ -1,6 +1,8 @@
 using VintageRTX.Core.Geometry;
 using VintageRTX.Core.Lighting;
 using VintageRTX.Core.Scene;
+using VintageRTX.Core.Transport;
+using Vintagestory.API.Datastructures;
 using Vintagestory.API.Client;
 using Vintagestory.API.Common;
 using Vintagestory.API.MathTools;
@@ -14,6 +16,7 @@ namespace VintageRTX.Client;
 internal sealed class ClientGeometryCollector(ICoreClientAPI api) : IDisposable
 {
     private readonly Dictionary<int,CellGeometry> templates=new();
+    private readonly Dictionary<int,(JsonObject? Attributes,WorldSurfaceMaterial? Surface)> surfaces=new();
     private readonly HashSet<string> warnings=new(StringComparer.Ordinal);
     private CellScene? scene;
     private GpuSceneData data=new();
@@ -32,10 +35,10 @@ internal sealed class ClientGeometryCollector(ICoreClientAPI api) : IDisposable
     public void Reset(WorldId world)
     {
         if(scene is null) scene=new(world);else scene.Reset(world);
-        Frame=null;templates.Clear();warnings.Clear();data=new();gpuFaulted=false;
+        Frame=null;templates.Clear();surfaces.Clear();warnings.Clear();data=new();gpuFaulted=false;
     }
     public void Clear()
-    { scene=null;Frame=null;templates.Clear();data=new();gpuFaulted=false; }
+    { scene=null;Frame=null;templates.Clear();surfaces.Clear();data=new();gpuFaulted=false; }
     public void Invalidate(RegionId id)=>scene?.Invalidate(id);
     public void Unknown(BlockPos pos)=>scene?.Observe(new(pos.X,pos.Y,pos.Z),CellGeometry.Unknown);
     public void Observe(BlockPos pos,Block solid,Block fluid)
@@ -58,7 +61,28 @@ internal sealed class ClientGeometryCollector(ICoreClientAPI api) : IDisposable
             }
             templates[solid.Id]=value;
         }
+        // Surface identity is independent of occluder support. Never reinterpret an entity
+        // rasterized in this cell as the block material (only the terrain shader consumes it).
+        if(fluid is not {Id:>0} && solid.Id>0 && value.State is CellState.Mesh or CellState.Unsupported)
+            value=value.WithSurface(ResolveSurface(solid));
         scene.Observe(new(pos.X,pos.Y,pos.Z),value);
+    }
+    private WorldSurfaceMaterial? ResolveSurface(Block block)
+    {
+        if(surfaces.TryGetValue(block.Id,out var cached) && ReferenceEquals(cached.Attributes,block.Attributes))return cached.Surface;
+        WorldSurfaceMaterial? result=null;
+        JsonObject? attribute=block.Attributes?[WorldSurfaceMaterial.Attribute];
+        if(attribute?.Exists==true)
+        {
+            try { result=WorldSurfaceMaterial.Parse(attribute.ToString() ?? throw new FormatException("Missing material JSON.")); }
+            catch(FormatException e)
+            {
+                // An invalid opt-in definition is an explicit NATIVE fallback, not guessed metal.
+                result=new((SurfaceMaterial?)null);string code="material:"+block.Code;
+                if(warnings.Count<64 && warnings.Add(code))api.Logger.Warning("[VintageRTX] {0}: {1}",code,e.Message);
+            }
+        }
+        surfaces[block.Id]=(block.Attributes,result);return result;
     }
     internal static bool SupportedBlock(Block block)
     {

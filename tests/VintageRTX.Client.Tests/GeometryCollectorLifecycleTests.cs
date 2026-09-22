@@ -14,7 +14,7 @@ using Vintagestory.API.MathTools;
 namespace VintageRTX.Client.Tests;
 
 [TestClass, DoNotParallelize]
-public sealed class GeometryCollectorLifecycleTests
+public sealed partial class GeometryCollectorLifecycleTests
 {
     public static void Initialize(TestContext? _) { }
     private static NativeWindow Context()

@@ -16,5 +16,6 @@
     <Content Include="../../src/VintageRTX.Client/assets/vintagertx/shaderincludes/*.glsl" Link="%(Filename)%(Extension)" CopyToOutputDirectory="Always" />
     <Content Include="../../src/VintageRTX.Client/assets/vintagertx/config/emission.json" Link="Fixtures/emission.json" CopyToOutputDirectory="Always" />
     <Content Include="../../examples/emission-assets/assets/vrtxemissionexample/patches/emission.json" Link="Fixtures/example-patch.json" CopyToOutputDirectory="Always" />
+    <Content Include="../../src/VintageRTX.Client/assets/vintagertx/patches/world-materials.json" Link="Fixtures/world-materials.json" CopyToOutputDirectory="Always" />
   </ItemGroup>
 </Project>

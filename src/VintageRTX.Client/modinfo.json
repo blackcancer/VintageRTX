@@ -5,9 +5,9 @@
   "authors": [
     "InitSysRev"
   ],
-  "version": "0.3.1-dev.1",
+  "version": "0.3.3-dev.1",
   "side": "Client",
-  "description": "Native world diffuse ray-lighting bridge with patchable block/entity emission and explicit coverage diagnostics. Experimental: secondary reflections, liquid optics and animated caster geometry are not replaced.",
+  "description": "Experimental native world direct lighting with asset-authored conductors. Global .vrtx on/off/toggle and opt-in .vrtxtest world A/B/A smoke tests. Full reflection, liquid optics, normal maps and animated casters remain pending.",
   "dependencies": {
     "game": "1.22.7"
   }

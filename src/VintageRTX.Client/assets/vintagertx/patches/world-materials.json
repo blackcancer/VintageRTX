@@ -1,0 +1,58 @@
+[
+  {
+    "file": "game:blocktypes/metal/metalblock.json",
+    "side": "client",
+    "op": "addmerge",
+    "path": "/attributesByType",
+    "value": {
+      "metalblock-new-*-copper": {
+        "vintageRtxMaterial": {
+          "kind": "conductor",
+          "roughness": 0.32,
+          "eta": [
+            0.2,
+            0.92,
+            1.1
+          ],
+          "k": [
+            3.91,
+            2.45,
+            2.14
+          ]
+        }
+      },
+      "metalblock-new-*-gold": {
+        "vintageRtxMaterial": {
+          "kind": "conductor",
+          "roughness": 0.26,
+          "eta": [
+            0.14,
+            0.38,
+            1.44
+          ],
+          "k": [
+            3.98,
+            2.39,
+            1.6
+          ]
+        }
+      },
+      "metalblock-new-*-silver": {
+        "vintageRtxMaterial": {
+          "kind": "conductor",
+          "roughness": 0.25,
+          "eta": [
+            0.16,
+            0.12,
+            0.14
+          ],
+          "k": [
+            4.83,
+            3.12,
+            2.15
+          ]
+        }
+      }
+    }
+  }
+]

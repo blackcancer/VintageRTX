@@ -7,13 +7,18 @@ public sealed class GpuSceneData
 {
     public const int RegionSlots=27,CellWidth=64,CellRowsPerRegion=8,GeometryWidth=256;
     public const int MaximumGeometryTexels=1048576;
+    // Low 16 bits retain triangle count; bit 16 opts into the independent surface packet.
+    public const int SurfacePresentBit=1<<16;
     private readonly int[] regions=new int[RegionSlots*4],cells=new int[RegionSlots*512*4];
+    private readonly float[] materials = new float[RegionSlots * 512 * 8];
+    public ReadOnlySpan<float> MaterialData => materials;
     private readonly long[] revisions=new long[RegionSlots];
     private readonly Dictionary<BlockMesh,(int Start,int End)> templates=new();
     private readonly List<float> geometry=new();
     private float[] packedGeometry=new float[GeometryWidth*4];
     private CellSceneFrame? previous;
-    private int[] changed=Array.Empty<int>();
+    private int[] changed=Array.Empty<int>(), materialChanged=Array.Empty<int>();
+    public ReadOnlySpan<int> MaterialChangedRegions=>materialChanged;
     public CellSceneFrame? SourceFrame=>previous;
     public ReadOnlySpan<int> RegionData=>regions;
     public ReadOnlySpan<int> CellData=>cells;
@@ -29,7 +34,7 @@ public sealed class GpuSceneData
     public bool Update(CellSceneFrame frame)
     {
         ArgumentNullException.ThrowIfNull(frame);
-        if(ReferenceEquals(previous,frame)) { changed=Array.Empty<int>();GeometryChanged=false;ResetOccurred=false;return false; }
+        if(ReferenceEquals(previous,frame)) { changed=Array.Empty<int>();materialChanged=Array.Empty<int>();GeometryChanged=false;ResetOccurred=false;return false; }
         CellRegion?[] next=new CellRegion?[RegionSlots];
         foreach(CellRegion region in frame.Regions)
         {
@@ -44,9 +49,10 @@ public sealed class GpuSceneData
         GeometryChanged=ResetOccurred;
         if(ResetOccurred)
         {
-            Array.Clear(regions);Array.Clear(cells);Array.Clear(revisions);templates.Clear();geometry.Clear();
+            Array.Clear(regions);Array.Clear(cells);Array.Clear(materials);Array.Clear(revisions);templates.Clear();geometry.Clear();
         }
-        var writes=new List<int>();
+        var writes=new List<int>();var surfaceWrites=new List<int>();
+        Span<float> surfaceValue=stackalloc float[8];
         for(int slot=0;slot<RegionSlots;slot++)
         {
             int tag=slot*4;CellRegion? r=next[slot];
@@ -57,10 +63,23 @@ public sealed class GpuSceneData
             }
             if(!ResetOccurred && regions[tag+3]!=0 && regions[tag]==r.Id.X && regions[tag+1]==r.Id.Y
                 && regions[tag+2]==r.Id.Z && revisions[slot]==r.Revision) continue;
-            int offset=slot*512*4;
+            int offset=slot*512*4;bool surfaceChanged=false;
             for(int i=0;i<512;i++)
             {
                 CellGeometry cell=r[i];int index=offset+i*4;
+                int surface=(slot*512+i)*8;
+                surfaceValue.Clear();
+                if(cell.Surface is { Material: null }) surfaceValue[3]=-1;
+                if(cell.Surface?.Material is { } material)
+                {
+                    surfaceValue[0]=material.Eta.X;surfaceValue[1]=material.Eta.Y;surfaceValue[2]=material.Eta.Z;
+                    surfaceValue[3]=material.Kind==Transport.SurfaceKind.Conductor?2:1;
+                    surfaceValue[4]=material.K.X;surfaceValue[5]=material.K.Y;surfaceValue[6]=material.K.Z;
+                    surfaceValue[7]=(float)material.Roughness;
+                }
+                Span<float> destination=materials.AsSpan(surface,8);
+                if(!surfaceValue.SequenceEqual(destination))
+                { surfaceValue.CopyTo(destination);surfaceChanged=true; }
                 cells[index]=(int)cell.State;cells[index+1]=0;cells[index+2]=0;cells[index+3]=0;
                 if(cell.Mesh is not null)
                 {
@@ -68,9 +87,11 @@ public sealed class GpuSceneData
                     { address=Append(cell.Mesh);templates.Add(cell.Mesh,address);GeometryChanged=true; }
                     cells[index+1]=address.Start;cells[index+2]=address.End;cells[index+3]=cell.Mesh.TriangleCount;
                 }
+                if(cell.Surface is not null)cells[index+3]|=SurfacePresentBit;
             }
             regions[tag]=r.Id.X;regions[tag+1]=r.Id.Y;regions[tag+2]=r.Id.Z;regions[tag+3]=1;
             revisions[slot]=r.Revision;writes.Add(slot);
+            if(surfaceChanged)surfaceWrites.Add(slot);
         }
         if(GeometryChanged)
         {
@@ -78,7 +99,7 @@ public sealed class GpuSceneData
             int rows=1;while(rows<requiredRows) rows=checked(rows*2);
             packedGeometry=new float[rows*GeometryWidth*4];geometry.CopyTo(packedGeometry);
         }
-        changed=writes.ToArray();previous=frame;
+        changed=writes.ToArray();materialChanged=surfaceWrites.ToArray();previous=frame;
         // Every geometry append belongs to a rewritten region; a reset rewrites all tags.
         // GeometryChanged therefore cannot require an upload without a changed region.
         return changed.Length>0;

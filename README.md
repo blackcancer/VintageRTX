@@ -1,10 +1,19 @@
+## Contrôle global et tests en monde chargé (R05)
+
+` .vrtx on ` / ` .vrtx off ` / ` .vrtx toggle ` contrôlent le mod pendant la session.
+` .vrtxtest start ` lance un smoke test A/B/A dans le monde actuellement chargé.
+La portée, les captures, le lanceur Windows et les limites de validation sont décrits dans
+[docs/R05-CONTROL-INGAME.md](docs/R05-CONTROL-INGAME.md).
+Un résultat de laboratoire ne constitue pas une réussite en jeu. Le lancement local du client
+complet n'a pas abouti à un monde testé ; voir les preuves fournies avec R05.
+
 # VintageRTX — réécriture
 
 Branche de développement : `dev/renderer-rewrite-20260921`. L'ancienne implémentation reste dans `dev/renderer-recovery-20260918` et l'historique Git. Les étapes de la réécriture continuent sur la même branche.
 
-**État : R03, éclairage diffus local raccordé aux shaders natifs du monde.** Le raccordement est activé par défaut et consomme les surfaces réellement rasterisées, sans reconstruction de l'albédo depuis une image déjà éclairée. Terrain opaque, sols herbeux, entités opaques et objets utilisant le shader `standard` sont reliés. Les reflets secondaires, les métaux GGX dans le monde et l'optique de l'eau ne sont pas encore remplacés. Ce build reste expérimental, pas le renderer photoréaliste terminé.
+**État : R04, éclairage diffus local et premiers matériaux conducteurs raccordés au terrain natif.** Le raccordement est activé par défaut et consomme les surfaces réellement rasterisées, sans reconstruction de l'albédo depuis une image déjà éclairée. Terrain opaque, sols herbeux, entités opaques et objets utilisant le shader `standard` sont reliés. Les blocs métalliques homogènes explicitement déclarés dans les assets peuvent maintenant évaluer le conducteur GGX dans `chunkopaque`. Trois presets initiaux couvrent les blocs décoratifs neufs en cuivre, or et argent. Les reflets secondaires et l'optique de l'eau ne sont pas encore remplacés. Ce build reste expérimental, pas le renderer photoréaliste terminé.
 
-**[R03 — raccordement, commandes, qualification et limites](docs/R03-NATIVE-WORLD.md).** `.vrtxworld status` décrit l'état réel de liaison ; `.vrtxworld off` rétablit la voie native sans retirer le mod. Le laboratoire R02 reste facultatif et distinct du rendu du monde.
+**[R04 — matériaux, patches, publication et limites](docs/R04-NATIVE-MATERIALS.md).** Le [raccordement R03](docs/R03-NATIVE-WORLD.md) conserve sa documentation historique. `.vrtxworld status` décrit l'état réel de liaison ; `.vrtxworld off` rétablit la voie native sans retirer le mod. Le laboratoire R02 reste facultatif et distinct du rendu du monde.
 
 ## Objectif
 
@@ -18,7 +27,7 @@ L'adaptateur importe un sous-ensemble **explicitement limité de maillages opaqu
 
 L'émission se configure dans **`assets/vintagertx/config/emission.json`**, modifiable par les patches JSON natifs. Les profils incluent feu/torche, lanterne, lampe à huile, bougie, chandelier, émission stable/pilotée par le moteur et enveloppe de foudre. Les règles utilisent les codes runtime et les variantes, pas le nom supposé d'un fichier. Documentation et exemples : [EMISSION-ASSETS.md](docs/EMISSION-ASSETS.md).
 
-Chaque frame lumineuse est transférée vers sa propre texture RGBA32F, **indépendamment de la disponibilité géométrique**. Les consommateurs doivent utiliser la même frame et la même ancre. Aucun vacillement supplémentaire n'est calculé dans les requêtes GPU. L'éclairage direct diffus et conducteur GGX et les sources sphériques finies sont exercés par le laboratoire ; les reflets complets du monde restent à raccorder.
+Chaque frame lumineuse est transférée vers sa propre texture RGBA32F, **indépendamment de la disponibilité géométrique**. Les consommateurs doivent utiliser la même frame et la même ancre. Aucun vacillement supplémentaire n'est calculé dans les requêtes GPU. L'éclairage direct diffus, conducteur GGX et les sources sphériques finies sont exercés par le laboratoire. Le monde utilise maintenant le diffuseur et, sur les blocs homogènes explicitement déclarés, le conducteur GGX ; les reflets complets de l'environnement restent à raccorder.
 
 Commandes client : `.vrtxemissions` décrit le catalogue final, sa révision et ses erreurs ; `.vrtxrewrite` affiche les sources, régions et compteurs de transfert ; `.vrtxlightlab on` affiche le laboratoire synthétique (désactivé par défaut), avec `off`, `dark` et `lit` pour le masquer ou changer son éclairage. Le laboratoire n'est pas le rendu PBR du monde.
 
@@ -60,4 +69,4 @@ Voir [ARCHITECTURE.md](docs/ARCHITECTURE.md), [LIGHTING.md](docs/LIGHTING.md), [
 
 Manquent notamment les normal maps et matériaux physiques complets du monde, la composition PBR multirebond, les géométries animées et alpha-testées, les attaches précises des mains et mèches, la foudre météo réelle, les reflets rugueux/hors écran et la reconstruction temporelle. Le chandelier est encore une source agrégée, sans multiplication supplémentaire du nombre de bougies. Les intensités sont des grandeurs relatives provisoires, non des mesures SI.
 
-Les paquets R03 sont des builds expérimentaux installables, jamais annoncés comme un mod final. Une compilation et des requêtes GPU réussies ne certifient ni les pixels d'un monde réel ni les budgets de performances sur le matériel du joueur.
+Les paquets R03/R04 sont des builds expérimentaux installables, jamais annoncés comme un mod final. Une compilation et des requêtes GPU réussies ne certifient ni les pixels d'un monde réel ni les budgets de performances sur le matériel du joueur.

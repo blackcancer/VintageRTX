@@ -22,6 +22,11 @@ internal sealed class WorldLightingRenderer : IRenderer
     private long boundFrames, lastLightFrame = -1;
     private string status = "waiting for first world render";
     internal string? LastError { get; private set; }
+    internal int Mode => mode;
+    internal long BoundFrames => boundFrames;
+    internal long LastLightFrame => lastLightFrame;
+    internal bool Installed => shaders.Installed;
+    internal int LastAppliedMode { get; private set; } = -1;
     public double RenderOrder => .36;
     public int RenderRange => 0;
     internal WorldLightingRenderer(ICoreClientAPI api, ClientSourceObserver observer)
@@ -38,21 +43,34 @@ internal sealed class WorldLightingRenderer : IRenderer
         if (disposed) return "VintageRTX world renderer stopped.";
         switch (command.ToLowerInvariant())
         {
-            case "on": mode = 1; LastError = null; break;
+            case "on":
+                if (LastError is not null) { initialized = false; observer.RequestRefresh(); }
+                mode = 1; LastError = null; break;
             case "off": mode = 0; break;
+            case "toggle": mode = mode == 0 ? 1 : 0; LastError = null; break;
             case "coverage": mode = 2; LastError = null; break;
-            case "retry": mode = 1; initialized = false; LastError = null; break;
+            case "retry": mode = 1; initialized = false; LastError = null; observer.RequestRefresh(); break;
             case "status": return Describe();
-            default: return "Utilisation : .vrtxworld on | off | coverage | status | retry";
+            default: return "Utilisation : .vrtxworld on | off | toggle | coverage | status | retry";
         }
+        observer.SetEnabled(mode != 0);
         return Describe();
     }
-    internal string Describe() => $"VintageRTX world R03: mode={mode}, shader assets={shaders.Installed}, "
+    internal void RestoreMode(int previousMode)
+    {
+        if (previousMode is < 0 or > 2) throw new ArgumentOutOfRangeException(nameof(previousMode));
+        if (disposed) return;
+        // Restoring a test's prior preference must not erase a real shader/driver error. Only an
+        // explicit activation/retry command may retry it; a failed test cannot silently clear it.
+        mode = previousMode;
+        observer.SetEnabled(mode != 0 && LastError is null);
+    }
+    internal string Describe() => $"VintageRTX world R04: mode={mode}, last opaque mode={LastAppliedMode}, shader assets={shaders.Installed}, "
         + $"bound frames={boundFrames}, light frame={lastLightFrame}, status={status}, error={LastError ?? "none"}. "
-        + "Native diffuse terrain, topsoil, opaque entities and standard world meshes consume traced local light. "
+        + "Native terrain consumes authored diffuse/conductor materials; dynamic receivers retain diffuse light. "
         + "Coverage: green=resolved, blue=blocked, cyan=partial, magenta=unresolved, orange=unobserved receiver. "
         + "Partial transport keeps measured contributions only; entirely unresolved transport retains native shading. "
-        + "Unsupported caster meshes, emissive surfaces, water and mirror transport retain their native path.";
+        + "Unknown materials, unsupported casters, emissive surfaces, water and secondary reflections retain their native path.";
     public void OnRenderFrame(float dt, EnumRenderStage stage)
     {
         if (disposed) return;
@@ -89,7 +107,9 @@ internal sealed class WorldLightingRenderer : IRenderer
             }
             return;
         }
-        if (stage != EnumRenderStage.Opaque || !shaders.Installed) return;
+        if (stage != EnumRenderStage.Opaque) return;
+        LastAppliedMode = -1;
+        if (!shaders.Installed) return;
         End();
         try
         {
@@ -103,6 +123,7 @@ internal sealed class WorldLightingRenderer : IRenderer
                 handles[i] = program.ProgramId;
             }
             foreach (int handle in handles) WorldLightingBinding.Prime(handle);
+            LastAppliedMode = 0;
             if (mode == 0 || LastError is not null) { status = "native mode"; return; }
             if (api.World?.Player?.Entity is null || !observer.TryBorrowWorldFrame(out WorldGpuFrame frame))
             { status = "waiting for coherent published world/light data (native fallback)"; return; }
@@ -110,6 +131,7 @@ internal sealed class WorldLightingRenderer : IRenderer
             // Do not use the rounded float PlayerPos or assume that the camera is the player's feet.
             var origin = api.Render.ShaderUniforms.playerReferencePos;
             binding = new(handles, frame, new DVec3(origin.X, origin.Y, origin.Z), mode);
+            LastAppliedMode = mode;
             lastLightFrame = frame.Lights.Frame; boundFrames++; status = "native world lighting bound";
         }
         catch (Exception e) { End(); Fail(e); }

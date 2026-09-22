@@ -16,7 +16,7 @@ namespace VintageRTX.Client.Tests;
 
 /// <summary>Memory-backed world/assets with the real patcher and libraries in an isolated game context.</summary>
 [TestClass, DoNotParallelize]
-public sealed class EmissionAssetTests
+public sealed partial class EmissionAssetTests
 {
     private static string game = null!;
     private static AssemblyLoadContext Context => AssemblyLoadContext.GetLoadContext(typeof(EmissionAssetTests).Assembly)!;

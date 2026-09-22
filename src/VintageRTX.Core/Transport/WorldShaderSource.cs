@@ -24,7 +24,7 @@ public static class WorldShaderSource
         string sky = ExtractFunction(fog, "float getBrightnessFromShadowMap()");
         sky = Once(sky, "getBrightnessFromShadowMap()", "vrtxSkyBrightness()");
         sky = Once(sky, "b = clamp(b + blockBrightness, 0, 1);", "b = clamp(b, 0, 1);");
-        string helpers = fragmentDeclarations + "\n" + scene + "\n" + lights + "\n" + material + "\n" + sky + "\n" + world + "\n";
+        string helpers = "#define VRTX_TERRAIN_SURFACE " + (name == "chunkopaque" ? "1\n" : "0\n") + fragmentDeclarations + "\n" + scene + "\n" + lights + "\n" + material + "\n" + sky + "\n" + world + "\n";
         vertex = BeforeMain(vertex, vertexDeclarations);
         fragment = BeforeMain(fragment, helpers);
         if (name == "chunkopaque")
@@ -42,12 +42,17 @@ public static class WorldShaderSource
             string original = "outColor = applyFogAndShadowFromBrightness(texColor, clamp(fogAmount - 50*murkiness, 0, 1), min(b, nb), worldPos.xyz);";
             fragment = Once(fragment, original, original + "\n" + """
                 vec3 vrtxLit;
-                if (vrtxResolveWorld(vrtxRawColor.rgb, worldPos.xyz, normal, vrtxOutgoing,
-                    min(vrtxSkyBrightness(), nb), renderFlags, glowLevel, vrtxLit)) {
+                bool vrtxWorldReplaced = vrtxResolveWorld(vrtxRawColor.rgb, worldPos.xyz, normal, vrtxOutgoing,
+                    min(vrtxSkyBrightness(), nb), renderFlags, glowLevel, vrtxLit);
+                if (vrtxWorldReplaced) {
                     float vrtxFog = clamp(fogAmount - 50*murkiness, 0, 1);
                     outColor = applySpheresFog(applyFog(vec4(vrtxLit, outColor.a), vrtxFog), vrtxFog, worldPos.xyz);
                 }
                 """);
+            // The native artistic highlight must not modulate an already evaluated GGX response.
+            // Unknown/disabled material paths still retain the exact installed reflective effect.
+            fragment = Once(fragment, "if ((renderFlags & ReflectiveBitMask) != 0)",
+                "if ((renderFlags & ReflectiveBitMask) != 0 && !vrtxWorldReplaced)");
         }
         else if (name == "entityanimated")
         {

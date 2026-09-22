@@ -1,5 +1,6 @@
 using VintageRTX.Core.Geometry;
 using VintageRTX.Core.Lighting;
+using VintageRTX.Core.Transport;
 
 namespace VintageRTX.Core.Scene;
 
@@ -16,6 +17,14 @@ public readonly record struct CellGeometry
 {
     public CellState State { get; }
     public BlockMesh? Mesh { get; }
+    /// <summary>Whole-cell surface metadata. Does not certify the cell as an occluder.</summary>
+    public WorldSurfaceMaterial? Surface { get; private init; }
+    public CellGeometry WithSurface(WorldSurfaceMaterial? surface)
+    {
+        if (State is CellState.Unknown or CellState.Empty)
+            throw new InvalidOperationException("A missing surface cannot carry authored material.");
+        return this with { Surface = surface };
+    }
     private CellGeometry(CellState state,BlockMesh? mesh=null) { State=state;Mesh=mesh; }
     public static CellGeometry Unknown => default;
     public static CellGeometry Empty => new(CellState.Empty);

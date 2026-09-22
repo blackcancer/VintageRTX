@@ -11,7 +11,7 @@ using VintageRTX.Core.Transport;
 namespace VintageRTX.Client.Tests;
 
 [TestClass, DoNotParallelize]
-public sealed class NativeWorldLightingTests
+public sealed partial class NativeWorldLightingTests
 {
     private static readonly float[] Identity = [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1];
     private static string Game => Environment.GetEnvironmentVariable("VINTAGE_STORY")
@@ -20,7 +20,7 @@ public sealed class NativeWorldLightingTests
     private static string Own(string name) => File.ReadAllText(Path.Combine(AppContext.BaseDirectory,name));
     private static WorldShaderPair Build(string name) => WorldShaderSource.Build(name,Native(name+".vsh"),Native(name+".fsh"),
         Native("fogandlight.fsh"),Own("scene-query.glsl"),Own("light-query.glsl"),Own("material-query.glsl"),Own("world-lighting.glsl"));
-    internal static string Expand(string source,int ssao=0,int oit=0,int shadows=0,int ssbo=0,int depth=0)
+    internal static string Expand(string source,int ssao=0,int oit=0,int shadows=0,int ssbo=0,int depth=0,int shiny=0)
     {
         // Same single-inclusion rule as the native loader. Inputs are files from the actual game,
         // not hand-written stubs for fog, atlas mapping, warping, animation or SSAO.
@@ -30,10 +30,10 @@ public sealed class NativeWorldLightingTests
         string result=Recurse(source).Replace("\r\n","\n",StringComparison.Ordinal);
         if(ssbo>0)result=result.Replace("#version 330 core","#version 430 core",StringComparison.Ordinal);
         int line=result.IndexOf('\n');
-        return result.Insert(line+1,$"#define SSAOLEVEL {ssao}\n#define USEOIT {oit}\n#define USESSBO {ssbo}\n#define SHADOWQUALITY {shadows}\n#define DYNLIGHTS 1\n#define MAXANIMATEDELEMENTS 1\n#define NORMALVIEW 0\n#define SHINYEFFECT 0\n#define ALLOWDEPTHOFFSET {depth}\n");
+        return result.Insert(line+1,$"#define SSAOLEVEL {ssao}\n#define USEOIT {oit}\n#define USESSBO {ssbo}\n#define SHADOWQUALITY {shadows}\n#define DYNLIGHTS 1\n#define MAXANIMATEDELEMENTS 1\n#define NORMALVIEW 0\n#define SHINYEFFECT {shiny}\n#define ALLOWDEPTHOFFSET {depth}\n");
     }
-    private static int Program(string name,int ssao=0,int oit=0,int shadows=0,int ssbo=0,int depth=0)
-    {var pair=Build(name);return DirectImagePass.LinkSources(Expand(pair.Vertex,ssao,oit,shadows,ssbo,depth),Expand(pair.Fragment,ssao,oit,shadows,ssbo,depth));}
+    private static int Program(string name,int ssao=0,int oit=0,int shadows=0,int ssbo=0,int depth=0,int shiny=0)
+    {var pair=Build(name);return DirectImagePass.LinkSources(Expand(pair.Vertex,ssao,oit,shadows,ssbo,depth,shiny),Expand(pair.Fragment,ssao,oit,shadows,ssbo,depth,shiny));}
 
     [TestMethod]
     public void RealNativeTerrainEntitySsaoAndOitShaderVariantsCompile()
@@ -223,11 +223,12 @@ public sealed class NativeWorldLightingTests
 
     private sealed class NativeProbe:IDisposable
     {
-        internal readonly int[] Programs=[Program("chunkopaque"),Program("entityanimated"),Program("chunktopsoil"),Program("standard")];
+        internal readonly int[] Programs;
         private readonly int animation=GL.GenBuffer();
         private readonly int vao=GL.GenVertexArray(),vbo=GL.GenBuffer(),target=GL.GenTexture(),atlas=GL.GenTexture(),fbo=GL.GenFramebuffer();
-        internal NativeProbe()
+        internal NativeProbe(int shiny=0)
         {
+            Programs=[Program("chunkopaque",shiny:shiny),Program("entityanimated",shiny:shiny),Program("chunktopsoil",shiny:shiny),Program("standard",shiny:shiny)];
             foreach(int p in Programs)WorldLightingBinding.Prime(p);
             GL.BindBuffer(BufferTarget.UniformBuffer,animation);
             GL.BufferData(BufferTarget.UniformBuffer,16*sizeof(float),Identity,BufferUsageHint.StaticDraw);
@@ -248,7 +249,7 @@ public sealed class NativeWorldLightingTests
             GL.DrawBuffer(DrawBufferMode.ColorAttachment0);GL.ReadBuffer(ReadBufferMode.ColorAttachment0);
             Assert.AreEqual(FramebufferErrorCode.FramebufferComplete,GL.CheckFramebufferStatus(FramebufferTarget.Framebuffer));
         }
-        internal float[] Render(WorldGpuFrame frame,int mode,bool blueBaked=false,bool entity=false,int? programIndex=null,DVec3? nativeReference=null)
+        internal float[] Render(WorldGpuFrame frame,int mode,bool blueBaked=false,bool entity=false,int? programIndex=null,DVec3? nativeReference=null,int flags=0)
         {
             using var state=new RewriteDrawState(1,1);state.Configure();
             using var bindings=new WorldLightingBinding(Programs,frame,nativeReference ?? default,Math.Max(1,mode));
@@ -262,7 +263,7 @@ public sealed class NativeWorldLightingTests
             float[] projection=(float[])Identity.Clone();projection[0]=projection[5]=2;projection[10]=.1f;
             GL.UniformMatrix4(GL.GetUniformLocation(p,"modelViewMatrix"),1,false,view);
             GL.UniformMatrix4(GL.GetUniformLocation(p,"projectionMatrix"),1,false,projection);
-            GL.BindVertexArray(vao);
+            GL.BindVertexArray(vao);GL.VertexAttribI1(3,(7<<22)|flags);
             if(index is 1 or 3) {
                 GL.VertexAttrib4(2,1f,1f,1f,1f);GL.VertexAttrib1(4,0f);GL.VertexAttribI1(5,0);
                 GL.Uniform4(GL.GetUniformLocation(p,"renderColor"),1f,1f,1f,1f);

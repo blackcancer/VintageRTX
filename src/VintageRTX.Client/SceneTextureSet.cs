@@ -9,6 +9,7 @@ internal sealed class SceneTextureSet : IDisposable
     public int RegionTexture { get; private set; }
     public int CellTexture { get; private set; }
     public int GeometryTexture { get; private set; }
+    public int MaterialTexture { get; private set; }
     public bool Ready { get; private set; }
     public CellSceneFrame? PublishedFrame { get; private set; }
     public long LastUploadBytes { get; private set; }
@@ -16,6 +17,7 @@ internal sealed class SceneTextureSet : IDisposable
     private readonly IGraphicsStatus status;
     private int geometryHeight, uploadedGeometryTexels;
     private readonly int[] regionScratch = new int[2048], tagScratch = new int[4];
+    private readonly float[] materialScratch = new float[4096];
     private readonly int owner = Environment.CurrentManagedThreadId;
     private bool disposed;
     public SceneTextureSet(IGraphicsStatus? status = null) => this.status = status ?? NativeGraphicsStatus.Instance;
@@ -37,6 +39,7 @@ internal sealed class SceneTextureSet : IDisposable
             RegionTexture = Allocate(PixelInternalFormat.Rgba32i, 27, 1, PixelFormat.RgbaInteger, PixelType.Int);
             CellTexture = Allocate(PixelInternalFormat.Rgba32i, 64, 216, PixelFormat.RgbaInteger, PixelType.Int);
             GeometryTexture = GL.GenTexture();
+            MaterialTexture = Allocate(PixelInternalFormat.Rgba32f, 128, 216, PixelFormat.Rgba, PixelType.Float);
         }
         if (first || data.GeometryChanged)
         {
@@ -68,6 +71,14 @@ internal sealed class SceneTextureSet : IDisposable
             GL.BindTexture(TextureTarget.Texture2D, CellTexture);
             GL.TexSubImage2D(TextureTarget.Texture2D, 0, 0, slot * 8, 64, 8, PixelFormat.RgbaInteger, PixelType.Int, regionScratch);
             LastUploadBytes += 8192;
+            // Publish each region's material with the SAME cell revision, before the ready tag.
+            if(first || data.ResetOccurred || data.MaterialChangedRegions.Contains(slot))
+            {
+                data.MaterialData.Slice(slot * 4096, 4096).CopyTo(materialScratch);
+                GL.BindTexture(TextureTarget.Texture2D, MaterialTexture);
+                GL.TexSubImage2D(TextureTarget.Texture2D, 0, 0, slot * 8, 128, 8, PixelFormat.Rgba, PixelType.Float, materialScratch);
+                LastUploadBytes += 16384;
+            }
             data.RegionData.Slice(slot * 4, 4).CopyTo(tagScratch);
             GL.BindTexture(TextureTarget.Texture2D, RegionTexture);
             GL.TexSubImage2D(TextureTarget.Texture2D, 0, slot, 0, 1, 1, PixelFormat.RgbaInteger, PixelType.Int, tagScratch);
@@ -95,6 +106,7 @@ internal sealed class SceneTextureSet : IDisposable
         if (Environment.CurrentManagedThreadId != owner) throw new InvalidOperationException("GPU disposal requires its render thread.");
         disposed = true; Ready = false; PublishedFrame = null;
         if (RegionTexture != 0) GL.DeleteTexture(RegionTexture); if (CellTexture != 0) GL.DeleteTexture(CellTexture); if (GeometryTexture != 0) GL.DeleteTexture(GeometryTexture);
-        RegionTexture = CellTexture = GeometryTexture = 0;
+        if (MaterialTexture != 0) GL.DeleteTexture(MaterialTexture);
+        RegionTexture = CellTexture = GeometryTexture = MaterialTexture = 0;
     }
 }

@@ -39,7 +39,7 @@ jobs:
           assert c is not None and int(c.get('total','0'))>=164,c.attrib if c is not None else 'missing'
           assert c.get('total')==c.get('executed')==c.get('passed'),c.attrib
           methods=r.findall('.//{*}TestMethod')
-          for name in ('EmissionCatalogTests','EmissionMultiplicityTests','DirectImageReferenceTests'):
+          for name in ('EmissionCatalogTests','EmissionMultiplicityTests','DirectImageReferenceTests','WorldSurfaceMaterialTests','RuntimeToggleTests'):
               assert any(name in t.get('className','') for t in methods),name
           assert len(list(Path('src').rglob('*ModSystem.cs')))==1
           assert not Path('src/VintageRTX').exists()
@@ -110,7 +110,7 @@ jobs:
           assert c is not None and int(c.get('total','0'))>=25
           assert c.get('total')==c.get('executed')==c.get('passed'),c.attrib
           methods=r.findall('.//{*}TestMethod')
-          for name in ('EmissionAssetTests','CandleRuntimeCountTests','DirectImagePassTests','NativeWorldLightingTests','WorldShaderAssetTests'):
+          for name in ('EmissionAssetTests','CandleRuntimeCountTests','DirectImagePassTests','NativeWorldLightingTests','WorldShaderAssetTests','RuntimeControlTests','RewriteBootstrapTests'):
               assert any(name in t.get('className','') for t in methods),name
           evidence=Path(os.environ['VINTAGERTX_DIRECT_EVIDENCE'])
           meta=json.loads((evidence/'direct-image.json').read_text())
@@ -124,6 +124,10 @@ jobs:
               assert p['lit']==p['changedBakedLight'],p['name']
               assert p['extinguished'][:3]==[0,0,0],p['name']
               assert p['lit'][0]>p['lit'][2],p['name']
+          materials=json.loads((Path(os.environ['VINTAGERTX_WORLD_EVIDENCE'])/'native-material-pixels.json').read_text())
+          assert materials['extinguishedRgba'][:3]==[0,0,0]
+          assert materials['geometryBytesBeforeExtinction']==materials['geometryBytesAfterExtinction']
+          assert all(abs(a-b)<=0.0003 for a,b in zip(materials['expectedEncodedRgb'],materials['actualRgba'][:3]))
           print(c.attrib)
           PY
           cmp src/VintageRTX.Client/assets/vintagertx/config/emission.json src/VintageRTX.Client/bin/Release/Mods/vintagertx/assets/vintagertx/config/emission.json

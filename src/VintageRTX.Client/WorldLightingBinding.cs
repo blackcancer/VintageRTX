@@ -6,7 +6,7 @@ using VintageRTX.Core.Scene;
 namespace VintageRTX.Client;
 
 internal readonly record struct WorldGpuFrame(CellSceneFrame Scene, LightFrame Lights, CellId Anchor,
-    int Regions, int Cells, int Geometry, int Emission)
+    int Regions, int Cells, int Geometry, int Emission, int Materials = 0)
 {
     internal bool Valid => Scene is not null && Lights is not null && Scene.World == Lights.World
         && Regions > 0 && Cells > 0 && Geometry > 0 && Emission > 0;
@@ -18,8 +18,8 @@ internal readonly record struct WorldGpuFrame(CellSceneFrame Scene, LightFrame L
 /// </summary>
 internal sealed class WorldLightingBinding : IDisposable
 {
-    private static readonly string[] Samplers = ["regionData", "cellData", "geometryData", "lightData"];
-    private readonly int[] programs, textures = new int[4], samplers = new int[4];
+    private static readonly string[] Samplers = ["regionData", "cellData", "geometryData", "lightData", "vrtxSurfaceData"];
+    private readonly int[] programs, textures = new int[5], samplers = new int[5];
     private readonly int firstUnit;
     private bool disposed;
     internal static bool HasBridge(int program) => program > 0 && GL.IsProgram(program)
@@ -29,14 +29,15 @@ internal sealed class WorldLightingBinding : IDisposable
     internal static void Prime(int program)
     {
         if (!HasBridge(program)) return;
-        int first = GL.GetInteger(GetPName.MaxTextureImageUnits) - 4;
+        int first = GL.GetInteger(GetPName.MaxTextureImageUnits) - 5;
         if (first < 7) throw new NotSupportedException("Insufficient independent native and world samplers.");
         int previous = GL.GetInteger(GetPName.CurrentProgram);
         try
         {
             GL.UseProgram(program);
-            for (int i = 0; i < 4; i++) GL.Uniform1(Required(program, Samplers[i]), first + i);
+            for (int i = 0; i < 5; i++) GL.Uniform1(i < 4 ? Required(program, Samplers[i]) : GL.GetUniformLocation(program, Samplers[i]), first + i);
             GL.Uniform1(Required(program, "vrtxWorldEnabled"), 0);
+            GL.Uniform1(GL.GetUniformLocation(program, "vrtxSurfaceReady"), 0);
         }
         finally { GL.UseProgram(previous); }
     }
@@ -50,17 +51,17 @@ internal sealed class WorldLightingBinding : IDisposable
             throw new InvalidOperationException("All requested native programs must carry the world bridge.");
         int limit = GL.GetInteger(GetPName.MaxTextureImageUnits);
         if (limit < 16) throw new NotSupportedException("World lighting requires 16 fragment texture units.");
-        programs = (int[])programIds.Clone(); firstUnit = limit - 4;
+        programs = (int[])programIds.Clone(); firstUnit = limit - 5;
         int active = GL.GetInteger(GetPName.ActiveTexture), current = GL.GetInteger(GetPName.CurrentProgram);
-        int[] inputs = [frame.Regions, frame.Cells, frame.Geometry, frame.Emission];
-        for (int i = 0; i < 4; i++)
+        int[] inputs = [frame.Regions, frame.Cells, frame.Geometry, frame.Emission, frame.Materials];
+        for (int i = 0; i < 5; i++)
         {
             GL.ActiveTexture((TextureUnit)((int)TextureUnit.Texture0 + firstUnit + i));
             textures[i] = GL.GetInteger(GetPName.TextureBinding2D); samplers[i] = GL.GetInteger(GetPName.SamplerBinding);
         }
         try
         {
-            for (int i = 0; i < 4; i++)
+            for (int i = 0; i < 5; i++)
             {
                 GL.ActiveTexture((TextureUnit)((int)TextureUnit.Texture0 + firstUnit + i));
                 GL.BindTexture(TextureTarget.Texture2D, inputs[i]); GL.BindSampler(firstUnit + i, 0);
@@ -71,10 +72,11 @@ internal sealed class WorldLightingBinding : IDisposable
             foreach (int p in programs)
             {
                 GL.UseProgram(p);
-                for (int i = 0; i < 4; i++) GL.Uniform1(Required(p, Samplers[i]), firstUnit + i);
+                for (int i = 0; i < 5; i++) GL.Uniform1(i < 4 ? Required(p, Samplers[i]) : GL.GetUniformLocation(p, Samplers[i]), firstUnit + i);
                 GL.Uniform3(Required(p, "sceneAnchor"), frame.Anchor.X, frame.Anchor.Y, frame.Anchor.Z);
                 GL.Uniform3(Required(p, "vrtxReferenceOffset"), (float)offset.X, (float)offset.Y, (float)offset.Z);
                 GL.Uniform1(Required(p, "lightCount"), frame.Lights.Samples.Length);
+                GL.Uniform1(GL.GetUniformLocation(p, "vrtxSurfaceReady"), frame.Materials > 0 ? 1 : 0);
                 GL.Uniform1(Required(p, "vrtxFiniteSamples"), finiteSamples);
                 GL.Uniform1(Required(p, "vrtxMaximumCells"), 256);
                 GL.Uniform1(Required(p, "vrtxWorldExposure"), exposure);
@@ -97,7 +99,7 @@ internal sealed class WorldLightingBinding : IDisposable
         int active = GL.GetInteger(GetPName.ActiveTexture), current = GL.GetInteger(GetPName.CurrentProgram);
         foreach (int p in programs)
             if (GL.IsProgram(p)) { GL.UseProgram(p); GL.Uniform1(GL.GetUniformLocation(p, "vrtxWorldEnabled"), 0); }
-        for (int i = 0; i < 4; i++)
+        for (int i = 0; i < 5; i++)
         {
             GL.ActiveTexture((TextureUnit)((int)TextureUnit.Texture0 + firstUnit + i));
             GL.BindTexture(TextureTarget.Texture2D, textures[i]); GL.BindSampler(firstUnit + i, samplers[i]);
